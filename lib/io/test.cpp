@@ -126,18 +126,21 @@ void test_scalar() {
 }
 
 // Every distance between the end of the data and a page boundary, with and without a final
-// separator: the last token must still parse.
+// separator, for read and mapped files: the last token must still parse.
 void test_page_ends() {
-    for (std::size_t size = 4096 - 80; size <= 4096 + 8; ++size)
-        for (const bool newline : {false, true}) {
-            std::string text(size - newline - 10, ' ');
-            text += "4294967295";
-            if (newline) text += '\n';
-            const int fd = file_with(text);
-            io::Reader in(fd);
-            CHECK(in.read<std::uint32_t>() == 4294967295u);
-            ::close(fd);
+    for (const std::size_t page_end : {std::size_t(4096), std::size_t(20 * 4096)}) {
+        for (std::size_t size = page_end - 80; size <= page_end + 8; ++size) {
+            for (const bool newline : {false, true}) {
+                std::string text(size - newline - 10, ' ');
+                text += "4294967295";
+                if (newline) text += '\n';
+                const int fd = file_with(text);
+                io::Reader in(fd);
+                CHECK(in.read<std::uint32_t>() == 4294967295u);
+                ::close(fd);
+            }
         }
+    }
 }
 
 void test_words() {

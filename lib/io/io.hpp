@@ -75,30 +75,37 @@ inline char* allocate(std::size_t capacity) {
     return p;
 }
 
-inline Input read_input(int fd) {
-    std::size_t size = 0, capacity = std::size_t(1) << 16;
+// Reads fd until end of file, or until size bytes for a regular file of that size.
+inline Input read_input(int fd, std::size_t size = std::size_t(-1)) {
+    std::size_t done = 0, capacity = std::size_t(1) << 16;
     char* base = allocate(capacity);
-    for (;;) {
-        if (size == capacity) {
+    while (done < size) {
+        if (done == capacity) {
             char* bigger = allocate(capacity *= 2);
-            std::memcpy(bigger, base, size);
+            std::memcpy(bigger, base, done);
             std::free(base);
             base = bigger;
         }
-        const ssize_t got = ::read(fd, base + size, capacity - size);
-        if (got > 0) size += std::size_t(got);
+        const ssize_t got = ::read(fd, base + done, capacity - done);
+        if (got > 0) done += std::size_t(got);
         else if (got == 0) break;
         else if (errno != EINTR) std::abort();
     }
-    std::memset(base + size, 0, kPadding);
+    std::memset(base + done, 0, kPadding);
     return {base, 0, base};
 }
 
-// Regular files are mapped, other inputs read until end of file.
+// Files over kMapAbove bytes are mapped; smaller ones and other inputs are read, which takes
+// fewer system calls.
+inline constexpr std::size_t kMapAbove = std::size_t(1) << 16;
+
 inline Input open_input(int fd) {
     struct stat st;
-    if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode))
-        if (const Input input = map_input(fd, std::size_t(st.st_size)); input.base) return input;
+    if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+        const auto size = std::size_t(st.st_size);
+        if (size <= kMapAbove) return read_input(fd, size);
+        if (const Input input = map_input(fd, size); input.base) return input;
+    }
     return read_input(fd);
 }
 

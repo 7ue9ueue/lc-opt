@@ -5,8 +5,9 @@ Tests: `lib/io/test.cpp`. In-memory timing: `lib/io/bench.cpp`.
 
 ## Design
 
-- Input: a regular stdin file is mapped, with at least 64 zero bytes after it (the rest of the last
-  page, or one extra anonymous page). Pipes are read into an aligned heap buffer.
+- Input: a regular stdin file over 64 KiB is mapped, with at least 64 zero bytes after it (the rest
+  of the last page, or one extra anonymous page). Smaller files and pipes are read into an aligned
+  heap buffer: fewer system calls for tiny inputs.
 - Token boundaries: a 64-bit mask of whitespace per aligned 64-byte block. The next token clears one
   bit (`tzcnt`, `blsr`), so a read never waits for the previous token's parse.
 - Values: digits right-aligned in 16 bytes with `pshufb`, then `pmaddubsw`, `pmaddwd`, `packusdw`,
@@ -76,6 +77,8 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
   `read()` into a 2 MiB-page buffer +2.2; `read()` into `malloc` +28.
 - `write()` of 10 MB into the output file: 4.9 ms, 20 MB: 9.4 ms. Not reducible from user code
   (see QPoly exploration 011: `fallocate`, mapped output, larger writes all lose).
+- aplusb (tiny input) on CI's EPYC 7763: mapped input 1.2% slower than `scanf`; `fstat`, `lseek`,
+  `mmap`, `munmap` and a page fault against one `read()`. Files up to 64 KiB are now read.
 - Writer state kept out of escaping calls (so GCC can keep it in registers): no change measured.
 
 ## Sources

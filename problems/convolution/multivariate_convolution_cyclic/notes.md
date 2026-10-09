@@ -24,6 +24,13 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   primes (`transform.hpp`, `kernels.hpp`: convolution_mod_1000000007's run-time-modulus copy of
   lib/ntt), CRT straight to residues mod p (Montgomery, p odd), fold j + D_r onto j.
   Coefficients < 2^18 p^2 < 2^78; the primes' product is 2^89.6.
+- One cyclic factor (all long tests): the places are [0, D), so a and b need no clearing and the
+  CRT folds as it reads (c_j + c_{j+D}). One long axis of stride 1 (dim1, dim2_00): the
+  transforms read f and g in place (masked loads, never past the count) and the CRT writes into
+  f. Two long axes (dim2_01, dim2_02): place j = r n_c + i_c with i_q = j mod n_q, so gather and
+  scatter run over blocks of 16 values of i_c, by place inside a block (f's rows stay in L1,
+  places come in runs of 16).
+- The transform's first radix-4 level reads the input directly (no copy pass) when sparse.
 - Split: axes above 48 are long (the shortest dropped while the transform would exceed 2^20);
   a shorter axis joins when a cost model says so (13 ns per transform word, 0.5 ns per element
   and axis length).
@@ -51,8 +58,30 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
     ASan/UBSan: stress 60 rounds and 9 official cases, file and pipe input.
   - Submitted the merged `main.cpp` (#146): [409314](https://judge.yosupo.jp/submission/409314)
     AC 15 ms; [409315](https://judge.yosupo.jp/submission/409315) AC 21 ms (jitter; `lc-amd` 11.9).
-- Next: the transforms are 70% of the dim cases (7 ms of 3 x 2^19). Short path: fuse adjacent
-  axes into one pass, split short axes into coprime factors (10 = 2 x 5: 7 terms instead of 10).
+- 2026-10-09, claude (round 2). `lc-amd`, judge flags; per-case medians of 11 interleaved runs
+  (scratch script over `judge.py`'s runner), base = round 1's `main.cpp`.
+  - Headroom: every dim test has n just below 2^18, so 2n - 1 needs 2^19 whatever the split
+    (dim1_00 as 268 x 977: 268 x 2^11 = 2^19 too). Three primes are the minimum (n p^2 / 4 >
+    2^60). Mod-p DFTs of length n need Rader or Bluestein for the factors 751..15373. So the
+    9 transforms of 2^19 stay; the work was around them.
+  - Direct product for one long axis of stride 1, CRT folded into f (no gather, scatter,
+    fold, a/b copies): dim1_00 11.67 -> 11.04, dim2_00 11.04 -> 10.44 ms.
+  - Folded CRT and no clearing for any single factor: dim2_01 11.83 -> 11.75.
+  - Lost: gather by place order (strided reads of f, via an odometer over i_j = j mod n_j):
+    dim2_01 11.75 -> 12.66, dim2_02 10.82 -> 11.56. Scatter fused into the CRT (point order
+    gather kept): dim2_01 11.88 -> 12.24.
+  - Phase costs on dim2_01 from variants that skip one step (wrong output): gather 0.32, scatter
+    0.34, CRT 0.39 ms.
+  - Narrowing fused into the sparse radix-4 first level (lg 19 is that path): dim1_00
+    11.00 -> 10.87, dim2_01 11.70 -> 11.58.
+  - Blocked place-order gather and scatter for two long axes, branch-free runs: dim2_01
+    11.54 -> 11.30 (an earlier version with a wrap test per point: 11.63).
+  - `judge.py bench`, 21 rounds, slowest 8 cases: 11.76 -> 11.38 ms (ratio 0.961). Slowest
+    case now dim2_01 (11.3); dim1 10.9.
+  - Checks: 24/24 official tests; `stress.py` 400 rounds plus 40 large (lc-intel, gcc 15.2,
+    x86-64-v3); ASan/UBSan: stress 60 rounds and 9 official cases, file and pipe input.
+- Next: dim2_01 still pays ~0.5 ms for gather and scatter over dim1. The transforms (about
+  6.5 ms) are the floor of this method; a gain there needs faster lib/ntt kernels.
 
 ## Sources
 

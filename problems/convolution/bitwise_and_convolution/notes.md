@@ -12,17 +12,23 @@ Next other user: 26 ms (adamant, 400554).
 - c = mu(zeta(a) * zeta(b)): zeta sums over supersets (x[i] += x[i | bit] for each bit), mu
   inverts it (x[i] -= x[i | bit]). 3 transforms of 20 levels and 2^20 products at the maximum.
 - Arithmetic: values in [0, P). One butterfly is add, subtract P, unsigned min (3 vector ops); the
-  inverse is subtract, add P, min. Product: Montgomery (x y 2^-32, 6 `vpmuludq`) then a Shoup
-  multiply by 2^32 mod P (2 `vpmuludq`, 2 `vpmulld`).
-- Layout: rows of 2^17 values (8 rows at N = 20), each row 16 words (one cache line) longer. Each
-  row is read with one `Reader::read` call, then transformed over its own 17 bits; one column pass
-  then does the 3 row bits of a and b, the product and the inverse row bits; each row then gets its
-  inverse 17 bits and is printed with `../fixed_width.hpp`.
+  inverse is subtract, add P, min. Product: Barrett, q = floor(floor(x y / 2^29) floor(2^61 / P)
+  / 2^32) is floor(x y / P) or one less; x y - q P from low words (4 `vpmuludq`, 2 `vpmulld`).
+- Layout: rows of 2^17 values (8 rows at N = 20). Bands of 4 rows are contiguous and read with one
+  `Reader::read` call; each band starts 256 words (16 lines) after the previous one ends, so the 16
+  rows of a and b spread over 4 groups of L1 sets. Each row is transformed over its own 17 bits
+  after its band is parsed; one column pass then does the 3 row bits of a and b, the product and
+  the inverse row bits; each row then gets its inverse 17 bits and is printed with
+  `../fixed_width.hpp`.
 - Inside a row: pieces of 2^12 values (16 KiB, L1), then the row's upper bits. The lane bits use a
   transpose: per 8-vector tile, radix-8 over the vector bits, 8x8 transpose, radix-8 over the former
   lane bits. Forward tiles stay transposed (the product does not care); the inverse restores them.
+  Sweeps do not store the last vector of a group (all bits set: no level changes it).
 - Shorter inputs are padded with zeros to 2^6 values; zeros do not change c_k for k < 2^N.
-- Memory: a and b in one 2 MiB-aligned mapping with `MADV_HUGEPAGE`.
+- Memory: a and b in one mapping, 4 huge pages (`MADV_HUGEPAGE`) and one 4 KiB page below them
+  for the 4 KiB beyond 8 MiB.
+- Runs from `.preinit_array` and ends with `_exit` (as `convolution_mod`): libstdc++'s
+  initializers and exit handlers never run.
 
 ## Measurements
 
@@ -32,12 +38,19 @@ cases (all max_random, N = 20), 21 rounds, 2026-10-09, branch `agent/bitwise_and
 | Program | Median ms | Ratio |
 |---|---|---|
 | v1: rows of 2^15, lane bits by in-register shifts | 14.60 | 1 |
-| v2 (this `main.cpp`): rows of 2^17, transposed tiles, L1 pieces | 13.74 | 0.942 |
+| v2: rows of 2^17, transposed tiles, L1 pieces | 13.74 | 0.942 |
 | floor: same allocation, reads and output, no transforms | 11.91 | 0.874 of v2 |
 
-Phases of v2 inside `main` (ms, max_random_01, 9 runs): parse 3.9, row transforms 0.75, column
-pass 0.55, inverse row transforms 0.40, output 4.6 (`write()` ~3.5), input `munmap` 0.7. About 2.8
-more outside `main` (start, exit). `perf` on `lc-intel` (static build): 40% of cycles in the kernel
+Round 2, same setup, 31 rounds: v2 13.64, v3 (this `main.cpp`) 13.16, ratio 0.968.
+
+Phases of v3 (ms, max_random_01, medians of 61 runs, `CLOCK_MONOTONIC` stamps in a scratch probe;
+wall time from fork to exit): start 0.94, parse 3.68, row transforms 0.73, column pass 0.38,
+inverse row transforms 0.39, format 1.13, `write()` 3.42, input `munmap` 0.68, exit 0.20; total
+11.61. Whole process, 61 interleaved runs: v2 12.13, v3 11.58 (ratio 0.955). The parse phase
+splits into input fault-around 0.96, a/b huge page faults 0.23, parsing 2.47 (measured by
+touching the pages first).
+
+Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
 (`shmem_add_to_page_cache` 11%, `kernel_init_pages` 9.5%, fault-around 6%); user: bulk parser
 23%, transforms 18%, formatter 9%, `memmove` (parser streams, Writer) 3%.
 
@@ -68,14 +81,40 @@ more outside `main` (start, exit). `perf` on `lc-intel` (static build): 40% of c
   12 ms; `lc-amd` measures 13.7 ms for the slowest of the three. Not resubmitted for the outlier.
 - 2026-10-09, claude: resubmitted the same `main.cpp` at the user's request,
   [409186](https://judge.yosupo.jp/submission/409186): AC, 13 ms, 21.2 MiB (2/5).
-- Next: the transforms cost 1.7 ms above the floor (3.9 M vector butterflies and 2^17 vector
-  products at ~3.2 ops per cycle); hand-scheduled kernels might save ~0.3 ms (guess). The rest is
-  I/O: parse (lib/io, #21) and the kernel's page work for the output file and input mapping.
+- 2026-10-09, claude, round 2 (v2 → v3). All on `lc-amd`, judge image and flags; "probe" means
+  whole-process wall time and in-process phase stamps on max_random_01, runs interleaved, medians.
+  - Barrett product: 1.475 ns per vector against 2.67 for Montgomery + Shoup (in memory, 2^12 and
+    2^20 values, checked on 2 * 10^7 random and edge pairs); low word of x y from `vpmulld` instead
+    of shift and blend: 1.375. Kept. Column pass 0.55 → 0.38 ms.
+  - `.preinit_array` start, `_exit`, and a/b in 4 huge pages (the 1 KiB beyond 8 MiB used to fault
+    a fifth): with Barrett, probe total 12.13 → 11.82 ms; Barrett alone 12.09.
+  - Sweeps skip the store of the unchanged last vector: forward rows 0.748 → 0.726 ms, inverse
+    0.402 → 0.393.
+  - Upper radix-8 row sweep per 128 KiB group of pieces (while in L2): forward 0.722 vs 0.726,
+    inverse 0.422 vs 0.393. Dropped.
+  - Read calls (probe, 61 runs, total ms): 16 (one per skewed row) 11.70; 2 (each array
+    contiguous, b 2 KiB after a) 11.57; 4 (bands of 4 rows, 1 KiB skews) 11.61; 8 (bands of 2)
+    11.63; 2 with b 34 KiB after a 11.64. Parse 3.76 → 3.64; the column pass did not suffer
+    (0.37 vs 0.39). Without huge pages (madvise removed; 41 runs): 16 calls 15.66, 2 calls 15.47,
+    4 calls 15.23. Kept bands of 4: equal with huge pages, best without.
+  - Without huge pages a/b fault in 4 KiB pages: parse 4.03 → 7.0 ms, exit 0.21 → 0.68
+    (~1.45 µs per 4 KiB fault on this VM).
+  - Input alone (20.7 MB, every line touched, probe): mapped 1.48 + `munmap` 0.68 ms; `read()`
+    into a reused buffer of 64 KiB 1.87 ms (256 KiB 1.92, 1 MiB 2.39). A streamed Reader would
+    save ~0.25 ms here (input read before any output); that is lib/io's (#21).
+  - Checks: 13/13 official tests; `stress.py` 120 rounds; ASan/UBSan on all 13 official tests,
+    file and pipe input.
+- Next: the transforms (1.5 ms) run at ~3 vector ops per butterfly plus one store per element
+  per pass, near the 4-pipe bound; little left there. Remaining time is lib/io (parse 2.5 ms,
+  input faults and `munmap` 1.6 ms), `../fixed_width.hpp` (1.13 ms) and `write()` (3.4 ms).
 
 ## Sources
 
 - Fast zeta and Mobius transforms over the subset lattice: standard; written from the definition.
 - Montgomery multiplication: P. Montgomery, "Modular multiplication without trial division",
   Math. Comp. 44 (1985). Shoup multiplication by a constant with a precomputed quotient: as used in
-  NTL and in `lib/ntt` (`lib/ntt/notes.md`). Both written here from the formulas.
+  NTL and in `lib/ntt` (`lib/ntt/notes.md`). Both written here from the formulas (round 1).
+- Barrett reduction: P. Barrett, "Implementing the Rivest Shamir and Adleman public key encryption
+  algorithm on a standard digital signal processor", CRYPTO '86. Shift and error bound derived here.
+- `.preinit_array` start: taken from `../convolution_mod/solution.cpp`.
 - 8x8 transpose of 32-bit lanes with unpack/permute2x128: the common AVX2 idiom.

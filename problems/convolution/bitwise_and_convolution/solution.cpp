@@ -1,12 +1,14 @@
 // Bitwise AND convolution mod 998244353: c = mu(zeta(a) * zeta(b)), where zeta(f)[i] sums f over
 // the supersets of i and mu inverts it. One level per index bit; the levels commute.
 //
-// Layout: 2^lg values as rows of 2^block_log values, each row kSkew values longer, so that equal
-// columns of different rows fall in different cache sets (without the skew, the column pass takes
-// 12 times as long). Each row is transformed over its own bits right after it is parsed; one pass
-// over columns then does the row-bit levels of a and b, the product and the inverse row-bit levels;
-// each row then gets its inverse low levels and is printed.
+// Layout: 2^lg values as rows of 2^block_log values. Bands of up to 4 rows are contiguous and read
+// by one Reader call; each band (of a, then of b) starts kBandSkew values after the previous one
+// ends, so equal columns of the rows of a and b spread over 4 groups of cache sets (without a skew,
+// the column pass takes 12 times as long). Each band's rows are transformed over their own bits
+// right after it is parsed; one pass over columns then does the row-bit levels of a and b, the
+// product and the inverse row-bit levels; each row then gets its inverse low levels and is printed.
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include "lib/io/io.hpp"
 #include "../fixed_width.hpp"
@@ -16,13 +18,7 @@ namespace {
 using Vec = __m256i;
 
 constexpr std::uint32_t kP = 998244353;
-constexpr std::uint32_t kPInverse = [] {  // P^-1 mod 2^32
-    std::uint32_t x = kP;
-    for (int i = 0; i < 5; ++i) x *= 2 - kP * x;
-    return x;
-}();
-constexpr std::uint32_t kR = std::uint32_t((std::uint64_t(1) << 32) % kP);
-constexpr std::uint32_t kRQuotient = std::uint32_t((std::uint64_t(kR) << 32) / kP);  // Shoup
+constexpr std::uint32_t kBarrett = std::uint32_t((std::uint64_t(1) << 61) / kP);
 
 #ifndef BLOCK_LOG
 #define BLOCK_LOG 17  // tests set 6 to get several rows from small inputs
@@ -31,8 +27,14 @@ constexpr std::uint32_t kRQuotient = std::uint32_t((std::uint64_t(kR) << 32) / k
 constexpr int kMinLog = 6;  // shorter inputs are padded with zeros (zero entries add nothing)
 constexpr int kBlockLog = BLOCK_LOG;  // row length
 constexpr int kMaxRowsLog = 3;        // N <= 20
+constexpr int kBandRowsLog = 2;       // 2 MiB per Reader call at N = 20
 constexpr int kPieceLog = 12;         // 16 KiB, in L1
-constexpr std::size_t kSkew = 16;     // one cache line
+constexpr std::size_t kBandSkew = 256;  // 16 cache lines: 4 bands spread over 64 L1 sets
+
+// Offset of row r in an array: rows of a band are contiguous, bands are kBandSkew apart.
+constexpr std::size_t row_offset(std::size_t r, std::size_t block) {
+    return r * block + (r >> kBandRowsLog) * kBandSkew;
+}
 
 inline Vec broadcast(std::uint32_t x) { return _mm256_set1_epi32(int(x)); }
 
@@ -89,8 +91,9 @@ void sweep(Vec* f, std::size_t count, std::size_t h) {
 #pragma GCC unroll 8
             for (int k = 0; k < (1 << K); ++k) x[k] = f[j + k * h];
             butterflies<Inverse, K>(x);
+            // x[2^K - 1] has every bit set: no level changes it.
 #pragma GCC unroll 8
-            for (int k = 0; k < (1 << K); ++k) f[j + k * h] = x[k];
+            for (int k = 0; k + 1 < (1 << K); ++k) f[j + k * h] = x[k];
         }
 }
 
@@ -135,87 +138,96 @@ void row_levels(std::uint32_t* row, int bits) {
     if constexpr (!Inverse) sweeps<false>(f, count, piece_bits, bits - 3);
 }
 
-// x y 2^-32 mod P in [0, P), for x, y < P: Montgomery, q = lo(x y) P^-1, x y - q P = 2^32 (hi - hi).
-[[gnu::always_inline]] inline Vec montgomery(Vec x, Vec y) {
+// x y mod P in [0, P), for x, y < P: Barrett. t = floor(x y / 2^29) < 2^31 and
+// q = floor(t floor(2^61 / P) / 2^32) is floor(x y / P) or one less, so x y - q P < 2P < 2^32:
+// the low words of x y and q P give it.
+[[gnu::always_inline]] inline Vec multiply(Vec x, Vec y) {
     const Vec even = _mm256_mul_epu32(x, y);
     const Vec odd = _mm256_mul_epu32(_mm256_srli_epi64(x, 32), _mm256_srli_epi64(y, 32));
-    const Vec q_even = _mm256_mul_epu32(even, broadcast(kPInverse));
-    const Vec q_odd = _mm256_mul_epu32(odd, broadcast(kPInverse));
-    const Vec m_even = _mm256_mul_epu32(q_even, broadcast(kP));
-    const Vec m_odd = _mm256_mul_epu32(q_odd, broadcast(kP));
-    const Vec high = _mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA);  // < P
-    const Vec m_high = _mm256_blend_epi32(_mm256_srli_epi64(m_even, 32), m_odd, 0xAA);  // < P
-    const Vec d = _mm256_sub_epi32(high, m_high);
-    return _mm256_min_epu32(d, _mm256_add_epi32(d, broadcast(kP)));
-}
-
-// x 2^32 mod P in [0, P), for x < P: Shoup, q = floor(x floor(2^32 R / P) / 2^32).
-[[gnu::always_inline]] inline Vec times_r(Vec x) {
-    const Vec q_even = _mm256_srli_epi64(_mm256_mul_epu32(x, broadcast(kRQuotient)), 32);
-    const Vec q_odd = _mm256_mul_epu32(_mm256_srli_epi64(x, 32), broadcast(kRQuotient));
-    const Vec q = _mm256_blend_epi32(q_even, q_odd, 0xAA);
-    const Vec r = _mm256_sub_epi32(_mm256_mullo_epi32(x, broadcast(kR)), _mm256_mullo_epi32(q, broadcast(kP)));
-    return _mm256_min_epu32(r, _mm256_sub_epi32(r, broadcast(kP)));  // r < 2P
+    const Vec q_even = _mm256_mul_epu32(_mm256_srli_epi64(even, 29), broadcast(kBarrett));
+    const Vec q_odd = _mm256_mul_epu32(_mm256_srli_epi64(odd, 29), broadcast(kBarrett));
+    const Vec q = _mm256_blend_epi32(_mm256_srli_epi64(q_even, 32), q_odd, 0xAA);
+    const Vec r = _mm256_sub_epi32(_mm256_mullo_epi32(x, y), _mm256_mullo_epi32(q, broadcast(kP)));
+    return _mm256_min_epu32(r, _mm256_sub_epi32(r, broadcast(kP)));
 }
 
 // Column by column: the row-bit levels of a and b, the product into a, the inverse row-bit levels.
 template <int RowsLog>
-void combine(std::uint32_t* a_rows, const std::uint32_t* b_rows, std::size_t columns, std::size_t stride) {
+void combine(std::uint32_t* a_rows, const std::uint32_t* b_rows, std::size_t block) {
     constexpr int kRows = 1 << RowsLog;
     Vec* a = reinterpret_cast<Vec*>(a_rows);
     const Vec* b = reinterpret_cast<const Vec*>(b_rows);
-    const std::size_t s = stride / 8;
-    for (std::size_t j = 0; j < columns / 8; ++j) {
+    std::size_t row[kRows];  // in vectors
+    for (int r = 0; r < kRows; ++r) row[r] = row_offset(r, block) / 8;
+    for (std::size_t j = 0; j < block / 8; ++j) {
         Vec x[kRows], y[kRows];
 #pragma GCC unroll 8
-        for (int r = 0; r < kRows; ++r) x[r] = a[r * s + j], y[r] = b[r * s + j];
+        for (int r = 0; r < kRows; ++r) x[r] = a[row[r] + j], y[r] = b[row[r] + j];
         butterflies<false, RowsLog>(x);
         butterflies<false, RowsLog>(y);
 #pragma GCC unroll 8
-        for (int r = 0; r < kRows; ++r) x[r] = times_r(montgomery(x[r], y[r]));
+        for (int r = 0; r < kRows; ++r) x[r] = multiply(x[r], y[r]);
         butterflies<true, RowsLog>(x);
 #pragma GCC unroll 8
-        for (int r = 0; r < kRows; ++r) a[r * s + j] = x[r];
+        for (int r = 0; r < kRows; ++r) a[row[r] + j] = x[r];
     }
 }
 
-// Zeroed memory for two arrays of words, 2 MiB aligned, in huge pages where the kernel allows.
+// Zeroed memory for words values: whole 2 MiB pages (huge where the kernel allows), and a remainder
+// under 1 MiB in small pages just below them. At N = 20, 8 MiB + 4 KiB: 4 huge pages and 1 small.
 std::uint32_t* allocate(std::size_t words) {
-    constexpr std::size_t kHuge = std::size_t(1) << 21;
-    const std::size_t bytes = (words * sizeof(std::uint32_t) + kHuge - 1) / kHuge * kHuge + kHuge;
-    void* region = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    constexpr std::size_t kHuge = std::size_t(1) << 21, kPage = 4096;
+    const std::size_t bytes = words * sizeof(std::uint32_t);
+    std::size_t huge = bytes / kHuge * kHuge, small = (bytes - huge + kPage - 1) / kPage * kPage;
+    if (small >= kHuge / 2) huge += kHuge, small = 0;
+    void* region = ::mmap(nullptr, small + huge + kHuge, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (region == MAP_FAILED) std::abort();
-    const std::uintptr_t start = (reinterpret_cast<std::uintptr_t>(region) + kHuge - 1) & ~(kHuge - 1);
+    const std::uintptr_t start = (reinterpret_cast<std::uintptr_t>(region) + small + kHuge - 1) & ~(kHuge - 1);
 #ifdef MADV_HUGEPAGE
-    ::madvise(reinterpret_cast<void*>(start), bytes - kHuge, MADV_HUGEPAGE);
+    ::madvise(reinterpret_cast<void*>(start), huge, MADV_HUGEPAGE);
 #endif
-    return reinterpret_cast<std::uint32_t*>(start);
+    return reinterpret_cast<std::uint32_t*>(start - small);
 }
 
-}  // namespace
-
-int main() {
+void solve() {
     io::Reader in;
     const int n = int(in.read<std::uint32_t>());
     const std::size_t total = std::size_t(1) << n;
     const int lg = std::max(n, kMinLog), block_log = std::min(lg, kBlockLog), rows_log = lg - block_log;
-    const std::size_t block = std::size_t(1) << block_log, stride = block + kSkew, rows = std::size_t(1) << rows_log;
-    std::uint32_t* const a = allocate(2 * rows * stride);
-    std::uint32_t* const b = a + rows * stride;
+    const std::size_t block = std::size_t(1) << block_log, rows = std::size_t(1) << rows_log;
+    const std::size_t band_rows = std::min(rows, std::size_t(1) << kBandRowsLog), bands = rows / band_rows;
+    const std::size_t size = row_offset(rows - 1, block) + block + kBandSkew;  // an array, then a skew
+    std::uint32_t* const a = allocate(2 * size);
+    std::uint32_t* const b = a + size;
     for (std::uint32_t* f : {a, b})
-        for (std::size_t r = 0; r < rows; ++r) {
-            in.read(f + r * stride, std::min(block, total));
-            row_levels<false>(f + r * stride, block_log);
+        for (std::size_t r = 0; r < rows; r += band_rows) {
+            in.read(f + row_offset(r, block), std::min(band_rows * block, total));
+            for (std::size_t k = r; k < r + band_rows; ++k) row_levels<false>(f + row_offset(k, block), block_log);
         }
     switch (rows_log) {
-    case 0: combine<0>(a, b, block, stride); break;
-    case 1: combine<1>(a, b, block, stride); break;
-    case 2: combine<2>(a, b, block, stride); break;
-    default: combine<kMaxRowsLog>(a, b, block, stride); break;
+    case 0: combine<0>(a, b, block); break;
+    case 1: combine<1>(a, b, block); break;
+    case 2: combine<2>(a, b, block); break;
+    default: combine<kMaxRowsLog>(a, b, block); break;
     }
     io::Writer out;
     for (std::size_t r = 0; r < rows; ++r) {
-        row_levels<true>(a + r * stride, block_log);
-        fixed_width::write(out, a + r * stride, std::min(block, total));
+        row_levels<true>(a + row_offset(r, block), block_log);
+        fixed_width::write(out, a + row_offset(r, block), std::min(block, total));
     }
 }
+
+#ifdef __ELF__
+// The program runs from the executable's pre-initializers, before the C++ runtime initializes
+// iostreams and locales (unused here), and _exit skips their teardown.
+void run_early(int, char**, char**) {
+    solve();
+    ::_exit(0);
+}
+
+[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
+#endif
+
+}  // namespace
+
+int main() { solve(); }  // reached only without .preinit_array support

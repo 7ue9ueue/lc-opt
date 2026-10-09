@@ -1,8 +1,9 @@
 // Cyclic convolution of f and g in K variables mod a prime p, axis lengths n_i | p - 1.
-// Short axes (n_i <= kShortLimit): a direct DFT over F_p along the axis (roots of order n_i
-// exist since n_i | p - 1). Long axes: for each point of the short axes' spectrum, the exact
-// product over Z by Kronecker substitution (long axis i padded to 2 n_i - 1), modulo three NTT
-// primes (transform.hpp), the CRT straight to residues mod p, then folded back to cyclic.
+// Short axes: a direct DFT over F_p along the axis (roots of order n_i exist since n_i | p - 1).
+// Long axes: regrouped into the fewest cyclic factors D_r (Chinese remainder theorem); for each
+// point of the short axes' spectrum, the exact product over Z by Kronecker substitution (factor
+// r padded to 2 D_r - 1), modulo three NTT primes (transform.hpp), the CRT straight to residues
+// mod p, then folded back to cyclic.
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -163,8 +164,8 @@ void transform_wide(std::uint32_t* x, std::size_t total, Axis axis, Dft& dft) {
     }
 }
 
-// Rows of m words hold every axis of stride < 8; rows_total is a multiple of 8 m. Eight rows at a time are interleaved into a
-// buffer (word c of row l at 8 c + l) and transformed along those axes there.
+// Rows of m words hold every axis of stride < 8; rows_total is a multiple of 8 m. Eight rows at
+// a time are interleaved into a buffer (word c of row l at 8 c + l) and transformed there.
 void transform_narrow(std::uint32_t* x, std::size_t rows_total, std::size_t m, const std::vector<Axis>& axes,
                       std::vector<Dft>& dfts) {
     std::vector<Lane> buffer(m);

@@ -3,8 +3,8 @@
 N <= 10^6, a_i, b_i < 998244353; print c_k = sum over lcm(i, j) = k of a_i b_j for k = 1..N. 5 s.
 Large tests: N = 10^6 (max_random), near primes and near prime squares; ~20 MB input, 10 MB output.
 
-Record when opened: 37 ms. Best judged: ours, [409219](https://judge.yosupo.jp/submission/409219),
-17 ms.
+Record when opened: 37 ms. Best judged: ours, [409237](https://judge.yosupo.jp/submission/409237),
+16 ms.
 
 ## Design
 
@@ -89,6 +89,10 @@ Record when opened: 37 ms. Best judged: ours, [409219](https://judge.yosupo.jp/s
     total 9.18 -> 8.53. `judge.py bench`, 31 rounds, slowest 3 cases: 16.89 -> 16.29 ms (0.966).
   - Checks: 29/29 official tests (`judge.py test`); `stress.py` 300 rounds (gcc:15.2.0 on
     `lc-intel`); ASan/UBSan (-O1, x86-64-v3) on all 29 tests plus pipe input, tokens equal.
+  - PR #97 merged. CI ratios (EPYC 7763, 3 runs): 0.971, 0.960, 0.958.
+- 2026-10-09, claude: submitted the PR #97 `main.cpp` (v2),
+  [409237](https://judge.yosupo.jp/submission/409237): AC, 16 ms, 22.4 MiB (2/5 for the
+  problem). Was 17 ms.
 
 ## Next
 

@@ -6,7 +6,8 @@
   judge.py bench PROBLEM SOURCE [SOURCE ...] [--rounds N] [--cases K] [--json FILE]
       Time the sources against each other on the K slowest tests. Each round runs every
       source once, in rotated order. A source's score in a round is its slowest case,
-      as on the judge. The first source is the baseline for the ratio column.
+      as on the judge. The ratio column is the median over rounds of each source's time
+      divided by the first source's time in the same round.
 """
 import argparse
 import hashlib
@@ -129,14 +130,16 @@ def bench(args) -> int:
         scores[name][r] = max(scores[name].get(r, 0.0), ms)
     report = {'problem': args.problem, 'cases': chosen, 'rounds': args.rounds,
               'environment': environment(args.sources), 'results': {}}
-    base = statistics.median(scores[names[0]].values())
+    base = scores[names[0]]
     print(f'{report["environment"]["cpu"]}, {args.rounds} rounds, cases: {" ".join(chosen)}')
     print(f'{"source":30} {"median":>9} {"min":>9} {"max":>9} {"ratio":>7}')
     for name, src in zip(names, args.sources):
         values = sorted(scores[name].values())
         median = statistics.median(values)
-        report['results'][src] = {'median_ms': median, 'ratio': median / base, 'rounds_ms': values}
-        print(f'{src[-30:]:30} {median:9.2f} {values[0]:9.2f} {values[-1]:9.2f} {median / base:7.3f}')
+        # Paired ratio: compare within each round, then take the median. Robust to drift.
+        ratio = statistics.median(scores[name][r] / base[r] for r in base)
+        report['results'][src] = {'median_ms': median, 'ratio': ratio, 'rounds_ms': values}
+        print(f'{src[-30:]:30} {median:9.2f} {values[0]:9.2f} {values[-1]:9.2f} {ratio:7.4f}')
     if args.json:
         Path(args.json).write_text(json.dumps(report, indent=2))
     return 0

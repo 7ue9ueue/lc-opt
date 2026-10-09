@@ -288,29 +288,105 @@ struct Crt {
     }
 };
 
+// The group Z_n1 x ... x Z_nk of some axes as the fewest cyclic factors Z_D1 x ... x Z_Dr: the
+// prime-power parts of the n_i, the largest power of each prime to factor 0, the next to factor
+// 1, and so on (Chinese remainder theorem). Point (i_1..i_k) maps to y_r = sum_i i_i w[i][r] mod
+// D_r; a convolution over the axes is one over the factors.
+struct CyclicFactors {
+    std::vector<std::size_t> length;               // D_r
+    std::vector<std::vector<std::size_t>> weight;  // w[i][r]: 1 mod the parts of n_i in D_r, 0 mod the rest
+
+    explicit CyclicFactors(const std::vector<Axis>& axes) : weight(axes.size()) {
+        struct Part {
+            std::size_t prime, power, axis;
+        };
+        std::vector<Part> parts;
+        for (std::size_t i = 0; i < axes.size(); ++i) {
+            std::size_t n = axes[i].length;
+            for (std::size_t q = 2; n > 1; ++q) {
+                if (q * q > n) q = n;
+                if (n % q) continue;
+                std::size_t power = 1;
+                while (n % q == 0) n /= q, power *= q;
+                parts.push_back({q, power, i});
+            }
+        }
+        std::sort(parts.begin(), parts.end(),
+                  [](const Part& x, const Part& y) { return x.prime != y.prime ? x.prime < y.prime : x.power > y.power; });
+        std::vector<std::size_t> factor(parts.size());
+        for (std::size_t j = 0; j < parts.size(); ++j) {
+            factor[j] = j > 0 && parts[j - 1].prime == parts[j].prime ? factor[j - 1] + 1 : 0;
+            if (factor[j] == length.size()) length.push_back(1);
+            length[factor[j]] *= parts[j].power;
+        }
+        for (auto& w : weight) w.assign(length.size(), 0);
+        for (std::size_t j = 0; j < parts.size(); ++j) {
+            const std::size_t d = length[factor[j]], q = parts[j].power, rest = d / q;
+            std::size_t& w = weight[parts[j].axis][factor[j]];
+            w = (w + rest * inverse(rest % q, q)) % d;
+        }
+    }
+
+    // Kronecker extent: the product of 2 D_r - 1.
+    std::size_t padded() const {
+        std::size_t r = 1;
+        for (const std::size_t d : length) r *= 2 * d - 1;
+        return r;
+    }
+
+private:
+    // 1 / x mod m, gcd(x, m) = 1.
+    static std::size_t inverse(std::size_t x, std::size_t m) {
+        std::int64_t a = std::int64_t(x), b = std::int64_t(m), u = 1, v = 0;
+        while (b) {
+            const std::int64_t t = a / b;
+            a -= t * b, u -= t * v;
+            std::swap(a, b), std::swap(u, v);
+        }
+        return std::size_t((u % std::int64_t(m) + std::int64_t(m)) % std::int64_t(m));
+    }
+};
+
+// Transform length for a Kronecker extent.
+int transform_log(std::size_t padded) { return std::max(6, int(std::bit_width(padded - 1))); }
+
 // Products over the long axes, one per point of the short axes' spectrum.
 class LongProduct {
 public:
-    // Long axes in increasing stride; their padded extents 2 n - 1 multiply to at most 2^kMaxLog.
+    // The long axes' cyclic factors have a padded extent of at most 2^kMaxLog.
     LongProduct(const std::vector<Axis>& axes, const Field& field, std::uint32_t scale, Arena& arena)
         : crt_(field, scale), p_(field.p) {
-        offsets_ = {0};
-        places_ = {0};
-        std::size_t padded = 1;
-        for (const Axis& axis : axes) {
-            const std::size_t count = offsets_.size();
-            for (std::size_t i = 1; i < axis.length; ++i)
-                for (std::size_t t = 0; t < count; ++t) {
-                    offsets_.push_back(std::uint32_t(offsets_[t] + i * axis.stride));
-                    places_.push_back(std::uint32_t(places_[t] + i * padded));
-                }
-            folds_.push_back({axis.length, padded});
-            padded *= 2 * axis.length - 1;
+        const CyclicFactors factors(axes);
+        std::vector<std::size_t> place_stride;
+        padded_ = 1;
+        for (const std::size_t d : factors.length) {
+            folds_.push_back({d, padded_});
+            place_stride.push_back(padded_);
+            padded_ *= 2 * d - 1;
         }
-        // Each axis was appended with i outermost: places_ is increasing.
-        extent_ = places_.back() + 1;
-        padded_ = padded;
-        lg_ = std::max(6, int(std::bit_width(padded - 1)));
+        // Every point, axis 0 fastest. After n_i steps along axis i, y_r is back where it started.
+        std::size_t count = 1;
+        for (const Axis& axis : axes) count *= axis.length;
+        std::vector<std::size_t> index(axes.size()), y(factors.length.size());
+        std::size_t offset = 0;
+        for (std::size_t t = 0; t < count; ++t) {
+            std::size_t place = 0;
+            for (std::size_t r = 0; r < y.size(); ++r) place += y[r] * place_stride[r];
+            offsets_.push_back(std::uint32_t(offset));
+            places_.push_back(std::uint32_t(place));
+            extent_ = std::max(extent_, place + 1);
+            for (std::size_t i = 0; i < axes.size(); ++i) {
+                offset += axes[i].stride;
+                for (std::size_t r = 0; r < y.size(); ++r) {
+                    y[r] += factors.weight[i][r];
+                    if (y[r] >= factors.length[r]) y[r] -= factors.length[r];
+                }
+                if (++index[i] < axes[i].length) break;
+                index[i] = 0;
+                offset -= axes[i].length * axes[i].stride;
+            }
+        }
+        lg_ = transform_log(padded_);
         const std::size_t words = (std::size_t(1) << lg_) + multimod::Transform::kPadding;
         a_ = arena.take<std::uint32_t>(words);
         b_ = arena.take<std::uint32_t>(words);
@@ -320,9 +396,7 @@ public:
     }
 
     static std::size_t arena_bytes(const std::vector<Axis>& axes) {
-        std::size_t padded = 1;
-        for (const Axis& axis : axes) padded *= 2 * axis.length - 1;
-        const int lg = std::max(6, int(std::bit_width(padded - 1)));
+        const int lg = transform_log(CyclicFactors(axes).padded());
         const std::size_t words = (std::size_t(1) << lg) + multimod::Transform::kPadding;
         return (2 + kPrimes) * Arena::bytes(words) + Arena::bytes(multimod::Transform::table_words(lg));
     }
@@ -351,10 +425,10 @@ public:
 
 private:
     struct Fold {
-        std::size_t length, stride;  // n and the Kronecker stride of a long axis
+        std::size_t length, stride;  // D and the Kronecker stride of a cyclic factor
     };
 
-    // Index n + j of an axis onto j, for every axis in turn.
+    // Index D + j of a factor onto j, for every factor in turn.
     void fold(std::uint32_t* c) const {
         const std::uint32_t p = p_;
         for (const Fold& fold : folds_) {
@@ -389,21 +463,39 @@ std::vector<std::uint32_t> points(const std::vector<Axis>& axes) {
     return result;
 }
 
-// Long axes: those above kShortLimit, the shortest moved back while the padded product exceeds
-// the transform's limit.
-std::vector<Axis> pick_long(const std::vector<Axis>& axes) {
+// Modeled time of a split into long and short axes, from lc-amd: a product costs about 13 ns per
+// transform word (three primes), a short DFT 0.5 ns per element and axis length (three passes).
+double modeled_cost(const std::vector<Axis>& long_axes, const std::vector<Axis>& axes, std::size_t total) {
+    std::size_t long_total = 1, short_sum = 0;
+    for (const Axis& axis : long_axes) long_total *= axis.length;
+    for (const Axis& axis : axes) short_sum += axis.length;
+    for (const Axis& axis : long_axes) short_sum -= axis.length;
+    const double product =
+        long_axes.empty() ? 0 : 13.0 * double(total / long_total) * double(std::size_t(1) << transform_log(CyclicFactors(long_axes).padded()));
+    return product + 0.5 * double(total) * double(short_sum);
+}
+
+// Long axes: those above kShortLimit, the shortest dropped while the transform would exceed
+// 2^kMaxLog. If any remain, a shorter axis joins them when that lowers the modeled cost.
+std::vector<Axis> pick_long(const std::vector<Axis>& axes, std::size_t total) {
     std::vector<Axis> chosen;
     for (const Axis& axis : axes)
         if (axis.length > kShortLimit) chosen.push_back(axis);
-    const auto padded = [&] {
-        std::size_t r = 1;
-        for (const Axis& axis : chosen) r *= 2 * axis.length - 1;
-        return r;
+    const auto fits = [](const std::vector<Axis>& s) {
+        return CyclicFactors(s).padded() <= (std::size_t(1) << multimod::kMaxLog);
     };
-    while (padded() > (std::size_t(1) << multimod::kMaxLog)) {
+    while (!fits(chosen)) {
         const auto shortest = std::min_element(chosen.begin(), chosen.end(),
                                                [](const Axis& x, const Axis& y) { return x.length < y.length; });
         chosen.erase(shortest);
+    }
+    if (chosen.empty()) return chosen;
+    for (const Axis& axis : axes) {
+        if (std::any_of(chosen.begin(), chosen.end(), [&](const Axis& c) { return c.stride == axis.stride; })) continue;
+        std::vector<Axis> grown = chosen;
+        grown.push_back(axis);
+        std::sort(grown.begin(), grown.end(), [](const Axis& x, const Axis& y) { return x.stride < y.stride; });
+        if (fits(grown) && modeled_cost(grown, axes, total) < modeled_cost(chosen, axes, total)) chosen = grown;
     }
     return chosen;
 }
@@ -419,7 +511,7 @@ void solve() {
         axes.push_back({n, total});
         total *= n;
     }
-    const std::vector<Axis> long_axes = pick_long(axes);
+    const std::vector<Axis> long_axes = pick_long(axes, total);
     std::vector<Axis> short_axes;
     std::size_t short_total = 1;
     for (const Axis& axis : axes)

@@ -132,24 +132,18 @@ inline std::uint64_t block_separators(const char* block) {
     return low | high << 32;
 }
 
-// row[n + 1] moves the first n bytes (1 <= n <= 16) of a 16-byte window to its end and zeroes
-// the rest. Rows for other lengths (-1, 0, 17..32) are all zero with a negative last byte, which
-// marks the token as invalid.
-struct AlignTable {
-    alignas(16) std::int8_t row[34][16];
-};
-
-inline constexpr AlignTable kAlign = [] {
-    AlignTable t{};
-    for (int n = -1; n <= 32; ++n)
-        for (int j = 0; j < 16; ++j)
-            t.row[n + 1][j] = n >= 1 && n <= 16 && j >= 16 - n ? std::int8_t(j - (16 - n)) : std::int8_t(-128);
+// The 16 bytes at kRightAlign[n + 1] move the first n bytes (1 <= n <= 16) of a 16-byte window
+// to its end and zero the rest: byte k + 1 is k - 16 for 16 <= k < 32, else -128. For the other
+// lengths (-1, 0, 17..32) byte 15 of the window is negative, which marks the token as invalid.
+alignas(64) inline constexpr auto kRightAlign = [] {
+    std::array<std::int8_t, 64> t{};
+    for (int k = -1; k < 63; ++k) t[k + 1] = k >= 16 && k < 32 ? std::int8_t(k - 16) : std::int8_t(-128);
     return t;
 }();
 
 // Shuffle control for a token of length index - 1.
-inline __m128i align_row(unsigned index) {
-    return _mm_load_si128(reinterpret_cast<const __m128i*>(kAlign.row[index]));
+inline __m128i align_row(std::size_t index) {
+    return _mm_loadu_si128(reinterpret_cast<const __m128i*>(kRightAlign.data() + index));
 }
 
 // Right-aligned digits (byte values 0..9) -> 4-digit groups, one per dword.
@@ -428,8 +422,9 @@ private:
     // Steps all streams while each has 33 bytes left; returns the values per stream. Works on
     // local copies of the stream state, which stay in registers.
     static std::size_t lockstep(const char* (&streams)[4], const char* const (&end)[4],
-                                std::uint32_t* const (&out)[4], __m256i& flags) {
+                                std::uint32_t* const (&outputs)[4], __m256i& flags) {
         const char* s[4] = {streams[0], streams[1], streams[2], streams[3]};
+        std::uint32_t* const out[4] = {outputs[0], outputs[1], outputs[2], outputs[3]};
         __m256i invalid = flags;
         std::size_t done = 0;
         for (;;) {
@@ -465,8 +460,8 @@ private:
     [[gnu::always_inline]] static __m256i two_tokens(const char*& s, __m256i& invalid) {
         const __m256i bytes = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(s));
         const std::uint32_t sep = separators(bytes);
-        const unsigned first = unsigned(std::countr_zero(sep));             // length of the first token
-        const unsigned second = unsigned(std::countr_zero(sep & (sep - 1)));  // 32 if none
+        const auto first = std::size_t(std::countr_zero(sep));              // length of the first token
+        const auto second = std::size_t(std::countr_zero(sep & (sep - 1)));  // 32 if none
         const __m256i windows =
             _mm256_inserti128_si256(bytes, _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + first + 1)), 1);
         const __m256i rows = _mm256_set_m128i(align_row(second - first), align_row(first + 1));

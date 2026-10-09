@@ -32,9 +32,9 @@ In memory, ns per token, median of 15 rounds of 2^20 tokens (`bench.cpp`):
 
 | Input | read | bulk read | write | bulk write |
 |---|---|---|---|---|
-| uint32 < 998244353 | 2.06 | 2.38 | 3.83 | 2.53 |
-| uint32 0..9 | 1.59 | 2.27 | 3.69 | 2.47 |
-| uint32, random bit length | 2.19 | 2.41 | 3.88 | 2.54 |
+| uint32 < 998244353 | 2.06 | 2.26 | 3.83 | 2.53 |
+| uint32 0..9 | 1.59 | 2.11 | 3.69 | 2.47 |
+| uint32, random bit length | 2.19 | 2.27 | 3.88 | 2.54 |
 | uint64 <= 10^18 | 2.97 | | 5.28 | |
 | uint64 < 10^16 | 2.95 | | 5.26 | |
 | uint64 < 10^16, MaxDigits 16 | 2.27 | | 4.03 | |
@@ -113,6 +113,12 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
 - `write_array` for other integers checking the buffer once per 1024 values: in memory 10-30%
   faster; whole process (1M ints and 1M int64): 1.006. Not kept. In-memory gains in formatting
   do not reach the whole process here; check end to end before keeping a Writer change.
+- Bulk parser, from its compiled loop: the four output pointers were reloaded every step (an array
+  passed by reference; vector stores may alias it) and 32-bit lengths were widened for each table
+  index. Local copies and 64-bit lengths: convolution_mod read floor 0.977. A sliding-window
+  right-align table (row = the 16 bytes at length + 1) instead of 16-byte rows saves the multiply
+  by 16: 0.968 in total; in memory 2.39 → 2.26 ns per token. The loop is now ~11 instructions per
+  token; assembly would save little.
 - Judge harness (`tools/judge.py`): inputs now on tmpfs, as on the judge, instead of the VM's disk
   cache. Same timings for these programs.
 

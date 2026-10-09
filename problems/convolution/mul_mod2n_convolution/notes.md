@@ -2,7 +2,8 @@
 
 c_k = sum over i j = k (mod 2^N) of a_i b_j mod 998244353, N <= 20. 5 s.
 
-Best judged: none yet. Record when opened (issue #30): 81 ms.
+Best judged: ours, 22 ms: [409243](https://judge.yosupo.jp/submission/409243) (current `main.cpp`, #108).
+Record when opened (issue #30): 81 ms.
 
 ## Design
 
@@ -42,6 +43,8 @@ Best judged: none yet. Record when opened (issue #30): 81 ms.
   - Checks: 47/47 official tests (slowest 21.3 ms); `stress.py` 300 rounds N <= 14 plus 10 N = 20
     cases with known answers (a delta factor); ASan/UBSan on all 47 official cases and pipe input.
   - Floor estimate (guess from phases): parse 4.0 + format and write 4.3 + start and exit ~1.5.
+  - Submitted the merged `main.cpp` (#108): [409243](https://judge.yosupo.jp/submission/409243)
+    AC 22 ms, 32.9 MiB.
 - Next: leaf products (about 10% in `perf`; SoA layout, or scalar leaves with pointwise
   products), page faults (`perf` 8% kernel; 21 MB touched), `vpgatherdd` vs scalar loads in the
   permutation, scatter_units' scalar stores.

@@ -3,8 +3,8 @@
 K <= 18 variables, n_l >= 2, N = prod n_l <= 2^18; print f g mod (x_1^n_1, ..., x_K^n_K) mod
 998244353. 10 s.
 
-Record when opened: 117 ms (issue #36). Best judged: ours, 20 ms:
-[409313](https://judge.yosupo.jp/submission/409313) (round 1 `main.cpp`).
+Record when opened: 117 ms (issue #36). Best judged: ours, 14 ms:
+[409322](https://judge.yosupo.jp/submission/409322) (round 2 `main.cpp`).
 
 Official tests (shapes): twos (18 and 17 variables of size 2), threes (14 and 13 variables of
 sizes 2 and 3), max_random (7 variables of 2..10, N = 151200 and 181440), dim1 (N ~ 2^18), dim2,
@@ -136,6 +136,9 @@ no sources read.
   - No gain: ranked pointwise with four ranks and both parities at once (3.66 -> 4.0: 8 sums plus a
     rotated g window spill, the sums go through memory); visiting vectors sorted by (cap, nz) for
     predictable loop bounds (3.15 -> 3.15).
+  - Merged in #153. Submitted: [409322](https://judge.yosupo.jp/submission/409322), AC, 14 ms,
+    14.8 MiB; [409323](https://judge.yosupo.jp/submission/409323), AC, 22 ms (same source; a judge
+    launch spike, see `tools/spikes.py`).
 
 ## Next
 

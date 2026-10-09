@@ -891,11 +891,16 @@ struct Divided {
     hi = text(two_digits(_mm256_unpackhi_epi16(hundreds, rest), k), k);
 }
 
+template <int C, int S>
+[[gnu::always_inline]] inline void gather(__m256i& r, const __m256i (&src)[kSources], const Constants& k) {
+    if constexpr (used(C, S)) r = _mm256_or_si256(r, _mm256_shuffle_epi8(src[S], load(k.chunk[C][S])));
+}
+
 template <int C>
 [[gnu::always_inline]] inline __m256i chunk(const __m256i (&src)[kSources], const Constants& k) {
     __m256i r = _mm256_setzero_si256();
     [&]<int... S>(std::integer_sequence<int, S...>) {
-        ((used(C, S) ? r = _mm256_or_si256(r, _mm256_shuffle_epi8(src[S], load(k.chunk[C][S]))) : r), ...);
+        (gather<C, S>(r, src, k), ...);
     }(std::make_integer_sequence<int, kSources>{});
     return r;
 }

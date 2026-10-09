@@ -180,14 +180,16 @@ void graded(const std::vector<u32>& n, std::size_t size, const u32* f, const u32
 // a coefficient of total degree r carries t^r, products are truncated at t^R, R = sum (n_l - 1).
 // Evaluation reduces x^d with d >= n_l to lower powers, so a term that wrapped sits at a rank above
 // its position's degree and is never read. Ranks of a point p are at most cap(p), the sum of n_l - 1
-// over its nonzero coordinates; position s reads points whose nonzero coordinates are nonzero in s.
+// over its nonzero coordinates; position s reads only points whose nonzero coordinates are nonzero
+// in s, so rank r is needed only where r >= nz(p), the count of nonzero coordinates.
 //
-// Layout: three variables of size 2 are moved to the bottom; with the rest in input order this is
-// our digit order. The 8 lanes of a vector are the three bottom variables (evaluated in registers).
-// The bottom b variables (Nb positions) form a block whose R + 1 rank planes fit L2; the top ones
-// are evaluated first, per rank within the top part ("top rank"), into planes [t][top rank][Nb].
+// Digit order: three variables of size 2 first (the 8 lanes of a vector, evaluated in registers),
+// then the others in input order. The lowest b variables (Nb positions) form a block whose R + 1
+// rank planes for f and g fit L2. For each point t of the top variables, the block is evaluated
+// at t directly from the rows of f and g it depends on, multiplied, and interpolated back into
+// the rows of c that depend on t.
 
-constexpr int kMaxRank = 24;  // R <= 22 for N <= 2^18 (3^10 * 4)
+constexpr int kMaxRank = 24;  // R <= 21 for N <= 2^18 with three n_l = 2 (3^9 * 8)
 
 alignas(32) constexpr u32 kPopcountMask[4][8] = {
     {~0u, 0, 0, 0, 0, 0, 0, 0},
@@ -226,153 +228,207 @@ void variable_transform(Vec* x, std::size_t count, u32 n, std::size_t stride) {
     }
 }
 
-struct Digits {
-    std::vector<u32> origin;            // index in the input's order
-    std::vector<std::uint8_t> sum;      // coefficient side: total degree
-    std::vector<std::uint8_t> cap, nz;  // point side: sum of n - 1 and count over nonzero digits
-};
-
-// Positions of the variables [first, last) of `order`, the first varying fastest.
-Digits digits(const std::vector<u32>& n, const std::vector<u32>& stride, const std::vector<u32>& order,
-              std::size_t first, std::size_t last) {
-    std::size_t count = 1;
-    for (std::size_t l = first; l < last; ++l) count *= n[order[l]];
-    Digits d;
-    d.origin.resize(count), d.sum.resize(count), d.cap.resize(count), d.nz.resize(count);
-    std::vector<u32> digit(last - first + 1, 0);
-    u32 origin = 0, sum = 0, cap = 0, nz = 0;
-    for (std::size_t i = 0; i < count; ++i) {
-        d.origin[i] = origin, d.sum[i] = std::uint8_t(sum), d.cap[i] = std::uint8_t(cap), d.nz[i] = std::uint8_t(nz);
-        for (std::size_t j = 0; j < last - first; ++j) {
-            const u32 v = order[first + j], size = n[v];
-            if (++digit[j] < size) {
-                origin += stride[v], ++sum;
-                if (digit[j] == 1) cap += size - 1, ++nz;
-                break;
-            }
-            digit[j] = 0;
-            origin -= (size - 1) * stride[v], sum -= size - 1, cap -= size - 1, --nz;
-        }
-    }
-    return d;
+// dst +-= src over `count` vectors.
+void add_row(Vec* dst, const Vec* src, std::size_t count, bool negative) {
+    if (negative)
+        for (std::size_t i = 0; i < count; ++i) dst[i] = sub_mod(dst[i], load(src + i));
+    else
+        for (std::size_t i = 0; i < count; ++i) dst[i] = add_mod(dst[i], load(src + i));
 }
+
+// One row of a top evaluation or interpolation: row index, sign, total degree of the row's digits.
+struct Term {
+    u32 row;
+    bool negative;
+    std::uint8_t rank;
+};
 
 class Ranked {
 public:
     static bool fits(const std::vector<u32>& n) {
-        return std::ranges::count(n, 2u) >= 3 && std::ranges::all_of(n, [](u32 x) { return x <= 3; });
+        int rank = 0;
+        for (u32 x : n) rank += int(x) - 1;
+        return std::ranges::count(n, 2u) >= 3 && std::ranges::all_of(n, [](u32 x) { return x <= 3; }) &&
+               rank < kMaxRank;
     }
 
     Ranked(const std::vector<u32>& n, std::size_t size) : size_(size) {
         const std::size_t k = n.size();
-        std::vector<u32> stride(k);
-        for (std::size_t l = 0, s = 1; l < k; s *= n[l], ++l) stride[l] = u32(s);
-        for (std::size_t l = 0; l < k && order_.size() < 3; ++l)
-            if (n[l] == 2) order_.push_back(u32(l));
+        std::vector<u32> order;
+        for (std::size_t l = 0; l < k && order.size() < 3; ++l)
+            if (n[l] == 2) order.push_back(u32(l));
         for (std::size_t l = 0; l < k; ++l)
-            if (std::ranges::find(order_, u32(l)) == order_.end()) order_.push_back(u32(l));
-        for (u32 x : n) rank_ += int(x) - 1;
-        for (u32 x : n) threes_ += x == 3;
+            if (std::ranges::find(order, u32(l)) == order.end()) order.push_back(u32(l));
+        for (u32 l : order) size_of_.push_back(n[l]);
+        for (u32 x : n) rank_ += int(x) - 1, threes_ += x == 3;
 
-        // Bottom variables: as many as fit the block.
         bottom_ = 3, bottom_size_ = 8;
-        while (bottom_ < k && 8 * std::size_t(rank_ + 1) * bottom_size_ * n[order_[bottom_]] <= BLOCK_BYTES)
-            bottom_size_ *= n[order_[bottom_++]];
+        while (bottom_ < k && 8 * std::size_t(rank_ + 1) * bottom_size_ * size_of_[bottom_] <= BLOCK_BYTES)
+            bottom_size_ *= size_of_[bottom_++];
         top_size_ = size_ / bottom_size_;
-        for (std::size_t l = bottom_; l < k; ++l) top_rank_ += int(n[order_[l]]) - 1;
-        for (std::size_t l = 0; l < k; ++l) size_of_.push_back(n[order_[l]]);
+        int top_rank = 0;
+        for (std::size_t l = bottom_; l < k; ++l) top_rank += int(size_of_[l]) - 1;
+        planes_ = top_rank + 1;
 
-        bottom_digits_ = digits(n, stride, order_, 0, bottom_);
-        vector_digits_ = digits(n, stride, order_, 3, bottom_);
-        top_digits_ = digits(n, stride, order_, bottom_, k);
-        planes_ = std::size_t(top_rank_ + 1);
-        chunk_ = 8;
-        for (std::size_t w : {64, 32, 16})
-            if (bottom_size_ % w == 0) {
-                chunk_ = w;
-                break;
+        // Position in our order -> input index, unless the orders agree.
+        if (!std::ranges::is_sorted(order)) {
+            std::vector<u32> stride(k);
+            for (std::size_t l = 0, s = 1; l < k; s *= n[l], ++l) stride[l] = u32(s);
+            origin_.resize(size_);
+            std::vector<u32> digit(k, 0);
+            u32 origin = 0;
+            for (std::size_t i = 0; i < size_; ++i) {
+                origin_[i] = origin;
+                for (std::size_t j = 0; j < k; ++j) {
+                    const u32 v = order[j];
+                    if (++digit[j] < n[v]) {
+                        origin += stride[v];
+                        break;
+                    }
+                    digit[j] = 0, origin -= (n[v] - 1) * stride[v];
+                }
             }
+        }
+        describe_vectors();
+        describe_top();
     }
 
     void multiply(const u32* f, const u32* g, u32* c) {
-        u32* ef = allocate<u32>(size_ * planes_);
-        u32* eg = allocate<u32>(size_ * planes_);
-        evaluate_top(f, ef);
-        evaluate_top(g, eg);
-        const std::size_t vectors = bottom_size_ / 8, plane_vectors = vectors;
-        Vec* a = allocate<Vec>(std::size_t(rank_ + 1) * plane_vectors);
-        Vec* b = allocate<Vec>(std::size_t(rank_ + 1) * plane_vectors);
+        const u32* fo = to_our_order(f);
+        const u32* go = to_our_order(g);
+        u32* co = origin_.empty() ? c : allocate<u32>(size_);
+        const std::size_t vectors = bottom_size_ / 8, plane = std::size_t(planes_) * vectors;
+        Vec* top_f = allocate<Vec>(plane);
+        Vec* top_g = allocate<Vec>(plane);
+        Vec* a = allocate<Vec>(std::size_t(rank_ + 1) * vectors);
+        Vec* b = allocate<Vec>(std::size_t(rank_ + 1) * vectors);
         for (std::size_t t = 0; t < top_size_; ++t) {
-            u32* block_f = ef + t * planes_ * bottom_size_;
-            spread(block_f, a);
-            spread(eg + t * planes_ * bottom_size_, b);
-            for (int r = 0; r <= rank_; ++r) {
-                bottom_transform<false>(a + r * plane_vectors);
-                bottom_transform<false>(b + r * plane_vectors);
+            evaluate_top(fo, t, top_f);
+            evaluate_top(go, t, top_g);
+            if (const int z = top_zeros3_[t]) {  // the interpolation below takes 2 F0 for each
+                const Vec factor = all(montgomery(power_mod(2, z)));
+                for (std::size_t i = 0; i < plane; ++i) top_f[i] = montgomery_multiply(top_f[i], factor);
             }
-            pointwise(a, b, top_digits_.cap[t], top_digits_.nz[t]);
-            for (int r = 0; r <= rank_; ++r) bottom_transform<true>(a + r * plane_vectors);
-            gather(a, block_f);
+            spread(top_f, a);
+            spread(top_g, b);
+            for (int r = 0; r <= rank_; ++r) {
+                bottom_transform<false>(a + r * vectors);
+                bottom_transform<false>(b + r * vectors);
+            }
+            pointwise(a, b, top_cap_[t], top_nz_[t]);
+            for (int r = 0; r <= rank_; ++r) bottom_transform<true>(a + r * vectors);
+            gather(a, top_f);
+            interpolate_top(top_f, t, co);
         }
-        interpolate_top(ef, c);
+        // Scale: the products carry 2^-32, interpolation along each variable of size 3 a factor 2.
+        const Vec scale = all(montgomery(multiply_mod(power_mod(2, 32), power_mod(inverse_mod(2), threes_))));
+        for (std::size_t i = 0; i < size_; i += 8) store(co + i, montgomery_multiply(load(co + i), scale));
+        if (!origin_.empty())
+            for (std::size_t i = 0; i < size_; ++i) c[origin_[i]] = co[i];
     }
 
 private:
-    // Top variables of x (input order) -> planes [t][top rank][Nb], t a top point.
-    void evaluate_top(const u32* x, u32* planes) {
-        const std::size_t w = chunk_;
-        Vec* buffer = allocate_buffer();
-        for (std::size_t c0 = 0; c0 < bottom_size_; c0 += w)
-            for (std::size_t rho = 0; rho < planes_; ++rho) {
-                u32* row = reinterpret_cast<u32*>(buffer);
-                for (std::size_t t = 0; t < top_size_; ++t, row += w) {
-                    if (top_digits_.sum[t] != rho) {
-                        std::memset(row, 0, w * sizeof(u32));
-                        continue;
-                    }
-                    const u32* src = x + top_digits_.origin[t];
-                    for (std::size_t i = 0; i < w; ++i) row[i] = src[bottom_digits_.origin[c0 + i]];
+    const u32* to_our_order(const u32* x) const {
+        if (origin_.empty()) return x;
+        u32* y = allocate<u32>(size_);
+        for (std::size_t i = 0; i < size_; ++i) y[i] = x[origin_[i]];
+        return y;
+    }
+
+    // Digit sum (coefficient side), cap and nz (point side) of each vector of the block.
+    void describe_vectors() {
+        const std::size_t count = bottom_size_ / 8;
+        vector_sum_.resize(count), vector_cap_.resize(count), vector_nz_.resize(count);
+        std::vector<u32> digit(bottom_, 0);
+        int sum = 0, cap = 0, nz = 0;
+        for (std::size_t u = 0; u < count; ++u) {
+            vector_sum_[u] = std::uint8_t(sum), vector_cap_[u] = std::uint8_t(cap), vector_nz_[u] = std::uint8_t(nz);
+            for (std::size_t l = 3; l < bottom_; ++l) {
+                const int n = int(size_of_[l]);
+                if (++digit[l] < u32(n)) {
+                    ++sum;
+                    if (digit[l] == 1) cap += n - 1, ++nz;
+                    break;
                 }
-                top_transform<false>(buffer);
-                row = reinterpret_cast<u32*>(buffer);
-                for (std::size_t t = 0; t < top_size_; ++t, row += w)
-                    std::memcpy(planes + (t * planes_ + rho) * bottom_size_ + c0, row, w * sizeof(u32));
+                digit[l] = 0, sum -= n - 1, cap -= n - 1, --nz;
             }
+        }
     }
 
-    // Planes [t][top rank][Nb] -> c (input order), scaled by 2^32 / 2^threes.
-    void interpolate_top(const u32* planes, u32* c) {
-        const std::size_t w = chunk_;
-        const Vec scale = all(montgomery(multiply_mod(power_mod(2, 32), power_mod(inverse_mod(2), threes_))));
-        Vec* buffer = allocate_buffer();
-        for (std::size_t c0 = 0; c0 < bottom_size_; c0 += w)
-            for (std::size_t rho = 0; rho < planes_; ++rho) {
-                u32* row = reinterpret_cast<u32*>(buffer);
-                for (std::size_t t = 0; t < top_size_; ++t, row += w)
-                    std::memcpy(row, planes + (t * planes_ + rho) * bottom_size_ + c0, w * sizeof(u32));
-                top_transform<true>(buffer);
-                row = reinterpret_cast<u32*>(buffer);
-                for (std::size_t t = 0; t < top_size_; ++t, row += w) {
-                    if (top_digits_.sum[t] != rho) continue;
-                    alignas(32) u32 out[64];
-                    for (std::size_t i = 0; i < w; i += 8) store(out + i, montgomery_multiply(load(row + i), scale));
-                    u32* dst = c + top_digits_.origin[t];
-                    for (std::size_t i = 0; i < w; ++i) dst[bottom_digits_.origin[c0 + i]] = out[i];
-                }
+    // For each top point t: the rows of f its evaluation reads, the rows of c its interpolation
+    // writes (interpolation as 2 a0 = 2 F0, 2 a1 = F1 - F2, 2 a2 = F1 + F2 - 2 F0 for size 3, with
+    // 2 F0 folded into the evaluation of f), its cap and nz.
+    void describe_top() {
+        struct Entry {
+            u32 digit;
+            bool negative;
+        };
+        static constexpr Entry kEvaluate[2][3][3] = {  // [size 3][point][entry]
+            {{{0, false}}, {{0, false}, {1, false}}, {}},
+            {{{0, false}}, {{0, false}, {1, false}, {2, false}}, {{0, false}, {1, true}, {2, false}}}};
+        static constexpr Entry kInterpolate[2][3][3] = {
+            {{{0, false}, {1, true}}, {{1, false}}, {}},
+            {{{0, false}, {2, true}}, {{1, false}, {2, false}}, {{1, true}, {2, false}}}};
+        static constexpr int kEvaluateCount[2][3] = {{1, 2, 0}, {1, 3, 3}};
+        static constexpr int kInterpolateCount[2][3] = {{2, 1, 0}, {2, 2, 2}};
+
+        const std::size_t k = size_of_.size();
+        evaluate_start_.push_back(0), interpolate_start_.push_back(0);
+        std::vector<u32> point(k, 0);
+        for (std::size_t t = 0; t < top_size_; ++t) {
+            std::vector<Term> evaluate{{0, false, 0}}, interpolate{{0, false, 0}};
+            int cap = 0, nz = 0, zeros3 = 0;
+            u32 stride = 1;
+            for (std::size_t l = bottom_; l < k; stride *= size_of_[l++]) {
+                const u32 p = point[l];
+                const bool three = size_of_[l] == 3;
+                if (p) cap += int(size_of_[l]) - 1, ++nz;
+                zeros3 += three && p == 0;
+                const auto extend = [&](std::vector<Term>& terms, const Entry* table, int count) {
+                    std::vector<Term> next;
+                    for (const Term& x : terms)
+                        for (int e = 0; e < count; ++e) {
+                            const u32 d = table[e].digit;
+                            next.push_back({x.row + d * stride, x.negative != table[e].negative, std::uint8_t(x.rank + d)});
+                        }
+                    terms = std::move(next);
+                };
+                extend(evaluate, kEvaluate[three][p], kEvaluateCount[three][p]);
+                extend(interpolate, kInterpolate[three][p], kInterpolateCount[three][p]);
             }
+            terms_.insert(terms_.end(), evaluate.begin(), evaluate.end());
+            evaluate_start_.push_back(u32(terms_.size()));
+            inverse_terms_.insert(inverse_terms_.end(), interpolate.begin(), interpolate.end());
+            interpolate_start_.push_back(u32(inverse_terms_.size()));
+            top_cap_.push_back(std::uint8_t(cap)), top_nz_.push_back(std::uint8_t(nz));
+            top_zeros3_.push_back(std::uint8_t(zeros3));
+            for (std::size_t l = bottom_; l < k && ++point[l] == size_of_[l]; ++l) point[l] = 0;
+        }
     }
 
-    Vec* allocate_buffer() {
-        if (!buffer_) buffer_ = allocate<Vec>(top_size_ * chunk_ / 8);
-        return buffer_;
+    // Planes [top rank][Nb] of x (our order) evaluated at top point t.
+    void evaluate_top(const u32* x, std::size_t t, Vec* planes) const {
+        const std::size_t vectors = bottom_size_ / 8;
+        std::memset(static_cast<void*>(planes), 0, std::size_t(planes_) * vectors * sizeof(Vec));
+        for (u32 i = evaluate_start_[t]; i < evaluate_start_[t + 1]; ++i) {
+            const Term& term = terms_[i];
+            add_row(planes + term.rank * vectors, reinterpret_cast<const Vec*>(x + term.row * bottom_size_), vectors,
+                    term.negative);
+        }
     }
 
-    template <bool Inverse>
-    void top_transform(Vec* x) const {
-        std::size_t stride = chunk_ / 8;
-        const std::size_t count = top_size_ * stride;
-        for (std::size_t l = bottom_; l < size_of_.size(); stride *= size_of_[l++])
-            variable_transform<Inverse>(x, count, size_of_[l], stride);
+    // Adds the planes of top point t to the rows of c (our order) that depend on it.
+    void interpolate_top(const Vec* planes, std::size_t t, u32* c) const {
+        const std::size_t vectors = bottom_size_ / 8;
+        for (u32 i = interpolate_start_[t]; i < interpolate_start_[t + 1]; ++i) {
+            const Term& term = inverse_terms_[i];
+            Vec* row = reinterpret_cast<Vec*>(c + term.row * bottom_size_);
+            const Vec* src = planes + term.rank * vectors;
+            if (term.negative)
+                for (std::size_t j = 0; j < vectors; ++j) store(row + j, sub_mod(load(row + j), src[j]));
+            else
+                for (std::size_t j = 0; j < vectors; ++j) store(row + j, add_mod(load(row + j), src[j]));
+        }
     }
 
     template <bool Inverse>
@@ -382,39 +438,41 @@ private:
             variable_transform<Inverse>(x, count, size_of_[l], stride);
     }
 
-    // Planes [top rank][Nb] of one top point -> rank planes [R + 1][Nb / 8] with the lane variables
-    // evaluated: rank r of position 8u + v is top rank r - sum(u) - popcount(v).
-    void spread(const u32* block, Vec* out) const {
+    // Top-rank planes -> rank planes [R + 1][Nb / 8] with the lane variables evaluated: rank r of
+    // position 8u + v is top rank r - sum(u) - popcount(v).
+    void spread(const Vec* planes, Vec* out) const {
         const std::size_t vectors = bottom_size_ / 8;
-        const int top = int(planes_);
+        const Vec mask[4] = {load(kPopcountMask[0]), load(kPopcountMask[1]), load(kPopcountMask[2]),
+                             load(kPopcountMask[3])};
+        const Vec zero = _mm256_setzero_si256();
         for (std::size_t u = 0; u < vectors; ++u) {
-            const int d = vector_digits_.sum[u];
-            for (int r = 0; r <= rank_; ++r) {
-                Vec x = _mm256_setzero_si256();
-                for (int j = 0; j < 4; ++j) {
-                    const int rho = r - d - j;
-                    if (rho >= 0 && rho < top)
-                        x = _mm256_or_si256(x, _mm256_and_si256(load(block + rho * bottom_size_ + 8 * u),
-                                                                load(kPopcountMask[j])));
-                }
-                out[r * vectors + u] = lanes_transform<false>(x);
+            Vec x[kMaxRank + 4];
+            for (int r = 0; r < planes_ + 3; ++r) x[r] = zero;
+            for (int rho = 0; rho < planes_; ++rho) {
+                const Vec v = planes[rho * vectors + u];
+                for (int j = 0; j < 4; ++j) x[rho + j] = _mm256_or_si256(x[rho + j], _mm256_and_si256(v, mask[j]));
             }
+            const int d = vector_sum_[u], last = std::min(rank_, d + planes_ + 2);
+            for (int r = 0; r < d; ++r) out[r * vectors + u] = zero;
+            for (int r = d; r <= last; ++r) out[r * vectors + u] = lanes_transform<false>(x[r - d]);
+            for (int r = last + 1; r <= rank_; ++r) out[r * vectors + u] = zero;
         }
     }
 
-    // Inverse of spread for the ranks that positions read; writes top-rank planes into block.
-    void gather(const Vec* in, u32* block) const {
+    // Inverse of spread for the ranks that positions read: top-rank planes from rank planes.
+    void gather(const Vec* in, Vec* planes) const {
         const std::size_t vectors = bottom_size_ / 8;
+        const Vec mask[4] = {load(kPopcountMask[0]), load(kPopcountMask[1]), load(kPopcountMask[2]),
+                             load(kPopcountMask[3])};
         for (std::size_t u = 0; u < vectors; ++u) {
-            const int d = vector_digits_.sum[u];
+            const int d = vector_sum_[u], last = std::min(rank_, d + planes_ + 2);
             Vec m[kMaxRank + 4];
-            for (int r = d; r <= std::min(rank_, d + int(planes_) + 2); ++r)
-                m[r - d] = lanes_transform<true>(in[r * vectors + u]);
-            for (std::size_t rho = 0; rho < planes_; ++rho) {
+            for (int r = d; r <= last; ++r) m[r - d] = lanes_transform<true>(in[r * vectors + u]);
+            for (int rho = 0; rho < planes_; ++rho) {
                 Vec x = _mm256_setzero_si256();
-                for (int j = 0; j < 4 && d + int(rho) + j <= rank_; ++j)
-                    x = _mm256_or_si256(x, _mm256_and_si256(m[rho + j], load(kPopcountMask[j])));
-                store(block + rho * bottom_size_ + 8 * u, x);
+                for (int j = 0; j < 4 && d + rho + j <= rank_; ++j)
+                    x = _mm256_or_si256(x, _mm256_and_si256(m[rho + j], mask[j]));
+                planes[rho * vectors + u] = x;
             }
         }
     }
@@ -424,8 +482,8 @@ private:
         const std::size_t vectors = bottom_size_ / 8;
         const Vec low = _mm256_set1_epi64x(0xFFFFFFFF), fold = _mm256_set1_epi64x(k2To32);
         for (std::size_t u = 0; u < vectors; ++u) {
-            const int cap = std::min(rank_, top_cap + vector_digits_.cap[u] + 3);
-            const int nz = top_nz + vector_digits_.nz[u];
+            const int cap = std::min(rank_, top_cap + vector_cap_[u] + 3);
+            const int nz = top_nz + vector_nz_[u];
             Vec ae[kMaxRank], ao[kMaxRank], be[kMaxRank], bo[kMaxRank];
             for (int i = 0; i <= cap; ++i) {
                 ae[i] = a[i * vectors + u], ao[i] = _mm256_srli_epi64(ae[i], 32);
@@ -449,11 +507,13 @@ private:
         }
     }
 
-    std::size_t size_, bottom_size_ = 0, top_size_ = 0, planes_ = 0, chunk_ = 8, bottom_ = 0;
-    int rank_ = 0, top_rank_ = 0, threes_ = 0;
-    std::vector<u32> order_, size_of_;
-    Digits bottom_digits_, vector_digits_, top_digits_;
-    Vec* buffer_ = nullptr;
+    std::size_t size_, bottom_size_ = 0, top_size_ = 0, bottom_ = 0;
+    int rank_ = 0, planes_ = 0, threes_ = 0;
+    std::vector<u32> size_of_, origin_;
+    std::vector<std::uint8_t> vector_sum_, vector_cap_, vector_nz_;
+    std::vector<std::uint8_t> top_cap_, top_nz_, top_zeros3_;
+    std::vector<Term> terms_, inverse_terms_;
+    std::vector<u32> evaluate_start_, interpolate_start_;
 };
 
 // ---------------------------------------------------------------------------------------------

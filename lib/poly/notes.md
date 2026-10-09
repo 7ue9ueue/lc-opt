@@ -78,6 +78,8 @@ step's transform of length 2m' = m), d = f', q = d mod x^(m-1):
   `inverse_direct`.
 - f is only read by the first pass (into d = f'), so g may be f.
 - Scratch: d, G, H, w (length 2^lg each), h (2^(lg-1)).
+- Code: `exp` = `derivative` into d, `exp_direct`, then `detail::exp_newton` (the steps, from any
+  d and any g[0] != 0; `power` reuses it).
 
 ## Log
 
@@ -101,6 +103,9 @@ divisible by x^(jk), and
 - Scratch: 2 B buffers of length 2k (H, W_1 .. W_(B-1), q_0 .. q_(B-2), work); the inverse's
   scratch overlaps them. The integral divides by index with `divide_by_index`, whose loader
   reads q_j.
+- Code: `detail::log_derivative(t, f, n, scratch, sink)` computes the blocks of q for any
+  f[0] != 0 and hands each to sink(first, q); `log` integrates them in its sink, `power` scales
+  them into its d.
 - exp's step computes log g [m, 2m) for its own g (degree < m, with h = 1/g kept from the
   previous step), not log of a given f, so the two share only calculus.hpp.
 
@@ -110,11 +115,27 @@ g = c (f / f[0])^e = c exp(e log(f / f[0])) mod x^n for residues e, c and f[0] !
 integer M >= 0 and n <= P, f^M = power(f, M mod P, f[0]^M): (f / f[0])^M has constant term 1,
 so only M mod P matters. Callers handle leading zeros (f = x^k u gives x^(kM) u^M). A square
 root is power(f, 1/2, sqrt(f[0])).
-- First version: f / f[0] into g, `log` in place, times e, `exp` in place, times c (three
-  vector passes). Scratch: the larger of the two (exp's), shared.
-- Alternatives considered: Newton directly on the ODE f g' = e f' g (residual
-  f g' - e f' g, then division by f g) needs 1/f and 1/g and two more products per step,
-  about 30 T(n) against 27.5 T(n) for log (11.5 T) and exp (16 T). Not tried.
+- g solves g' = d g with g[0] = c and d = e f'/f. `detail::log_derivative` (log's blocked
+  division, any f[0] != 0) hands q = f'/f to a sink block by block; the sink stores e q into d.
+  Then `exp_direct` (times c) gives g mod x^64 and `detail::exp_newton` (exp's steps) the rest.
+  Every exp step is invariant under scaling g (h = 1 / g and g'/g follow), so g[0] = c costs
+  nothing.
+- Against log then exp, this skips the integral of q (`divide_by_index`), exp's derivative and
+  the passes f / f[0], times e, times c.
+- In place: log_derivative reads all of f before g is written.
+- Scratch: d (2^exp_log(n) words), then the larger of log_derivative's 2B buffers and
+  exp_newton's 3.5 buffers of length 2^exp_log(n). log_derivative_scratch counts at least 3
+  buffers: for B = 1 (n <= 33, only power) the inverse's scratch follows T(h).
+- In process at N = 500000 (`lc-amd`, warm, medians of 11): log_derivative 9.93 ms (blocks
+  4.32, 1.70, 1.97, 1.93; block 0 includes the inverse, T(h) and the forwards of W_t),
+  exp_newton 13.34 ms; first use +0.6 ms (page faults).
+- Alternatives considered, not tried:
+  - Newton directly on the ODE f g' = e f' g: residual A = e f' g - f g' from fresh
+    transforms of f, x f', g and x g' (length 2m), then A / (f g) by two products with 1/f and
+    1/g, then g s. About 14.5 transforms of length 2m per step plus 1/f to n/2: ~34 T(n)
+    against 27.5 T(n) for log (11.5) and exp (16).
+  - exp's T_m(x q) at m = 2^17, 2^18 from the log's stored T(q_0), T(q_1) by leaf-wise shifts
+    (x^k is a scalar per leaf): saves ~0.4 ms of forwards, keeps 2 MB more live.
 
 ## Measurements
 
@@ -218,7 +239,16 @@ products 1.77 and 1.69).
   f constant, f = 1 - x with e = -1, f shorter and longer than n, in place; sizes 2^k - 1 ..
   2^k + 1 to 2^20. A mutation (e + 1) fails them.
 - pow at N = 500000 on `lc-amd`: 28.7 ms whole process (`judge.py test`); floor (read and
-  write) 4.5 ms.
+  write) 4.5 ms. Merged as #137.
+- Fused power (see Power): `log.hpp` split into `detail::log_derivative` (always_inline, a sink
+  per block) and the integral; `exp.hpp` into the derivative and `detail::exp_newton`
+  (always_inline). `log_log` and `log_scratch` keep their old expressions (through
+  `log_derivative_scratch` they changed log's code; bench 1.0034 on both VMs, then 1.0000).
+  Code: inv's `.text` identical; exp's functions the same set and sizes except `exp`, from
+  which `forward_upper` is no longer inlined (4038 -> 3023 instructions); log's `log`
+  2435 -> 2387 instructions. Tests unchanged (power, log, exp pass, also ASan/UBSan).
+- `judge.py bench` (ratios new/old): pow 0.9827 (`lc-amd`, 21 rounds), 0.9885 (`lc-intel`, 21);
+  exp 0.9994, 0.9954 (21); log 1.0000, 0.9988 (41).
 
 ## Sources
 

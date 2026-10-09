@@ -27,6 +27,7 @@ void power(poly::Arena& arena, std::span<std::uint32_t> b, std::uint64_t m) {
     const poly::Transform transform(arena, poly::power_log(size));
     const std::uint32_t c = ntt::detail::power(u[0], std::uint32_t(m % (kP - 1)));
     poly::power(transform, u, std::uint32_t(m % kP), c, u, arena.take(poly::power_scratch(size)));
+    if (shift == k) return;  // M = 1 or k = 0: u is in place
     std::copy_backward(u.begin(), u.end(), b.end());  // to b[shift, n)
     std::fill_n(b.begin(), shift, 0);
 }

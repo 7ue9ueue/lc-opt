@@ -3828,39 +3828,20 @@ inline int exp_log(std::size_t n) {
     return std::max(Transform::kMinLog + 1, int(std::bit_width(std::max<std::size_t>(n, 2) - 1)));
 }
 
-// Scratch words for exp() of n coefficients.
-inline std::size_t exp_scratch(std::size_t n) {
-    const std::size_t len = std::size_t(1) << exp_log(n);
-    return 4 * Arena::footprint(len) + Arena::footprint(len / 2);
-}
+namespace detail {
 
-// g = exp(f) mod x^n for n = g.size() >= 1. f[0] = 0; coefficients of f past f.size() are zero.
-// g may be f (f is read first). scratch: exp_scratch(n) words, 32-byte aligned (from an Arena).
-// t: lg_max >= exp_log(n).
-//
-// Newton steps double the known prefix g = exp(f) mod x^m, keeping h = 1 / g mod x^(m/2) and
-// its transform of length m. With d = f' and q = d mod x^(m-1), by transforms of length m and 2m:
-//   h = h - x^(m/2) (h (g h)[m/2, m) mod x^(m/2))   now h = 1 / g mod x^m
-//   r = x q g mod (x^m - 1)                        = (g q - g') / x^(m-1) + x g'
-//   t = h r mod x^m                                = h (g q - g') / x^(m-1) + x q mod x^m
-//   s = (f - log g)[m, 2m) = (d[m-1, 2m-1) + t - x q) / (m + i)
-//   g[m, 2m) = g s mod x^m
-// since g'/g = q - h (g q - g') mod x^(2m-1). T_m(r) = T_m(x q) T_m(g) is the lower half of
-// T_2m(r). Per step: 8 transforms of length 2m and 3.5 leaf products of that length.
-inline void exp(const Transform& t, std::span<const std::uint32_t> f, std::span<std::uint32_t> g,
-                std::span<std::uint32_t> scratch) {
-    using namespace detail;
-    const std::size_t n = g.size(), len = std::size_t(1) << exp_log(n);
+// The Newton steps of exp() below, from g mod x^kExpBase (given) to g mod x^n, n = g.size() >
+// kExpBase, for g' = d g: d has 2^exp_log(n) words, d[i] = 0 for i >= n - 1. Each step is
+// invariant under scaling g, so g[0] may be any nonzero constant. scratch: exp_newton_scratch(n).
+[[gnu::always_inline]] inline void exp_newton(const Transform& t, std::span<const std::uint32_t> d, std::span<std::uint32_t> g,
+                                              std::span<std::uint32_t> scratch) {
+    const std::size_t n = g.size(), len = d.size();
     const auto take = [&scratch](std::size_t words) {
         const std::span<std::uint32_t> s = scratch.first(words);
         scratch = scratch.subspan(Arena::footprint(words));
         return s;
     };
-    const std::span<std::uint32_t> d = take(len), h = take(len / 2), gt = take(len), ht = take(len), w = take(len);
-    derivative(f.first(std::min(f.size(), n)), d);  // d[i] = 0 for i >= n - 1
-    exp_direct(d, g.first(std::min(n, kExpBase)));
-    if (n <= kExpBase) return;
-
+    const std::span<std::uint32_t> h = take(len / 2), gt = take(len), ht = take(len), w = take(len);
     std::size_t m = kExpBase;
     inverse_direct(g, h.first(m / 2));
     t.forward(h.first(m / 2), 0, ht.first(m));
@@ -3891,6 +3872,41 @@ inline void exp(const Transform& t, std::span<const std::uint32_t> f, std::span<
         t.cyclic_product(w.subspan(m, m), m, w.first(2 * m), gt.first(2 * m), Half::kUpper);
         std::copy_n(w.begin() + m, std::min(m, n - m), g.begin() + m);
     }
+}
+
+inline std::size_t exp_newton_scratch(std::size_t n) {
+    const std::size_t len = std::size_t(1) << exp_log(n);
+    return 3 * Arena::footprint(len) + Arena::footprint(len / 2);
+}
+
+}  // namespace detail
+
+// Scratch words for exp() of n coefficients.
+inline std::size_t exp_scratch(std::size_t n) {
+    return Arena::footprint(std::size_t(1) << exp_log(n)) + detail::exp_newton_scratch(n);
+}
+
+// g = exp(f) mod x^n for n = g.size() >= 1. f[0] = 0; coefficients of f past f.size() are zero.
+// g may be f (f is read first). scratch: exp_scratch(n) words, 32-byte aligned (from an Arena).
+// t: lg_max >= exp_log(n).
+//
+// Newton steps double the known prefix g = exp(f) mod x^m, keeping h = 1 / g mod x^(m/2) and
+// its transform of length m. With d = f' and q = d mod x^(m-1), by transforms of length m and 2m:
+//   h = h - x^(m/2) (h (g h)[m/2, m) mod x^(m/2))   now h = 1 / g mod x^m
+//   r = x q g mod (x^m - 1)                        = (g q - g') / x^(m-1) + x g'
+//   t = h r mod x^m                                = h (g q - g') / x^(m-1) + x q mod x^m
+//   s = (f - log g)[m, 2m) = (d[m-1, 2m-1) + t - x q) / (m + i)
+//   g[m, 2m) = g s mod x^m
+// since g'/g = q - h (g q - g') mod x^(2m-1). T_m(r) = T_m(x q) T_m(g) is the lower half of
+// T_2m(r). Per step: 8 transforms of length 2m and 3.5 leaf products of that length.
+inline void exp(const Transform& t, std::span<const std::uint32_t> f, std::span<std::uint32_t> g,
+                std::span<std::uint32_t> scratch) {
+    using namespace detail;
+    const std::size_t n = g.size(), len = std::size_t(1) << exp_log(n);
+    const std::span<std::uint32_t> d = scratch.first(len);
+    derivative(f.first(std::min(f.size(), n)), d);  // d[i] = 0 for i >= n - 1
+    exp_direct(d, g.first(std::min(n, kExpBase)));
+    if (n > kExpBase) exp_newton(t, d, g, scratch.subspan(Arena::footprint(len)));
 }
 
 }  // namespace poly

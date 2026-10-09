@@ -4,7 +4,7 @@ N <= 500000 coefficients of f mod 998244353 and 0 <= M <= 10^18; print the first
 of f^M. 10 s. Largest tests: max_random, binary_exp_max, lower_deg_zero2_00 (f[0] != 0 or few
 leading zeros, so u^M has close to 500000 coefficients; transforms up to 2^19).
 
-Best judged: none yet.
+Best judged: ours, 29 ms: [409299](https://judge.yosupo.jp/submission/409299) (`main.cpp` of #137).
 Record when opened (issue #65): 52 ms.
 
 ## Design
@@ -12,8 +12,9 @@ Record when opened (issue #65): 52 ms.
 - f = x^k f_k u with u[0] = 1: f^M = 0 mod x^N if kM >= N (M > (N - 1) / k, no overflow);
   f^0 = 1 (also for f = 0); else f^M = x^(kM) f_k^M u^M with u^M = exp((M mod P) log u) of
   N - kM coefficients and f_k^(M mod (P - 1)).
-- `lib/poly/pow.hpp`: `power(t, f, e, c, g)` = c (f / f[0])^e, here log then exp of lib/poly
-  (lib/poly/notes.md). Computed in place at b[k, k + N - kM), then moved to b[kM, N).
+- `lib/poly/pow.hpp`: `power(t, f, e, c, g)` = c (f / f[0])^e: d = e f'/f by log's blocked
+  division, then exp's Newton steps on g' = d g from g[0] = c (lib/poly/notes.md). Computed in
+  place at b[k, k + N - kM), then moved to b[kM, N) if kM != k.
 - `lib/io` input; output in 10-byte fixed-width fields (`problems/convolution/convolution_mod/fields.hpp`,
   judge-specific: the checker compares tokens). One `poly::Arena` (huge pages) for f, the text,
   the tables and the scratch. The program runs from `.preinit_array` and ends with `_exit`.
@@ -27,12 +28,12 @@ ms, about log (10.2) plus exp (13.5).
 
 ## Measuring
 
-On `lc-amd` (2026-10-09), runs inside one long-lived container (judge image, `--memory 1g`,
-`--cpuset-cpus 3`) drifted: 8 rounds at 28.6 ms, then 13 at 50.5 ms; exp's main.cpp went from
-18.1 to 22-28 ms over 30 runs. Dropping the page cache did not help; no other process ran.
-Outside docker (`taskset -c 3`, the same binary, 16 runs): 28.6-30.1 ms, 6 huge-page faults
-and ~775 page faults per run, no fallbacks. Cause unknown; absolute times from long container
-runs are unreliable, same-run ratios (`judge.py bench`) still hold.
+`lc-amd` (2026-10-09) slows down under sustained load, inside docker or not: in one container
+run, 8 rounds at 28.6 ms, then 13 at 50.5 ms; exp's main.cpp went from 18.1 to 22-28 ms over 30
+runs; on the host (`taskset -c 3`, 40 runs) 29.0 ms first, then 32-33, then 35-41. Not free
+memory (dropping the page cache did not help), not other processes (none), not huge-page
+fallbacks (6 huge-page faults per run, no fallbacks). Absolute times from long runs are
+unreliable; same-run ratios (`judge.py bench`) still hold.
 
 ## Log
 
@@ -45,3 +46,18 @@ runs are unreliable, same-run ratios (`judge.py bench`) still hold.
     zeros, monomials, f = 0); ASan/UBSan on 15 official cases, file and pipe input; lib/poly
     tests at -O2 (x86-64-v3 and native) and ASan/UBSan (`lc-intel`). Mutations caught:
     exponent e + 1 (lib test), f_k^(M mod P) for f_k^(M mod (P - 1)) (stress).
+  - Merged as #137. Submitted its `main.cpp`: [409299](https://judge.yosupo.jp/submission/409299)
+    AC 29 ms, 17.3 MiB.
+  - Fused: `power` computes d = e f'/f with log's blocked division (`detail::log_derivative`,
+    any f[0]) and runs exp's Newton steps (`detail::exp_newton`) from exp_direct times c. Saves
+    log's integral, exp's derivative and three scaling passes. solution.cpp skips the move when
+    kM = k.
+  - In process at N = 500000 (`lc-amd`, warm): log_derivative 9.93 ms, exp_newton 13.34 ms,
+    total 23.27 (23.89 on first use).
+  - `judge.py bench` fused / #137 (21 rounds, slowest 3): `lc-amd` 28.87 / 29.34 ms, 0.9827;
+    `lc-intel` 31.02 / 31.41 ms, 0.9885. exp and log re-bundled: exp 0.9994, 0.9954; log
+    1.0000, 0.9988 (lib/poly/notes.md).
+  - Checks: 37/37 official tests (slowest 28.5 ms); `stress.py` 400 rounds; lib/poly tests at
+    -O2 (x86-64-v3, native) and ASan/UBSan (`lc-intel`); exp 26/26, log 25/25 official tests.
+- Next: the leaf-product kernel (#95, shared). Smaller: exp's T_m(x q) at the last two steps
+  from the log's stored T(q_0), T(q_1) (~0.4 ms, lib/poly/notes.md).

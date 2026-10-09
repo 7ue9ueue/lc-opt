@@ -10,8 +10,9 @@ twin, 454 ms): parse 71, NTT 205, output 156 (`write()` ~120), ~12-15 outside `m
 
 ## Design
 
-Same program as `../convolution_mod`: `lib/ntt` (transform length 2^25 at the maximum), `lib/io`
-input, `../fixed_width.hpp` output.
+`lib/ntt` (transform length 2^25 at the maximum), `lib/io` input, output by
+`../convolution_mod/fields.hpp` (same bytes as `../fixed_width.hpp`), start from `.preinit_array`
+and `_exit` as in `../convolution_mod`.
 
 ## Log
 - 2026-10-09, claude: refactored the QPoly program onto `lib/ntt`, `lib/io` input and
@@ -35,3 +36,25 @@ input, `../fixed_width.hpp` output.
   AC, 453 ms (2/5), large cases 441-453. Judged runs sit 4-7% above `lc-amd` (424.6 ms) on every
   large case, as the QPoly program did (426.7 vs 452): a systematic offset, not jitter. A guess: page
   faults of the ~613 MiB footprint cost more on the judge. Not resubmitted further.
+- 2026-10-09, claude (round 2). `lc-amd`, judge flags; phases from in-process `CLOCK_MONOTONIC`
+  stamps on fft_killer_04 (scratch probe, not committed), 5 runs, ms:
+  - Before: parse 61.5 (of which input page faults ~20 and zero-filling a and b's lower halves
+    8.4; parse alone 41.6, 1.24 ns per token), tables 2.9, top radix-4 of a and b 12.8 (mostly
+    zero-filling the upper halves), four quarters 178.5, inverse top 6.8, output 132 (format ~22,
+    `write()` ~110). Exit: unmapping the input alone takes 12.
+  - Per radix-4 level (forward a and b, inverse a): 9.1 + 4.5 at every size from 2^10 to 2^18
+    vectors, 10.8 + 4.2 at 2^20. Memory is not the limit: fusing top levels cannot gain more than
+    ~2 ms. The `forward` kernel issues ~14.6 vector ops per vector and level; 3.76 cycles measured
+    against 3.66 at 4 ops per cycle. Tiles (levels below 2^10 vectors, leaf products) 94.4.
+  - Kept: `fields.hpp` formatter and `.preinit_array` start. `tools/judge.py bench`, 11 rounds,
+    slowest 3 cases: 428.3 -> 414.6 ms, ratio 0.974 (second run: 427.1 -> 414.8, 0.968).
+  - Lost: input by 256 KiB `read()` chunks into an L2 buffer, parsed by `BulkParser` (no input
+    mapping, no faults, no unmap; footprint 450 -> 293 MiB): 418.8 ms vs 414.8, ratio 0.985 vs
+    0.968. Alone, reading the file costs 34 ms by `read()` against 42 by mmap + touch + unmap,
+    but the parse then loses the overlap with its DRAM reads.
+  - Lost: `MADV_POPULATE_READ` on the input mapping: 26.5 ms vs 22 for faulting it by touch.
+  - Checks: 54/54 official tests, stress 200 rounds, ASan/UBSan on 6 official cases (incl.
+    max_random_00) and pipe input.
+  - Next: the transform is at the vector ALU bound of its kernels (~190 of ~415 ms); gains need
+    fewer ops per butterfly or cheaper leaves (`lib/ntt`). Kernel time (input faults 20, zero
+    fill 16, `write()` 110, unmap ~15) is ~160 ms.

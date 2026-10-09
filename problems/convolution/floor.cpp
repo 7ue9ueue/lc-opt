@@ -28,9 +28,10 @@ Value* allocate(std::size_t count) {
     return reinterpret_cast<Value*>(start);
 }
 
-// count values into dst with lib/io's bulk parsers.
-void read_values(io::Reader& in, Value* dst, std::size_t count) {
-    if constexpr (std::same_as<Value, std::uint64_t>) io::read_bulk(in, dst, count);
+// count values into dst with lib/io's bulk parsers. A template, so the branch not taken is discarded.
+template <class T>
+void read_values(io::Reader& in, T* dst, std::size_t count) {
+    if constexpr (std::same_as<T, std::uint64_t>) io::read_bulk(in, dst, count);
     else in.read(dst, count);
 }
 

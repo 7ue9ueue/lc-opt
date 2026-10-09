@@ -3,7 +3,7 @@
 c_k = min over i + j = k of a_i + b_j; a concave, b arbitrary. N, M <= 2^19, values in
 [0, 10^9], so c_k < 2^31 fits uint32. 5 s.
 
-Best judged: 31 ms, [409228](https://judge.yosupo.jp/submission/409228) (current `main.cpp`).
+Best judged: 27 ms, [409239](https://judge.yosupo.jp/submission/409239) (current `main.cpp`).
 Record when the issue opened: 117 ms.
 
 ## Design
@@ -18,8 +18,11 @@ Record when the issue opened: 117 ms.
 - Crossings are lazy: each entry keeps a bracket [lo, hi) around its last winning row against the
   entry below. An insertion narrows the bracket of the entry it meets only until it can decide pop
   or push; the sweep moves lo up for free each row it checks the top.
-- a, b, c and the stack in 2 MiB pages (`MADV_HUGEPAGE`); `.preinit_array` start, `_exit` end;
-  `lib/io` for input and output.
+- Each stack entry caches its column's offset into a and its b value: one load per evaluation.
+- Output: `columns.hpp`, fixed-width fields (judge-specific; the checker compares tokens), a copy of
+  `../min_plus_convolution_convex_arbitrary/columns.hpp` (ours, round 1 of #28).
+- a, b, c, the stack and the text buffer in 2 MiB pages (`MADV_HUGEPAGE`); `.preinit_array`
+  start, `_exit` end; `lib/io` for input.
 
 ## Log
 
@@ -48,6 +51,32 @@ Record when the issue opened: 117 ms.
     (file and pipe input).
   - Submitted the merged `main.cpp` (#91): [409228](https://judge.yosupo.jp/submission/409228)
     AC 31 ms, 21.1 MiB.
-- Next: monotone cases spend ~18 ms more than random ones (guess: the sweeps' ~1M insertions,
-  data-dependent branches on L2 loads). Ideas: decide pops from cached values without loading;
-  a 10-digit fixed-width formatter (output is ~11 MB); input straight into the huge pages.
+- 2026-10-09, claude (round 2). `lc-amd`, judge flags, `judge.py bench` 11 rounds unless noted.
+  - Phases (ms, `clock_gettime`): monotone_01 parse 1.9, sweeps 21.0, output 2.7;
+    max_random_00 parse 1.8, sweeps 3.7, output 2.7. Only monotone_01/02 are slow; 00/03 are
+    like random (3.6 ms sweeps).
+  - Counts on monotone_01 (both sweeps, 1.05M rows): 942k insertions, each pops one entry on
+    average; stack depth 2.6-3.3. Exact crossings are far from t: 95% are 2^14-2^18 rows away,
+    so galloping from t cannot help. Decision paths are varied (top one, "pop q, then lose to
+    the bottom", is 36%).
+  - `perf stat` on `lc-intel`, monotone_01 vs max_random_00: +55M cycles, +110M instructions,
+    +1.0M branch misses (about one per insertion). A 512 KiB L2 simulation of a's accesses:
+    456k misses vs 55k. Hot spot: the a loads in value().
+  - Bisection at dyadic points (fixed grid, for cache reuse): 33.85 vs 32.24 ms (+4.4%): 10%
+    more probes, L2-sim misses only 456k -> 421k.
+  - Entries cache offset and b (v13): 31.21 vs 32.14 (-2.9%).
+  - Prefetch of the next insertion's first test row at each push: 30.98 vs 31.21 (noise).
+  - Forward and backward sweeps interleaved row by row (two independent chains), on top of the
+    fixed-width output below: 30.00 vs 27.29 (+10%, slower).
+  - Fixed-width output (`columns.hpp`) on v13: 6 slowest cases 27.29 vs 31.52 (ratio 0.864).
+    Per case (`judge.py test`): monotone_01/02 27 ms, everything else <= 12.3 ms.
+  - I/O floor (`../floor.py`, huge pages, `write_array`): 11.9 ms. `floor.cpp` does not compile
+    for uint32 problems on main (`if constexpr` outside a template); measured with a local fix.
+  - Checks: 41/41 official tests; `stress.py` 2000 rounds; ASan/UBSan on 12 official cases
+    (file and pipe input).
+  - CI (#102), slowest 3 cases: EPYC 9V74 0.859, Xeon 6973P-C 0.874, EPYC 7763 0.869.
+  - Submitted the merged `main.cpp` (#102): [409239](https://judge.yosupo.jp/submission/409239)
+    AC 27 ms, 23.1 MiB (was 31 ms).
+- Next: monotone_01/02 sweeps (~16 ms over the others). Idea, untried: for consecutive columns
+  (d = 1) the crossing is a rank in a's sorted slopes, and for distance d it lies in a window of
+  d rows below the rank of b's gap / d; a value-bucketed rank table could set tight brackets.

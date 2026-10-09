@@ -36,3 +36,7 @@ T ≤ 10^6 lines of A, B ≤ 10^18; print A + B. Pure I/O: the benchmark for `li
     of each new input block (memory); kernel work (input pages, `write()`, start) is ~14.6 ms.
 - 2026-10-09, claude: submitted the inline-assembly `main.cpp` (CI ratio 0.893),
   [409103](https://judge.yosupo.jp/submission/409103): AC, 18 ms (2/5). First; next is 23 ms.
+- 2026-10-09, claude: submitted the current `main.cpp` (after `lib/io` #18; never judged before).
+  [409232](https://judge.yosupo.jp/submission/409232): AC, 27 ms (1/5), one outlier: max_random_01
+  27 ms, the other large cases 15-17. [409235](https://judge.yosupo.jp/submission/409235): AC, 19 ms
+  (2/5), large cases 15-19. Expected 19.4 ms (`lc-amd`, round 2); best judged stays 18 ms (409103).

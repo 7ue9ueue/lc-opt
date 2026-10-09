@@ -53,14 +53,17 @@ Chain start(const u32* a, std::size_t n, const u32* b, std::size_t m, std::size_
     return {a + lo, b + (k - lo)};
 }
 
-// A bitonic vector sorted ascending: half-cleaners at distances 4, 2, 1.
+// A bitonic vector sorted ascending, or descending with Descending: half-cleaners at distances
+// 4, 2, 1.
+template <bool Descending = false>
 __m256i sort_bitonic(__m256i v) {
+    constexpr int f = Descending ? 0xFF : 0;
     __m256i p = _mm256_permute2x128_si256(v, v, 0x01);
-    v = _mm256_blend_epi32(_mm256_min_epi32(v, p), _mm256_max_epi32(v, p), 0xF0);
+    v = _mm256_blend_epi32(_mm256_min_epi32(v, p), _mm256_max_epi32(v, p), 0xF0 ^ f);
     p = _mm256_shuffle_epi32(v, 0x4E);
-    v = _mm256_blend_epi32(_mm256_min_epi32(v, p), _mm256_max_epi32(v, p), 0xCC);
+    v = _mm256_blend_epi32(_mm256_min_epi32(v, p), _mm256_max_epi32(v, p), 0xCC ^ f);
     p = _mm256_shuffle_epi32(v, 0xB1);
-    return _mm256_blend_epi32(_mm256_min_epi32(v, p), _mm256_max_epi32(v, p), 0xAA);
+    return _mm256_blend_epi32(_mm256_min_epi32(v, p), _mm256_max_epi32(v, p), 0xAA ^ f);
 }
 
 // carry + inclusive prefix sums of s.
@@ -75,7 +78,8 @@ __m256i prefix_sums(__m256i s, __m256i carry) {
 // c[0, size) = values k0 + [0, size) for 1 <= size <= columns::kBlock, k0 + size <= n + m - 1;
 // c[size, size + 8 * kChains + 1) receives garbage. Chain s writes c[t + 1, t + length + 1) from
 // its start k0 + t, t = s * length (clamped to the block). Per chain, `held` keeps the 8 largest
-// slopes seen, sorted; each step loads 8 slopes from the input with the smaller next one, and the
+// slopes seen, sorted descending; each step loads 8 slopes (ascending) from the input with the
+// smaller next one; min and max with held are bitonic, and the
 // 8 smallest of the 16 are the next slopes (the classic SIMD merge).
 void block(const u32* a, std::size_t n, const u32* b, std::size_t m, std::size_t k0, std::size_t size, u32* c) {
     const __m256i reverse = _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0), last = _mm256_set1_epi32(7);
@@ -87,7 +91,7 @@ void block(const u32* a, std::size_t n, const u32* b, std::size_t m, std::size_t
         const Chain first = start(a, n, b, m, k0 + std::min(s * length, size - 1));
         pa[s] = first.a, pb[s] = first.b;
         carry[s] = _mm256_set1_epi32(i32(*pa[s] + *pb[s]));
-        held[s] = slopes(pa[s]), pa[s] += 8;
+        held[s] = _mm256_permutevar8x32_epi32(slopes(pa[s]), reverse), pa[s] += 8;
     }
     c[0] = u32(_mm256_cvtsi256_si32(carry[0]));
     for (std::size_t step = 0; step < length; step += 8) {
@@ -98,10 +102,10 @@ void block(const u32* a, std::size_t n, const u32* b, std::size_t m, std::size_t
             const std::uintptr_t mask = 0 - take_b;
             const auto* from = reinterpret_cast<const u32*>((reinterpret_cast<std::uintptr_t>(pa[s]) & ~mask) |
                                                             (reinterpret_cast<std::uintptr_t>(pb[s]) & mask));
-            const __m256i next = _mm256_permutevar8x32_epi32(slopes(from), reverse);
+            const __m256i next = slopes(from);
             pa[s] += 8 - 8 * take_b, pb[s] += 8 * take_b;
             const __m256i low = sort_bitonic(_mm256_min_epi32(held[s], next));
-            held[s] = sort_bitonic(_mm256_max_epi32(held[s], next));
+            held[s] = sort_bitonic<true>(_mm256_max_epi32(held[s], next));
             const __m256i values = prefix_sums(low, carry[s]);
             _mm256_storeu_si256(reinterpret_cast<__m256i*>(c + s * length + step + 1), values);
             carry[s] = _mm256_permutevar8x32_epi32(values, last);

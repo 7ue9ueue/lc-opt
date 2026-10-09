@@ -2,9 +2,10 @@
 
 N, M <= 2^19 coefficients mod 998244353; print the N + M - 1 coefficients of the product. 5 s.
 
-Best judged: ours, [408716](https://judge.yosupo.jp/submission/408716), 14 ms: the QPoly
-exploration-011 program (`../SymPoly/work/ntt/yosupo_convolution_mod_large_io_probe.cpp`, guess
-from the submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
+Best judged: ours, 14 ms: [409184](https://judge.yosupo.jp/submission/409184) (current
+`main.cpp`) and [408716](https://judge.yosupo.jp/submission/408716) (the QPoly exploration-011
+program, `../SymPoly/work/ntt/yosupo_convolution_mod_large_io_probe.cpp`, a guess from the
+submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
 
 ## Design
 
@@ -53,6 +54,14 @@ from the submission times and `lib/io/notes.md`). Next other user: 23 ms (393435
     no change.
   - Checks: 53/53 official tests, stress 400 rounds (pipe input), ASan/UBSan on 9 official
     cases (file and pipe input).
+  - Interleaving two or three `format8` chains per iteration (to shorten the critical path):
+    1.15 and 1.26 ns/value vs 1.02 in memory (spills). Not kept.
+  - Submitted the merged `main.cpp` (#40) twice. [409183](https://judge.yosupo.jp/submission/409183):
+    AC 22 ms; two outliers (fft_killer_04 22 ms, random_02 15 ms against 6 in 408716), the other
+    17 large cases 12-14 ms. [409184](https://judge.yosupo.jp/submission/409184): AC 14 ms;
+    large cases median 13 ms (max 14, three at 12), against 14 (max 14) in 408716. Tiny cases
+    also took up to 10 ms in both runs: the judge's jitter is several ms, so the maximum over 53
+    cases moves by a tick or more between runs.
 - Next: the formatter (1.15 ms; ~27 cycles per 8 values against a ~20-cycle port bound, long
   dependency chain per iteration) and the bulk parse (~1 ms besides page faults) are the
   largest parts not fixed by the system.

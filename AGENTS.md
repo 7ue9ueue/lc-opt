@@ -23,7 +23,10 @@ Solve every [Library Checker](https://judge.yosupo.jp) problem, then make each s
 
 ## Code
 
-- C++23, GCC 15.2. Each submission is one self-contained file, bundled from `lib/`.
+- C++23, GCC 15.2. Each submission is one self-contained file, bundled from `lib/`:
+  write `solution.cpp` with `#include "lib/..."`, then `python3 tools/bundle.py <dir>/solution.cpp`
+  writes `main.cpp`. Commit both; CI checks that they match.
+- Use `lib/io` for all input and output (`io::Reader`, `io::Writer`; see the header of `lib/io/io.hpp`).
 - Professional quality. Readable first: clear names, small functions, no dead code.
 - `lib/` modules have a small, documented API and their own tests.
 - Comments are short and rare: invariants, value ranges, overflow bounds, memory layout.
@@ -78,7 +81,8 @@ AGENTS.md                    rules (CLAUDE.md imports it)
 STATUS.md                    foundations and one row per problem
 lib/                         shared code: I/O, modint, NTT, ...
 problems/<category>/<name>/  category as in library-checker-problems
-  main.cpp                   current best submission
+  solution.cpp               source; includes lib/ headers
+  main.cpp                   current best submission, bundled from solution.cpp
   brute.cpp                  simple reference for stress tests
   notes.md                   research, ideas, attempt log
 ```

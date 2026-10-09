@@ -1,6 +1,6 @@
-# Checks every pull request: each changed main.cpp must pass all official tests and must
-# not be slower than main's version, averaged over several CI machines.
-# The "verdict" job is the required check for auto-merge.
+# Checks every pull request: lib/ tests pass, every bundled main.cpp matches its solution.cpp,
+# and each changed main.cpp passes all official tests and is not slower than main's version,
+# averaged over several CI machines. The "verdict" job is the required check for auto-merge.
 name: verify
 on:
   pull_request:
@@ -62,14 +62,31 @@ jobs:
           path: reports/
           if-no-files-found: ignore
 
+  lib:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bundled main.cpp files match their solution.cpp
+        run: python3 tools/bundle.py --check
+      - name: Library tests, judge flags and ASan/UBSan
+        run: |
+          image=$(cd tools && python3 -c 'import judge; print(judge.IMAGE)')
+          for test in lib/*/test.cpp; do
+            echo "== $test"
+            docker run --rm -v "$PWD:/w" -w /w "$image" sh -ec "
+              g++ -O2 -std=c++23 -march=native -Wall -Wextra -I. $test -o /tmp/test && /tmp/test
+              g++ -O1 -g -std=c++23 -march=native -fsanitize=address,undefined -fno-sanitize-recover=all -I. $test -o /tmp/test && /tmp/test"
+          done
+
   verdict:
-    needs: [changes, judge]
+    needs: [changes, judge, lib]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Require passing tests
-        if: needs.changes.result != 'success' || (needs.judge.result != 'success' && needs.judge.result != 'skipped')
+        if: needs.changes.result != 'success' || needs.lib.result != 'success' || (needs.judge.result != 'success' && needs.judge.result != 'skipped')
         run: exit 1
       - uses: actions/download-artifact@v4
         continue-on-error: true  # no reports when only new problems changed

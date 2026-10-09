@@ -126,13 +126,14 @@ Work happens in rounds: one subagent per round, started by `/work` and briefed w
 A problem gets at most 5 rounds and stops after 2 rounds in a row without gain.
 The passes below are the usual order of what to try.
 
-0. **Research**: algorithms, papers, limits. Measure the floor (read input, write output, nothing else)
-   and compare it with the record to estimate headroom.
+0. **Research**: algorithms, papers, limits. Measure the floor (read input, write output, nothing else);
+   the gap between it and our time is the headroom.
 1. **High level**: algorithm, data layout, memory, I/O. Portable C++.
 2. **SIMD**: AVX2 kernels and the extensions under Instruction sets. For pointer-heavy problems: memory layout, prefetching, branch-free code.
 3. **Assembly**: inline asm and instruction scheduling, only where profiling shows compiled code is the limit.
 
-Stop when the solution sits at the floor or leads the record by more than noise.
+Stop early only when the solution sits at the floor. Leading the record is not a reason to stop;
+the record is a reference point, not the target.
 A change to `lib/` is re-checked on every problem that uses it.
 
 ## Multiple architectures

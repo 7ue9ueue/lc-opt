@@ -21,9 +21,42 @@ struct Segment {
     std::uint32_t last;  // last row it owns, in sweep order
 };
 
-// Sweeps rows first, first + step, ..., up to and including row last (step = +1 or -1). Column
-// enter(x) joins at row x when it is in range; it beats every older column on a prefix of the
-// rows left. c[x] = min(c[x], envelope at x).
+// The last t in [0, len) with gap(t) <= 0, for a non-decreasing gap with gap(0) = g0 <= 0 and
+// gap(len) = g1 > 0. On the judge's data the gap is nearly linear, so interpolation lands within
+// a row or two; each probe also tests its neighbour on the far side. A probe that leaves more
+// than half of the interval is followed by a bisection step.
+template <class Gap>
+std::uint32_t last_nonpositive(Gap gap, std::uint32_t len, std::int64_t g0, std::int64_t g1) {
+    std::uint32_t lo = 0, hi = len;
+    bool bisect = false;
+    while (hi - lo > 1) {
+        const std::uint32_t width = hi - lo;
+        std::uint32_t t = lo + width / 2;
+        if (!bisect) {
+            const double guess = double(lo) + double(-g0) * double(width) / double(g1 - g0);
+            t = std::clamp(std::uint32_t(guess), lo + 1, hi - 1);
+        }
+        if (const std::int64_t g = gap(t); g <= 0) {
+            lo = t, g0 = g;
+            if (t + 1 < hi) {
+                if (const std::int64_t g = gap(t + 1); g > 0) return t;
+                else lo = t + 1, g0 = g;
+            }
+        } else {
+            hi = t, g1 = g;
+            if (t - 1 > lo) {
+                if (const std::int64_t g = gap(t - 1); g <= 0) return t - 1;
+                else hi = t - 1, g1 = g;
+            }
+        }
+        bisect = !bisect && 2 * (hi - lo) > width;
+    }
+    return lo;
+}
+
+// Sweeps rows first, first + Step, ..., last (Step = +1 or -1). Column enter_first + Step k joins
+// at the k-th row for k < enter_count; it beats every older column on a prefix of the rows left.
+// c[x] = min(c[x], envelope at x).
 template <int Step>
 void sweep(const std::uint32_t* a, const std::uint32_t* b, std::uint32_t* c, std::uint32_t first,
            std::uint32_t last, std::uint32_t enter_first, std::uint32_t enter_count, Segment* stack) {
@@ -34,38 +67,24 @@ void sweep(const std::uint32_t* a, const std::uint32_t* b, std::uint32_t* c, std
         while (top && before(stack[top - 1].last, x)) --top;
         if (k < enter_count) {
             const std::uint32_t j = enter_first + Step * k;
-            const std::uint32_t at_x = value(j, x);
             std::uint32_t won = x - Step;  // the new column wins rows up to here
             std::uint32_t from = x;
             while (top) {
-                const Segment s = stack[top - 1];
-                if (value(j, s.last) <= value(s.column, s.last)) {
-                    won = s.last;
-                    from = s.last + Step;
+                const auto [o, end] = stack[top - 1];
+                auto gap = [&](std::uint32_t t) {
+                    const std::uint32_t y = from + Step * t;
+                    return std::int64_t(value(j, y)) - std::int64_t(value(o, y));
+                };
+                const std::uint32_t len = Step > 0 ? end - from : from - end;
+                const std::int64_t at_end = gap(len);
+                if (at_end <= 0) {
+                    won = end;
+                    from = end + Step;
                     --top;
                     continue;
                 }
-                // Wins at from? Then the last win in [from, s.last).
-                if (from == x ? at_x <= value(s.column, x) : value(j, from) <= value(s.column, from)) {
-                    const std::uint32_t o = s.column;
-                    auto wins = [&](std::uint32_t t) { return value(j, from + Step * t) <= value(o, from + Step * t); };
-                    // Wins at offset base, loses at base + len. Short wins are common: try 1 first.
-                    std::uint32_t base = 0, len = Step > 0 ? s.last - from : from - s.last;
-                    if (len > 1 && wins(1)) {
-                        base = 1;
-                        --len;
-                        while (len > 1) {
-                            const std::uint32_t half = len / 2, next = (len - half) / 2;
-                            for (const std::uint32_t t : {base + next, base + half + next}) {
-                                __builtin_prefetch(a + (from + Step * t - j));
-                                __builtin_prefetch(a + (from + Step * t - o));
-                            }
-                            base = wins(base + half) ? base + half : base;
-                            len -= half;
-                        }
-                    }
-                    won = from + Step * base;
-                }
+                if (const std::int64_t at_from = gap(0); at_from <= 0)
+                    won = from + Step * last_nonpositive(gap, len, at_from, at_end);
                 break;
             }
             if (!top) won = last;

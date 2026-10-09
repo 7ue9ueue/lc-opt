@@ -163,12 +163,77 @@ inline void xor_rows(u64* dst, const u64* src, std::size_t count) {
     }
 }
 
+// The Taylor expansion below for rows <= 16 long rows, in one pass. With y = x^Tau,
+// f = sum_r f_r(x) y^r; substituting y = t + x gives sum_k H_k(x) t^k, H_k = sum_r C(r, k) x^(r-k) f_r
+// (a Taylor shift by x, its own inverse), deg H_k < Tau + 15. Split H_k = lo_k + x^Tau hi_k:
+// x^Tau = t + x, so g_k = lo_k + x hi_k + hi_(k-1). The inverse shifts g the same way and
+// f_r = lo_r + hi_(r-1). The shift moves data at most 15 columns right, so it runs on column
+// blocks from right to left, each with the 16 still unchanged columns before it.
+namespace wide {
+
+constexpr std::size_t kHalo = 16, kBlock = 128, kWidth = kHalo + kBlock;
+
+// buf[r][j] ^= sum over the shift, for columns j >= kHalo exact.
+inline void shift(u64 (*buf)[kWidth], std::size_t rows) {
+    for (std::size_t d = rows / 2; d >= 1; d /= 2) {
+        for (std::size_t s = 0; s < rows; s += 2 * d) {
+            for (std::size_t r = s; r < s + d; ++r) {
+                for (std::size_t j = d; j < kWidth; ++j) buf[r][j] ^= buf[r + d][j - d];
+            }
+        }
+    }
+}
+
+// H for columns [c, c + width) of f's rows (each Tau words), zero past Tau, into buf[r][kHalo, ...).
+template <std::size_t Tau>
+void block(const u64* f, std::size_t rows, std::size_t c, std::size_t width, u64 (*buf)[kWidth]) {
+    const bool inside = c >= kHalo && width == kBlock;  // c + kBlock <= Tau
+    for (std::size_t r = 0; r < rows; ++r) {
+        if (inside) {
+            std::memcpy(buf[r], f + r * Tau + c - kHalo, kWidth * sizeof(u64));
+            continue;
+        }
+        for (std::size_t j = 0; j < kWidth; ++j) {
+            const std::size_t col = c + j - kHalo;  // wraps below 0
+            buf[r][j] = c + j >= kHalo && col < Tau && j < kHalo + width ? f[r * Tau + col] : 0;
+        }
+    }
+    shift(buf, rows);
+}
+
+template <std::size_t Tau, bool Inverse>
+void taylor(u64* f, std::size_t rows) {
+    static_assert(Tau % kBlock == 0);
+    alignas(32) static u64 buf[16][kWidth];
+    alignas(32) static u64 high[16][kHalo];
+    block<Tau>(f, rows, Tau, 0, buf);
+    for (std::size_t r = 0; r < rows; ++r) std::memcpy(high[r], buf[r] + kHalo, sizeof(high[r]));
+    for (std::size_t c = Tau; c > 0;) {
+        c -= kBlock;
+        block<Tau>(f, rows, c, kBlock, buf);
+        for (std::size_t r = 0; r < rows; ++r) std::memcpy(f + r * Tau + c, buf[r] + kHalo, kBlock * sizeof(u64));
+    }
+    for (std::size_t r = 1; r < rows; ++r) {
+        for (std::size_t e = 0; e < kHalo; ++e) f[r * Tau + e] ^= high[r - 1][e];
+    }
+    if constexpr (!Inverse) {
+        for (std::size_t r = 0; r < rows; ++r) {
+            for (std::size_t e = 0; e + 1 < kHalo; ++e) f[r * Tau + e + 1] ^= high[r][e];
+        }
+    }
+}
+
+}  // namespace wide
+
 // f[0, Len) = sum_m g_m(x) t^m with t = x^Tau + x, deg g_m < Tau: g_m in f[m * Tau, (m + 1) * Tau).
 // With A, B the halves and d = Len / 2 / Tau: x^(Len/2) = t^d + x^d, so
 // f = (A + x^d B_low + x^d B_high) + t^d (B + B_high), B_high the top d entries of B.
 template <std::size_t Len, std::size_t Tau, std::size_t W, std::size_t S, bool Inverse>
 void taylor(u64* f, std::size_t size) {
-    if constexpr (Len > Tau) {
+    if constexpr (W == 1 && S == 1 && Tau >= 4096 && Len / Tau <= 16) {
+        const std::size_t rows = Inverse ? Len / Tau : std::bit_ceil((size + Tau - 1) / Tau);
+        if (rows > 1) wide::taylor<Tau, Inverse>(f, rows);
+    } else if constexpr (Len > Tau) {
         constexpr std::size_t half = Len / 2, d = half / Tau;
         u64* a = f;
         u64* b = f + half * S;
@@ -208,6 +273,49 @@ void change_columns(u64* f, std::size_t used) {
     }
 }
 
+// x[0, 4) to [x0[k], x1[k], x2[k], x3[k]] for k < 4.
+inline void transpose4(Vec& x0, Vec& x1, Vec& x2, Vec& x3) {
+    const Vec t0 = _mm256_unpacklo_epi64(x0, x1), t1 = _mm256_unpackhi_epi64(x0, x1);
+    const Vec t2 = _mm256_unpacklo_epi64(x2, x3), t3 = _mm256_unpackhi_epi64(x2, x3);
+    x0 = _mm256_permute2x128_si256(t0, t2, 0x20);
+    x1 = _mm256_permute2x128_si256(t1, t3, 0x20);
+    x2 = _mm256_permute2x128_si256(t0, t2, 0x31);
+    x3 = _mm256_permute2x128_si256(t1, t3, 0x31);
+}
+
+// Four rows of Tau words, f[r * Tau + k], to buf[4 * k + r], or back.
+template <std::size_t Tau, bool Back>
+void transpose_rows(u64* f, u64* buf) {
+    for (std::size_t k = 0; k < Tau; k += 4) {
+        if constexpr (Back) {
+            Vec x0 = load(buf + 4 * k), x1 = load(buf + 4 * k + 4), x2 = load(buf + 4 * k + 8), x3 = load(buf + 4 * k + 12);
+            transpose4(x0, x1, x2, x3);
+            store(f + k, x0), store(f + Tau + k, x1), store(f + 2 * Tau + k, x2), store(f + 3 * Tau + k, x3);
+        } else {
+            Vec x0 = load(f + k), x1 = load(f + Tau + k), x2 = load(f + 2 * Tau + k), x3 = load(f + 3 * Tau + k);
+            transpose4(x0, x1, x2, x3);
+            store(buf + 4 * k, x0), store(buf + 4 * k + 4, x1), store(buf + 4 * k + 8, x2), store(buf + 4 * k + 12, x3);
+        }
+    }
+}
+
+// The row step of change_basis: change_basis<K> on rows [0, used) of Rows rows of 2^K elements.
+// Rows of single words go four at a time, transposed, so that every XOR moves a whole vector.
+template <int K, std::size_t Rows, std::size_t W, std::size_t S, bool Inverse>
+void change_rows(u64* f, std::size_t used) {
+    constexpr std::size_t tau = std::size_t(1) << K;
+    if constexpr (W == 1 && S == 1 && K >= 2 && K <= 8 && Rows >= 4) {
+        alignas(32) static u64 buf[4 * tau];
+        for (std::size_t m = 0; m < used; m += 4) {
+            transpose_rows<tau, false>(f + m * tau, buf);
+            change_basis<K, 4, 4, Inverse>(buf, tau);
+            transpose_rows<tau, true>(f + m * tau, buf);
+        }
+    } else {
+        for (std::size_t m = 0; m < used; ++m) change_basis<K, W, S, Inverse>(f + m * tau * S, tau);
+    }
+}
+
 // Monomial coefficients of f[0, 2^L) to X coefficients (or back). With K = 2^k the largest power
 // of two below L: expand in t = s_K = x^(2^K) + x, convert each row g_m (length 2^K), then each
 // column (a polynomial in t, whose basis s_i(t) = s_{K + i}(x) for i < L - K <= K).
@@ -218,12 +326,12 @@ void change_basis(u64* f, std::size_t size) {
         constexpr std::size_t tau = std::size_t(1) << K, rows = std::size_t(1) << (L - K);
         if constexpr (Inverse) {
             change_columns<L, K, W, S, true>(f, rows);
-            for (std::size_t m = 0; m < rows; ++m) change_basis<K, W, S, true>(f + m * tau * S, tau);
+            change_rows<K, rows, W, S, true>(f, rows);
             taylor<(std::size_t(1) << L), tau, W, S, true>(f, std::size_t(1) << L);
         } else {
             taylor<(std::size_t(1) << L), tau, W, S, false>(f, size);
             const std::size_t used = (size + tau - 1) / tau;  // deg f < size: g_m = 0 for m >= used
-            for (std::size_t m = 0; m < used; ++m) change_basis<K, W, S, false>(f + m * tau * S, tau);
+            change_rows<K, rows, W, S, false>(f, used);
             change_columns<L, K, W, S, false>(f, used);
         }
     }

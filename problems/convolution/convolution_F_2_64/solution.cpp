@@ -15,6 +15,7 @@
 
 #include "lib/io/bulk64.hpp"
 #include "lib/io/io.hpp"
+#include "fields.hpp"
 
 namespace {
 
@@ -590,8 +591,7 @@ void solve() {
     io::read_bulk(in, b, m);
     convolve(a, n, b, m, l);
     io::Writer out;
-    out.write_array(a, n + m - 1, ' ');
-    out.write('\n');
+    fields::write(out, a, n + m - 1);
 }
 
 #ifdef __ELF__

@@ -972,9 +972,10 @@ inline void read_bulk(Reader& in, std::uint64_t* dst, std::size_t count) {
 
 }  // namespace io
 // problems/convolution/convolution_F_2_64/fields.hpp
-// Fixed-width output of uint64 values: each right-aligned in 20 characters, then a separator; the
-// last separator is a newline. Judge-specific: the checker (testlib wcmp) compares tokens, so the
-// padding is accepted.
+// Output of uint64 values separated by spaces, then a newline. Blocks of mostly large values are
+// printed in fixed width: each value right-aligned in 20 characters, then a separator.
+// Judge-specific: the checker (testlib wcmp) compares tokens, so the padding is accepted. Blocks
+// with many short values stay variable-width, where padding would cost more in write(2).
 //
 // A value x = h * 10^16 + m * 10^8 + l is split by scalar code; h < 1845 is looked up as text with
 // its leading spaces, m and l become 8 digits each in AVX2, four values per step. Values below
@@ -1085,12 +1086,32 @@ inline void format(char* text, const u64* values, std::size_t count) {
     }
 }
 
+// Whether at least 1/8 of values[0, count) are below 2^53 (at most 16 digits).
+inline bool mostly_short(const u64* values, std::size_t count) {
+    __m256i shorts = _mm256_setzero_si256();  // minus the count per lane
+    std::size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        const __m256i top = _mm256_srli_epi64(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(values + i)), 53);
+        shorts = _mm256_add_epi64(shorts, _mm256_cmpeq_epi64(top, _mm256_setzero_si256()));
+    }
+    alignas(32) std::int64_t lanes[4];
+    _mm256_store_si256(reinterpret_cast<__m256i*>(lanes), shorts);
+    std::size_t n = std::size_t(-(lanes[0] + lanes[1] + lanes[2] + lanes[3]));
+    for (; i < count; ++i) n += values[i] >> 53 == 0;
+    return 8 * n >= count;
+}
+
 }  // namespace detail
 
 // values[0, count), count >= 1.
 inline void write(io::Writer& out, const std::uint64_t* values, std::size_t count) {
     for (std::size_t i = 0; i < count; i += detail::kBlock) {
         const std::size_t n = std::min(detail::kBlock, count - i);
+        if (detail::mostly_short(values + i, n)) {
+            out.write_array(values + i, n, ' ');
+            out.write(i + n == count ? '\n' : ' ');
+            continue;
+        }
         out.write_with(kWidth * n + 3, [&](char* text) {
             detail::format(text, values + i, n);
             if (i + n == count) text[kWidth * n - 1] = '\n';

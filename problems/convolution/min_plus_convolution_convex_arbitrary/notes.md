@@ -3,7 +3,8 @@
 N, M <= 2^19; a convex, 0 <= a_i, b_i <= 10^9; print c_k = min_{i+j=k} a_i + b_j (N + M - 1 values,
 each < 2^31). 5 s.
 
-Best judged: none yet. Record when opened: 38 ms (issue #28).
+Best judged: ours, 13 ms: [409218](https://judge.yosupo.jp/submission/409218) (current `main.cpp`).
+Record when opened: 38 ms (issue #28).
 I/O floor (`../floor.py`, `lib/io/notes.md`): 11.36 ms on `lc-amd`.
 
 ## Design
@@ -38,3 +39,4 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.36 ms on `lc-amd`.
   - Checks: 41/41 official tests; `stress.py` 1500 rounds against `brute.cpp`; ASan/UBSan on all
     41 cases (file input) and piped input.
   - Next: output is 2.7 ms and parse 1.6 (both `lib/io`); compute is 1.7 ms of ~12.8.
+  - Submitted the merged `main.cpp` (#58): [409218](https://judge.yosupo.jp/submission/409218), AC 13 ms, 21.3 MiB.

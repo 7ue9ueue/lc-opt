@@ -143,9 +143,29 @@ void test_page_ends() {
     }
 }
 
+// 64 zero bytes before the input and after its end, for read, mapped and piped input.
+void test_padding() {
+    for (const std::size_t size : {std::size_t(10), std::size_t(5000), std::size_t(200000)})
+        for (int source = 0; source < 2; ++source) {
+            const std::string text = "7" + std::string(size - 2, ' ') + "8";
+            const int fd = source ? pipe_with(text) : file_with(text);
+            io::Reader in(fd);
+            const std::string_view first = in.word();  // checked before the next read
+            bool zeros = first == "7";
+            for (int i = 1; i <= 64; ++i) zeros &= first.data()[-i] == 0;
+            const std::string_view last = in.word();
+            zeros &= last == "8";
+            for (int i = 1; i <= 64; ++i) zeros &= last.data()[i] == 0;
+            CHECK(zeros);
+            ::close(fd);
+        }
+    reap();
+}
+
 void test_words() {
     std::string text = "abc 1 x\n";
-    std::vector<std::string> words;
+    std::vector<std::string> words = {std::string(700000, 'w')};
+    text += words[0] + ' ';
     for (int i = 0; i < 2000; ++i) {
         std::string w(rng() % 70 + 1, 'a');
         for (char& c : w) c = char('!' + rng() % 94);
@@ -272,6 +292,36 @@ void test_writer() {
     ::close(fd);
 }
 
+// Values of at most 16 digits through the MaxDigits paths, both ways.
+void test_max_digits() {
+    std::vector<std::uint64_t> u;
+    std::vector<long long> v;
+    for (std::uint64_t p = 1; p <= 1000000000000000; p *= 10) u.insert(u.end(), {p - 1, p, 10 * p - 1});
+    for (int i = 0; i < 100000; ++i) u.push_back(rng() % 10000000000000000 >> (rng() % 50));
+    for (const std::uint64_t x : u) v.push_back(rng() % 2 ? -(long long)x : (long long)x);
+    const int fd = file_with("");
+    {
+        io::Writer out(fd);
+        for (const std::uint64_t x : u) out.write<16>(x, ' ');
+        for (const long long x : v) out.write<16>(x, '\n');
+        out.write_array<16>(u.data(), u.size(), ' ');
+    }
+    std::string expected;
+    for (const std::uint64_t x : u) expected += text_of(x) + ' ';
+    for (const long long x : v) expected += text_of(x) + '\n';
+    for (std::size_t i = 0; i < u.size(); ++i) expected += text_of(u[i]) + (i + 1 < u.size() ? " " : "");
+    CHECK(read_all(fd) == expected);
+    ::close(fd);
+    const int in_fd = file_with(expected);
+    io::Reader in(in_fd);
+    for (const std::uint64_t x : u) CHECK((in.read<std::uint64_t, 16>() == x));
+    for (const long long x : v) CHECK((in.read<long long, 16>() == x));
+    std::vector<std::uint64_t> got(u.size());
+    in.read<16>(got.data(), got.size());
+    CHECK(got == u);
+    ::close(in_fd);
+}
+
 // Every input of the vector divisions and digit groups used by the array formatter.
 void test_vector_arithmetic() {
     alignas(32) std::uint32_t lanes[8];
@@ -330,9 +380,11 @@ int main() {
     test_scalar<std::uint16_t>();
     test_scalar<std::int8_t>();
     test_page_ends();
+    test_padding();
     test_words();
     test_bulk();
     test_bulk_split();
+    test_max_digits();
     test_writer();
     test_vector_arithmetic();
     test_write_array();

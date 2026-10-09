@@ -5,19 +5,22 @@ Tests: `lib/io/test.cpp`. In-memory timing: `lib/io/bench.cpp`.
 
 ## Design
 
-- Input: a regular stdin file over 64 KiB is mapped, with at least 64 zero bytes after it (the rest
-  of the last page, or one extra anonymous page). Smaller files and pipes are read into an aligned
-  heap buffer: fewer system calls for tiny inputs.
+- Input: a regular stdin file over 64 KiB is mapped between an anonymous zero page and at least 64
+  zero bytes (the rest of the last page, or one more anonymous page). Smaller files and pipes are
+  read into an aligned heap buffer with 64 zero bytes on each side: fewer system calls for tiny
+  inputs. The guard before the input lets parsers load the 32 bytes that end at a token.
 - Token boundaries: a 64-bit mask of whitespace per aligned 64-byte block. The next token clears one
   bit (`tzcnt`, `blsr`), so a read never waits for the previous token's parse.
-- Values: digits right-aligned in 16 bytes with `pshufb`, then `pmaddubsw`, `pmaddwd`, `packusdw`,
-  `pmaddwd`. 64-bit values use two 128-bit lanes (last 16 digits, first 0..4).
+- Values: the 16 (32 for 64-bit types) bytes that end at the token, masked to its length, then
+  `pmaddubsw`, `pmaddwd`, `packusdw`, `pmaddwd`. A '-' saturates to 0, so signs cost one compare.
+  `read<T, MaxDigits>()` with MaxDigits <= 16 parses 64-bit values in 16 bytes.
 - Bulk `uint32_t` read: 128 KiB chunks cut into four streams at token boundaries, parsed in lockstep
   two tokens per step. Chunks shrink near the end of the array; the last < 1024 tokens use the
   scalar path. Irregular whitespace in a chunk falls back to one token at a time.
 - Output: 64 KiB buffer, `write(2)`. Integers: 4-digit table (10000 entries), groups placed in a
   vector, `pshufb` drops the leading zeros, one 16-byte store. Digit count from a 32-entry table
-  (32-bit) or two 65-entry tables (64-bit). No branches on value size.
+  (32-bit) or two 65-entry tables (64-bit). No branches on value size. `write<MaxDigits>()` with
+  MaxDigits <= 16 skips one 64-bit division. `write_with()` hands the buffer to custom formatters.
 - Bulk `uint32_t` write: eight values per step in AVX2. Digit counts come first, from vector
   compares, so the store addresses do not wait for the digits.
 
@@ -29,11 +32,14 @@ In memory, ns per token, median of 15 rounds of 2^20 tokens (`bench.cpp`):
 
 | Input | read | bulk read | write | bulk write |
 |---|---|---|---|---|
-| uint32 < 998244353 | 2.15 | 2.37 | 3.84 | 2.54 |
-| uint32 0..9 | 1.74 | 2.23 | 3.68 | 2.47 |
-| uint32, random bit length | 2.27 | 2.41 | 3.85 | 2.53 |
-| uint64 <= 10^18 | 3.72 | | 5.79 | |
-| int64, random | 4.50 | | 6.50 | |
+| uint32 < 998244353 | 2.06 | 2.38 | 3.83 | 2.53 |
+| uint32 0..9 | 1.59 | 2.27 | 3.69 | 2.47 |
+| uint32, random bit length | 2.19 | 2.41 | 3.88 | 2.54 |
+| uint64 <= 10^18 | 2.97 | | 5.28 | |
+| uint64 < 10^16 | 2.95 | | 5.26 | |
+| uint64 < 10^16, MaxDigits 16 | 2.27 | | 4.03 | |
+| int64, random | 3.29 | | 6.04 | |
+| int, random sign | 2.19 | | 4.60 | |
 
 Whole process, judge-like runner, ms, median of 21 rounds, max over the 3 largest cases:
 
@@ -45,7 +51,8 @@ Whole process, judge-like runner, ms, median of 21 rounds, max over the 3 larges
 | convolution_mod floor, read and print: old QPoly I/O (fixed-width output) | 10.16 |
 | same, lib/io (`write_array`, variable width) | 11.18 |
 | many_aplusb: `scanf`/`printf` | 270.60 |
-| many_aplusb: lib/io (record 23 ms, 2026-10-09) | 32.48 |
+| many_aplusb: lib/io, one value at a time | 31.90 |
+| many_aplusb: decimal addition in vectors (its `main.cpp`; record 23 ms) | 21.12 |
 | aplusb: `scanf`/`printf` vs lib/io, ratio | 0.99 |
 
 The old code prints every value in 10 columns (the checker allows it), about 1.1 ns per value.
@@ -80,6 +87,21 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
 - aplusb (tiny input) on CI's EPYC 7763: mapped input 1.2% slower than `scanf`; `fstat`, `lseek`,
   `mmap`, `munmap` and a page fault against one `read()`. Files up to 64 KiB are now read.
 - Writer state kept out of escaping calls (so GCC can keep it in registers): no change measured.
+- Assumptions, ns per token, to decide which deserve options:
+  - uint64 10^18: 32-byte load ending at the token 3.01 vs two 16-byte lanes 3.92. Default now.
+  - uint64 < 10^16: one 16-byte load 2.55 vs 3.73. Option `MaxDigits <= 16`.
+  - Signed, non-negative: `read<long long>` 4.44 vs `read<uint64_t>` 3.98; `read<int>` 2.61 vs
+    `read<uint32_t>` 2.14. With the end-anchored load the sign costs one compare: int64 3.29.
+  - Exactly one separator between tokens (skip the empty-token check): no gain. No option.
+  - uint64 format, < 10^16 assumed: 2.95 vs 5.55; full range via x / 10^8 twice: 4.65 vs 5.57
+    (one division by 10^16). Both kept.
+- Streamed input, a 256 KiB buffer refilled with `read()`, as a Reader template option: reading
+  alone 1.1 ms faster than mapping on 40 MB, but many_aplusb 24.6 vs 21.7 ms (user +1.9 ms, system
+  +1.5 ms with the input on tmpfs). Removed.
+- Software prefetch 512 B-8 KiB ahead of the separator scan: +0.8% to +3.6% on many_aplusb.
+- `write()` chunk size, 20 MB: 16 KiB +9%, 64 and 256 KiB equal, 1 MiB +1%, one 20 MB write +94%.
+- Judge harness (`tools/judge.py`): inputs now on tmpfs, as on the judge, instead of the VM's disk
+  cache. Same timings for these programs.
 
 ## Sources
 
@@ -96,6 +118,4 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
 
 - Bulk write is 1.3 ns per value slower than fixed-width output; the vector work, not the stores,
   is the limit (in-memory: compute 1.4, with movemask 1.7, full 2.4 ns per value).
-- many_aplusb runs about 150 instructions per line: two 64-bit parses and one format. A batched
-  path (parse many, add in vectors, format many) would belong in that problem's `main.cpp`.
-- Bulk reads for 64-bit and signed values.
+- Bulk reads for 64-bit and signed values; bulk write for 64-bit values.

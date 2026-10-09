@@ -6,13 +6,16 @@
 //   const auto n = in.read<std::uint32_t>();
 //   std::vector<std::uint32_t> a(n);
 //   in.read(a.data(), n);                     // bulk; AVX2 for uint32_t
+//   const auto s = in.read<std::uint64_t, 16>();  // promise: at most 16 digits (faster)
 //   out.write("n = ", n, '\n');               // any mix of integers, chars, strings
+//   out.write<16>(s, '\n');                   // promise: integers of at most 16 digits
 //   out.write_array(a.data(), n, ' ');        // bulk; AVX2 for uint32_t
 //   out.write('\n');
 //
 // Input: tokens separated by whitespace (any bytes <= ' '). Integer tokens are an optional '-'
 // (signed types only) followed by decimal digits, and fit the requested type. Reading past the
-// last token is undefined.
+// last token is undefined. The 64 bytes before the input and after its end are readable zeros, so
+// custom parsers may load up to 64 bytes around any token from word().
 #pragma once
 
 #include <fcntl.h>
@@ -36,63 +39,61 @@
 namespace io {
 namespace detail {
 
-// Zero bytes after the input. Loads start at or before the end of the input and reach at most
-// 63 bytes past it.
+// Zero bytes before and after the input. Loads reach at most 63 bytes past either end.
 inline constexpr std::size_t kPadding = 64;
 inline constexpr std::size_t kPage = 4096;
 
-// Input as mapped or read: data at start, kPadding zero bytes after its end.
+// Input as mapped or read: data [start, end), kPadding zero bytes before and after it.
 struct Input {
-    char* base;           // 64-byte aligned
+    char* base;           // allocation or mapping to release
     std::size_t mapped;   // bytes mapped, or 0 for a heap buffer
     const char* start;
+    const char* end;
 };
 
 inline Input map_input(int fd, std::size_t size) {
     const off_t offset = ::lseek(fd, 0, SEEK_CUR);
     if (offset < 0 || std::size_t(offset) >= size) return {};
+    // One anonymous zero page before the file. After it, the rest of the last file page reads as
+    // zero; if fewer than kPadding bytes remain, one more anonymous page follows.
     const std::size_t file_bytes = (size + kPage - 1) & ~(kPage - 1);
-    // Bytes past the end of the file up to its last page boundary read as zero. If fewer than
-    // kPadding remain, reserve one more page, anonymous and zero, after the file.
-    const std::size_t mapped = file_bytes - size >= kPadding ? file_bytes : file_bytes + kPage;
-    void* base;
-    if (mapped == file_bytes) {
-        base = ::mmap(nullptr, mapped, PROT_READ, MAP_PRIVATE, fd, 0);
-    } else {
-        base = ::mmap(nullptr, mapped, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (base != MAP_FAILED && ::mmap(base, file_bytes, PROT_READ, MAP_PRIVATE | MAP_FIXED, fd, 0) == MAP_FAILED) {
-            ::munmap(base, mapped);
-            base = MAP_FAILED;
-        }
-    }
+    const std::size_t mapped = kPage + file_bytes + (file_bytes - size < kPadding ? kPage : 0);
+    void* base = ::mmap(nullptr, mapped, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (base == MAP_FAILED) return {};
-    return {static_cast<char*>(base), mapped, static_cast<char*>(base) + offset};
+    char* const file = static_cast<char*>(base) + kPage;
+    if (::mmap(file, file_bytes, PROT_READ, MAP_PRIVATE | MAP_FIXED, fd, 0) == MAP_FAILED) {
+        ::munmap(base, mapped);
+        return {};
+    }
+    return {static_cast<char*>(base), mapped, file + offset, file + size};
 }
 
+// Capacity bytes for data, with kPadding bytes before and after; returns the data start.
 inline char* allocate(std::size_t capacity) {
-    auto* p = static_cast<char*>(std::aligned_alloc(64, capacity + kPadding));
+    auto* p = static_cast<char*>(std::aligned_alloc(64, capacity + 2 * kPadding));
     if (!p) std::abort();
-    return p;
+    std::memset(p, 0, kPadding);
+    return p + kPadding;
 }
 
 // Reads fd until end of file, or until size bytes for a regular file of that size.
 inline Input read_input(int fd, std::size_t size = std::size_t(-1)) {
     std::size_t done = 0, capacity = std::size_t(1) << 16;
-    char* base = allocate(capacity);
+    char* data = allocate(capacity);
     while (done < size) {
         if (done == capacity) {
             char* bigger = allocate(capacity *= 2);
-            std::memcpy(bigger, base, done);
-            std::free(base);
-            base = bigger;
+            std::memcpy(bigger, data, done);
+            std::free(data - kPadding);
+            data = bigger;
         }
-        const ssize_t got = ::read(fd, base + done, capacity - done);
+        const ssize_t got = ::read(fd, data + done, capacity - done);
         if (got > 0) done += std::size_t(got);
         else if (got == 0) break;
         else if (errno != EINTR) std::abort();
     }
-    std::memset(base + done, 0, kPadding);
-    return {base, 0, base};
+    std::memset(data + done, 0, kPadding);
+    return {data - kPadding, 0, data, data + done};
 }
 
 // Files over kMapAbove bytes are mapped; smaller ones and other inputs are read, which takes
@@ -168,18 +169,33 @@ inline std::uint64_t parse16(__m128i window, unsigned n) {
     return (both & 0xFFFFFFFF) * 100000000 + (both >> 32);
 }
 
-// Value of the digits [s, s + n), n <= 20.
-inline std::uint64_t parse20(const char* s, unsigned n) {
-    // The last min(n, 16) digits in the high lane, the 0..4 before them in the low lane.
-    const unsigned head = n > 16 ? n - 16 : 0;
-    const __m256i windows =
-        _mm256_loadu2_m128i(reinterpret_cast<const __m128i*>(s + head), reinterpret_cast<const __m128i*>(s));
-    const __m256i rows = _mm256_set_m128i(align_row(n - head + 1), align_row(head + 1));
-    const __m256i groups = digit_groups(_mm256_shuffle_epi8(_mm256_subs_epu8(windows, _mm256_set1_epi8('0')), rows));
-    const __m256i halves = _mm256_madd_epi16(_mm256_packus_epi32(groups, groups), _mm256_set1_epi32(0x00012710));
-    const std::uint64_t head_value = std::uint64_t(_mm256_extract_epi64(halves, 0)) >> 32;
-    const auto tail = std::uint64_t(_mm256_extract_epi64(halves, 2));
-    return (head_value * 100000000 + (tail & 0xFFFFFFFF)) * 100000000 + (tail >> 32);
+// kKeep[32 - k..64 - k) keeps the last k bytes of 32.
+alignas(64) inline constexpr auto kKeep = [] {
+    std::array<std::uint8_t, 64> t{};
+    for (std::size_t i = 32; i < 64; ++i) t[i] = 0xFF;
+    return t;
+}();
+
+// Value of the n <= 16 digits that end at end. Bytes below '0' before them (a sign) count as 0.
+inline std::uint64_t parse_ending16(const char* end, unsigned n) {
+    const __m128i bytes = _mm_loadu_si128(reinterpret_cast<const __m128i*>(end - 16));
+    const __m128i keep = _mm_loadu_si128(reinterpret_cast<const __m128i*>(kKeep.data() + 16 + n));
+    const __m128i groups = digit_groups(_mm_and_si128(_mm_subs_epu8(bytes, _mm_set1_epi8('0')), keep));
+    const __m128i halves = _mm_madd_epi16(_mm_packus_epi32(groups, groups), _mm_set1_epi32(0x00012710));
+    const auto both = std::uint64_t(_mm_cvtsi128_si64(halves));  // 8-digit halves, high one first
+    return (both & 0xFFFFFFFF) * 100000000 + (both >> 32);
+}
+
+// Value of the n <= 24 digits that end at end; at most 20 for a result below 2^64.
+inline std::uint64_t parse_ending24(const char* end, unsigned n) {
+    const __m256i bytes = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(end - 32));
+    const __m256i keep = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(kKeep.data() + n));
+    const __m256i groups = digit_groups(_mm256_and_si256(_mm256_subs_epu8(bytes, _mm256_set1_epi8('0')), keep));
+    // 8-digit quarters; the first is 0. Dword 1 of the low lane, dwords 0 and 1 of the high lane.
+    const __m256i quarters = _mm256_madd_epi16(_mm256_packus_epi32(groups, groups), _mm256_set1_epi32(0x00012710));
+    const std::uint64_t high = std::uint64_t(_mm256_extract_epi64(quarters, 0)) >> 32;
+    const auto low = std::uint64_t(_mm256_extract_epi64(quarters, 2));
+    return (high * 100000000 + (low & 0xFFFFFFFF)) * 100000000 + (low >> 32);
 }
 
 // kQuad[x] for x < 10^4: its 4 digits with leading zeros, first digit in the lowest byte.
@@ -247,24 +263,32 @@ inline char* format(char* p, std::uint32_t x) {
     return p + n;
 }
 
-// x < 10^16 as 16 digits with leading zeros.
-inline __m128i sixteen_digits(std::uint64_t x) {
-    const auto high = std::uint32_t(x / 100000000), low = std::uint32_t(x % 100000000);
+// high, low < 10^8 as 16 digits with leading zeros.
+inline __m128i sixteen_digits(std::uint32_t high, std::uint32_t low) {
     return _mm_set_epi64x(std::int64_t(kQuad[low / 10000] | std::uint64_t(kQuad[low % 10000]) << 32),
                           std::int64_t(kQuad[high / 10000] | std::uint64_t(kQuad[high % 10000]) << 32));
 }
 
-// Writes x in decimal at p and returns the end. Stores up to 20 bytes.
-inline char* format(char* p, std::uint64_t x) {
-    // Twenty digits with leading zeros: a head of four, then sixteen.
-    const auto top = std::uint32_t(x / 10000000000000000);
+// Writes x in decimal at p and returns the end. Stores up to 20 bytes. MaxDigits <= 16 promises
+// x < 10^16, which saves a division.
+template <int MaxDigits>
+inline char* format64(char* p, std::uint64_t x) {
+    const std::uint64_t q = x / 100000000;  // < 1.9 * 10^11
+    const auto low = std::uint32_t(x - q * 100000000);
     const unsigned n = digit_count(x);
-    const unsigned head = n > 16 ? n - 16 : 0;
-    const auto head_digits = std::uint32_t(std::uint64_t(kQuad[top]) >> (32 - 8 * head));
-    std::memcpy(p, &head_digits, 4);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(p + head),
-                     shift_down(sixteen_digits(x % 10000000000000000), 16 - (n - head)));
-    return p + n;
+    if constexpr (MaxDigits <= 16) {
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(p), shift_down(sixteen_digits(std::uint32_t(q), low), 16 - n));
+        return p + n;
+    } else {
+        // Twenty digits with leading zeros: a head of four, then sixteen.
+        const auto top = std::uint32_t(q / 100000000);  // < 1845
+        const auto middle = std::uint32_t(q - std::uint64_t(top) * 100000000);
+        const unsigned head = n > 16 ? n - 16 : 0;
+        const auto head_digits = std::uint32_t(std::uint64_t(kQuad[top]) >> (32 - 8 * head));
+        std::memcpy(p, &head_digits, 4);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(p + head), shift_down(sixteen_digits(middle, low), 16 - (n - head)));
+        return p + n;
+    }
 }
 
 // floor(x / d) for every dword x, as (x * Magic) >> Shift. The test checks each use exhaustively.
@@ -337,8 +361,9 @@ inline char* format8(char* p, __m256i v, char separator) {
     return put_pair(p, _mm256_unpackhi_epi64(th_high, ls_high), count(6), count(7));
 }
 
-// Parses uint32 tokens from the token at p into dst, at most count and all but fewer than
-// kMinTokens of them. Returns where it stopped and the tokens parsed. Each chunk of input is cut
+// Parses uint32 tokens from the token at p into dst: at most count, from input that is valid up
+// to limit. Stops when fewer than kMinTokens tokens or 1 KiB of input remain. Returns where it
+// stopped and the tokens parsed. Each chunk of input is cut
 // into four streams at token boundaries. The streams advance in lockstep, two tokens per step, so
 // four independent pointer chains overlap.
 class BulkParser {
@@ -350,12 +375,14 @@ public:
         std::size_t parsed;
     };
 
-    static Result parse(const char* p, std::uint32_t* dst, std::size_t count) {
+    static Result parse(const char* p, const char* limit, std::uint32_t* dst, std::size_t count) {
         std::uint32_t* const first = dst;
-        while (count >= kMinTokens) {
+        while (count >= kMinTokens && limit - p >= 1024 + 64) {
             // With tokens of at most 16 bytes a chunk spans at most chunk + 33 bytes, so it holds
-            // at most chunk / 2 + 17 < count tokens: all of them belong to this array.
-            const std::size_t chunk = std::min(kChunk, 2 * (count - 32)) & ~std::size_t(3);
+            // at most chunk / 2 + 17 < count tokens: all of them belong to this array. It ends
+            // before limit.
+            const std::size_t chunk =
+                std::min({kChunk, 2 * (count - 32), std::size_t(limit - p) - 64}) & ~std::size_t(3);
             const std::size_t stream = chunk / 4;
             const char* s[4] = {p, after_separator(p + stream), after_separator(p + 2 * stream),
                                 after_separator(p + 3 * stream)};
@@ -495,13 +522,16 @@ class Reader {
 public:
     // Takes everything that remains on fd (stdin by default).
     explicit Reader(int fd = 0) : input_(detail::open_input(fd)) { seek(input_.start); }
+
     ~Reader() { detail::release(input_); }
 
     Reader(const Reader&) = delete;
     Reader& operator=(const Reader&) = delete;
 
-    // Next integer token, or the next non-whitespace character for char.
-    template <class T>
+    // Next integer token, or the next non-whitespace character for char. MaxDigits, if set, promises
+    // at most that many digits; for 64-bit types, 16 or fewer selects a faster parser.
+    // Non-negative values parse faster as unsigned types (10-18%, see notes.md).
+    template <class T, int MaxDigits = 0>
         requires std::integral<T> && (!std::same_as<T, bool>)
     T read() {
         if constexpr (std::same_as<T, char>) {
@@ -509,26 +539,23 @@ public:
             return *cur_++;
         } else {
             const auto [start, length] = next_token();
-            if constexpr (std::is_unsigned_v<T>) {
-                return T(parse<sizeof(T) <= 4>(start, length));
-            } else {
-                const bool negative = *start == '-';
-                const auto magnitude = parse<sizeof(T) <= 4>(start + negative, length - negative);
-                return T(negative ? 0 - magnitude : magnitude);
-            }
+            // A leading '-' sits below '0' and parses as a zero digit.
+            const auto magnitude = parse<(sizeof(T) > 4), MaxDigits>(start + length, length);
+            if constexpr (std::is_unsigned_v<T>) return T(magnitude);
+            else return T(*start == '-' ? 0 - magnitude : magnitude);
         }
     }
 
     // count tokens into dst. uint32_t uses the AVX2 bulk parser; other types read one by one.
-    template <class T>
+    template <int MaxDigits = 0, class T>
     void read(T* dst, std::size_t count) {
         if constexpr (std::same_as<T, std::uint32_t>) {
             skip_whitespace();
-            const auto [end, parsed] = detail::BulkParser::parse(cur_, dst, count);
-            seek(end);
+            const auto [stop, parsed] = detail::BulkParser::parse(cur_, input_.end, dst, count);
+            seek(stop);
             for (std::size_t i = parsed; i < count; ++i) dst[i] = read<T>();
         } else {
-            for (std::size_t i = 0; i < count; ++i) dst[i] = read<T>();
+            for (std::size_t i = 0; i < count; ++i) dst[i] = read<T, MaxDigits>();
         }
     }
 
@@ -548,7 +575,7 @@ private:
     void seek(const char* p) {
         cur_ = p;
         block_ = reinterpret_cast<const char*>(reinterpret_cast<std::uintptr_t>(p) & ~std::uintptr_t(63));
-        separators_ = detail::block_separators(block_) & ~std::uint64_t(0) << (p - block_);
+        separators_ = detail::block_separators(block_) & ~std::uint64_t(0) << (cur_ - block_);
     }
 
     // Position of the next separator; at or after cur_.
@@ -577,13 +604,12 @@ private:
         }
     }
 
-    // Value of the token [s, s + n). Narrow: at most 10 digits; otherwise at most 20.
-    template <bool Narrow>
-    static auto parse(const char* s, unsigned n) {
-        if constexpr (Narrow)
-            return std::uint32_t(detail::parse16(_mm_loadu_si128(reinterpret_cast<const __m128i*>(s)), n));
-        else
-            return detail::parse20(s, n);
+    // Value of the n characters that end at end.
+    template <bool Wide, int MaxDigits>
+    static auto parse(const char* end, unsigned n) {
+        if constexpr (!Wide) return std::uint32_t(detail::parse_ending16(end, n));
+        else if constexpr (MaxDigits > 0 && MaxDigits <= 16) return detail::parse_ending16(end, n);
+        else return detail::parse_ending24(end, n);
     }
 
     detail::Input input_;
@@ -594,6 +620,8 @@ private:
 
 // Buffered output. write() takes any mix of integers, chars and strings:
 //   out.write(x, ' ', y, '\n');
+// MaxDigits, if set, promises integers of at most that many digits; for 64-bit types, 16 or fewer
+// selects a faster formatter: out.write<16>(sum, '\n').
 class Writer {
 public:
     explicit Writer(int fd = 1) : fd_(fd) {}
@@ -602,21 +630,29 @@ public:
     Writer(const Writer&) = delete;
     Writer& operator=(const Writer&) = delete;
 
-    template <class... Ts>
+    template <int MaxDigits = 0, class... Ts>
     void write(const Ts&... values) {
         const std::size_t needed = (std::size_t(0) + ... + max_size(values));
         if (needed > kCapacity) [[unlikely]] {
-            (write_alone(values), ...);
+            (write_alone<MaxDigits>(values), ...);
             return;
         }
         if (std::size_t(buffer_ + kCapacity - cur_) < needed) [[unlikely]] flush();
         char* p = cur_;
-        ((p = put(p, values)), ...);
+        ((p = put<MaxDigits>(p, values)), ...);
         cur_ = p;
     }
 
+    // Custom formatting: fill(p) may store up to max_size <= 64 KiB bytes at p and returns the end
+    // of what it wrote.
+    template <class Fill>
+    void write_with(std::size_t max_size, Fill fill) {
+        if (std::size_t(buffer_ + kCapacity - cur_) < max_size) [[unlikely]] flush();
+        cur_ = fill(cur_);
+    }
+
     // values[0..count) joined by separator. uint32_t uses the AVX2 formatter.
-    template <class T>
+    template <int MaxDigits = 0, class T>
     void write_array(const T* values, std::size_t count, char separator) {
         if (!count) return;
         std::size_t i = 0;
@@ -633,7 +669,7 @@ public:
             }
             cur_ = p;
         }
-        for (; i < count; ++i) write(values[i], separator);
+        for (; i < count; ++i) write<MaxDigits>(values[i], separator);
         --cur_;  // no separator after the last value
     }
 
@@ -656,7 +692,7 @@ private:
         else return std::string_view(value).size();
     }
 
-    template <class T>
+    template <int MaxDigits, class T>
     static char* put(char* p, const T& value) {
         if constexpr (std::same_as<T, char>) {
             *p = value;
@@ -666,9 +702,11 @@ private:
             if constexpr (std::is_signed_v<T>) {
                 *p = '-';
                 p += value < 0;
-                return detail::format(p, value < 0 ? U(0 - U(value)) : U(value));
-            } else {
+                return put<MaxDigits>(p, value < 0 ? U(0 - U(value)) : U(value));
+            } else if constexpr (sizeof(T) <= 4) {
                 return detail::format(p, U(value));
+            } else {
+                return detail::format64<MaxDigits == 0 ? 20 : MaxDigits>(p, U(value));
             }
         } else {
             const std::string_view s(value);
@@ -678,10 +716,10 @@ private:
     }
 
     // A value longer than the buffer: flush, then write it directly.
-    template <class T>
+    template <int MaxDigits, class T>
     void write_alone(const T& value) {
         if constexpr (std::same_as<T, char> || kInteger<T>) {
-            write(value);
+            write<MaxDigits>(value);
         } else {
             flush();
             const std::string_view s(value);

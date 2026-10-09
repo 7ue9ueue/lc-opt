@@ -71,7 +71,7 @@ std::string join(const std::vector<T>& v) {
     return s;
 }
 
-template <class T>
+template <class T, int MaxDigits = 0>
 void bench(const char* name, const std::function<T(std::mt19937_64&)>& gen) {
     std::mt19937_64 rng(1);
     const std::vector<T> v = make<T>(rng, gen);
@@ -81,7 +81,7 @@ void bench(const char* name, const std::function<T(std::mt19937_64&)>& gen) {
         ::wait(nullptr);
         const double t0 = now_ns();
         std::uint64_t sum = 0;
-        for (std::size_t i = 0; i < kTokens; ++i) sum += std::uint64_t(in.read<T>());
+        for (std::size_t i = 0; i < kTokens; ++i) sum += std::uint64_t(in.read<T, MaxDigits>());
         const double t1 = now_ns();
         sink = sum;
         return t1 - t0;
@@ -103,7 +103,7 @@ void bench(const char* name, const std::function<T(std::mt19937_64&)>& gen) {
     const Timing write = time_rounds([&] {
         io::Writer out(null);
         const double t0 = now_ns();
-        for (std::size_t i = 0; i < kTokens; ++i) out.write(v[i], ' ');
+        for (std::size_t i = 0; i < kTokens; ++i) out.write<MaxDigits>(v[i], ' ');
         out.flush();
         return now_ns() - t0;
     });
@@ -135,6 +135,8 @@ int main() {
     bench<u32>("u32", [](auto& r) { return u32(r()); });
     bench<u64>("1e18", [](auto& r) { return u64(r() % 1000000000000000001); });
     bench<u64>("mixed64", [](auto& r) { return u64(r() >> (r() % 64)); });
+    bench<u64>("<1e16", [](auto& r) { return u64(r() % 10000000000000000); });
+    bench<u64, 16>("<1e16 /16", [](auto& r) { return u64(r() % 10000000000000000); });
     bench<std::int64_t>("i64", [](auto& r) { return std::int64_t(r()); });
     bench<int>("int", [](auto& r) { return int(r() % 2000001) - 1000000; });
 }

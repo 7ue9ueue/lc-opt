@@ -565,6 +565,23 @@ public:
         return {start, length};
     }
 
+    // Tokenizer state, for custom token loops. separators has one bit per whitespace byte of the
+    // 64-byte block at block, at or after cur. The lowest bit is the end of the token at cur: clear
+    // it to move on. With no bits left, advance block by 64 and take detail::block_separators.
+    struct Scan {
+        const char* cur;
+        const char* block;
+        std::uint64_t separators;
+    };
+
+    Scan scan() const { return {cur_, block_, separators_}; }
+
+    void resume(const Scan& scan) {
+        cur_ = scan.cur;
+        block_ = scan.block;
+        separators_ = scan.separators;
+    }
+
 private:
     struct Token {
         const char* start;

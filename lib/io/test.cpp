@@ -162,6 +162,30 @@ void test_padding() {
     reap();
 }
 
+// A custom loop on scan() state, then the Reader again after resume().
+void test_scan() {
+    const int fd = file_with("12 345\n6789 0 77 8\n");
+    io::Reader in(fd);
+    CHECK(in.read<int>() == 12);
+    io::Reader::Scan scan = in.scan();
+    std::vector<std::string> tokens;
+    for (int i = 0; i < 3; ++i) {
+        while (!scan.separators) {
+            scan.block += 64;
+            scan.separators = io::detail::block_separators(scan.block);
+        }
+        const char* end = scan.block + std::countr_zero(scan.separators);
+        scan.separators &= scan.separators - 1;
+        tokens.emplace_back(scan.cur, end);
+        scan.cur = end + 1;
+    }
+    CHECK((tokens == std::vector<std::string>{"345", "6789", "0"}));
+    in.resume(scan);
+    CHECK(in.read<int>() == 77);
+    CHECK(in.word() == "8");
+    ::close(fd);
+}
+
 void test_words() {
     std::string text = "abc 1 x\n";
     std::vector<std::string> words = {std::string(700000, 'w')};
@@ -381,6 +405,7 @@ int main() {
     test_scalar<std::int8_t>();
     test_page_ends();
     test_padding();
+    test_scan();
     test_words();
     test_bulk();
     test_bulk_split();

@@ -830,8 +830,8 @@ void sample(const Problem& p, std::size_t t1, std::size_t t2, std::size_t lo, st
 // c[k0, k0 + kGroup) for group t: columns between the sample opts, clamped to rows' valid columns.
 void group(const Problem& p, std::size_t t) {
     const std::size_t k0 = t * kGroup;
-    const std::size_t lo = std::max(p.opt[t], k0 + 1 > p.n ? k0 + 1 - p.n : 0);
-    const std::size_t hi = std::min(p.opt[t + 1], k0 + kGroup - 1);
+    const std::size_t lo = std::max(std::size_t{p.opt[t]}, k0 + 1 > p.n ? k0 + 1 - p.n : 0);
+    const std::size_t hi = std::min(std::size_t{p.opt[t + 1]}, k0 + kGroup - 1);
     __m256i low0 = _mm256_set1_epi32(-1), low1 = low0;
     for (std::size_t j = lo; j <= hi; ++j) {
         const __m256i b = _mm256_set1_epi32(int(p.b[j]));

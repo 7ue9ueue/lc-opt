@@ -3,8 +3,8 @@
 N <= 20; 2^N values a_i, b_i < 998244353; print c_k = sum over i & j = k of a_i b_j, mod 998244353.
 5 s. Inputs are ~20.7 MB, outputs ~10.5 MB (fixed width) at N = 20.
 
-Best judged: ours, [409186](https://judge.yosupo.jp/submission/409186), 13 ms (first). Same file as
-409181 (23 ms), whose 23 ms max_random_01 was judge noise.
+Best judged: ours, [409202](https://judge.yosupo.jp/submission/409202), 12 ms (first; round 2,
+all three max_random cases 12 ms). Round 1: 409186, 13 ms.
 Next other user: 26 ms (adamant, 400554).
 
 ## Design
@@ -104,6 +104,10 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
     save ~0.25 ms here (input read before any output); that is lib/io's (#21).
   - Checks: 13/13 official tests; `stress.py` 120 rounds; ASan/UBSan on all 13 official tests,
     file and pipe input.
+  - PR #48 merged. CI ratios: Xeon 8370C 0.929, EPYC 7763 0.964, EPYC 9V74 0.941 (geomean 0.944).
+- 2026-10-09, claude: submitted the round-2 `main.cpp` (PR #48),
+  [409202](https://judge.yosupo.jp/submission/409202): AC, 12 ms, 19.0 MiB (3/5). max_random_00,
+  _01, _02: 12 ms each (round 1: 12-13 ms).
 - Next: the transforms (1.5 ms) run at ~3 vector ops per butterfly plus one store per element
   per pass, near the 4-pipe bound; little left there. Remaining time is lib/io (parse 2.5 ms,
   input faults and `munmap` 1.6 ms), `../fixed_width.hpp` (1.13 ms) and `write()` (3.4 ms).

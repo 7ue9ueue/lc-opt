@@ -55,6 +55,20 @@ Solve every [Library Checker](https://judge.yosupo.jp) problem, then make each s
 - Need more capacity? Create a VM yourself: same project and region, Ubuntu 24.04, name `lc-<purpose>`.
   Add it to this table. Never delete a VM you did not create.
 
+## Tools
+
+They need Linux and Docker: run them on a VM or in CI, not on the Mac.
+
+- `python3 tools/judge.py test <problem> <file.cpp>`: the judge's compiler and command, every official test,
+  the official checker.
+- `python3 tools/judge.py bench <problem> <old.cpp> <new.cpp>`: same-run timing on the slowest tests.
+  A ratio below 1 means the new file is faster.
+- `python3 tools/cases.py <problem>`: build the official tests only (cached in `~/.cache/lc-opt`).
+- Both VMs have the repo at `~/lc-opt`. Run `git fetch` there and check out your branch.
+- `main` is protected. Every change, docs included, goes through a pull request; enable
+  `gh pr merge --auto --squash`. CI (`.github/workflows/verify.yml`) tests each changed `main.cpp` and times it
+  against `main` on 3 machines. It merges only if correct and not slower at all.
+
 ## Layout
 
 ```

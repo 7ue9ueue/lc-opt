@@ -1,5 +1,5 @@
 // Tests for lib/poly against O(n^2) references: transforms leaf by leaf against their definition,
-// products against schoolbook multiplication, the inverse and exp against their recurrences,
+// products against schoolbook multiplication, the inverse, exp and log against their recurrences,
 // coefficient-wise operations against scalar code. Long results are checked at random
 // coefficients (each an O(n) sum).
 #include <algorithm>
@@ -11,6 +11,7 @@
 #include "lib/poly/calculus.hpp"
 #include "lib/poly/exp.hpp"
 #include "lib/poly/inverse.hpp"
+#include "lib/poly/log.hpp"
 #include "lib/poly/transform.hpp"
 
 namespace {
@@ -81,12 +82,13 @@ std::array<u32, 8> leaf(const std::vector<u32>& a, std::size_t p, const u32* roo
 }
 
 struct Fixture {
-    poly::Arena arena{2 * poly::Transform::words(kLgMax) + 11 * poly::Arena::footprint(std::size_t(1) << kLgMax)};
+    poly::Arena arena{2 * poly::Transform::words(kLgMax) + 14 * poly::Arena::footprint(std::size_t(1) << kLgMax)};
     poly::Transform t{arena, kLgMax};
     std::span<u32> buffer[4] = {arena.take(1 << kLgMax), arena.take(1 << kLgMax), arena.take(1 << kLgMax),
                                 arena.take(1 << kLgMax)};
     std::span<u32> scratch = arena.take(poly::inverse_scratch(std::size_t(1) << kLgMax));
     std::span<u32> exp_scratch = arena.take(poly::exp_scratch(std::size_t(1) << kLgMax));
+    std::span<u32> log_scratch = arena.take(poly::log_scratch((std::size_t(1) << kLgMax) + 1));
     std::span<u32> roots = arena.take(ntt::detail::table_words(kLgMax));  // for the leaf definition
 
     Fixture() { ntt::detail::build_table(roots.data(), (std::size_t(1) << kLgMax) / 16, ntt::detail::kRoots[0]); }
@@ -396,6 +398,69 @@ void test_exp(Fixture& fx) {
     }
 }
 
+// g = log(f) mod x^n by i g_i = i f_i - sum_(0<k<i) k g_k f_(i-k), f[0] = 1.
+std::vector<u32> log_reference(const std::vector<u32>& f, std::size_t n) {
+    const auto coefficient = [&f](std::size_t i) { return i < f.size() ? f[i] : 0; };
+    std::vector<u32> g(n, 0), kg(n, 0);
+    for (std::size_t i = 1; i < n; ++i) {
+        u64 s = mul(u32(i), coefficient(i));
+        for (std::size_t k = 1; k < i; ++k) s = (s + P - u64(kg[k]) * coefficient(i - k) % P) % P;
+        kg[i] = u32(s);
+        g[i] = mul(kg[i], power(u32(i), P - 2));
+    }
+    return g;
+}
+
+void check_log(Fixture& fx, const std::vector<u32>& f, std::size_t n) {
+    std::vector<u32> g(n, 0xFFFFFFFF);
+    poly::log(fx.t, f, g, fx.log_scratch);
+    if (n <= 3000) {
+        expect(g == log_reference(f, n), "log", n, f.size());
+        return;
+    }
+    const std::size_t prefix = 1000;  // g mod x^m is log(f) mod x^m
+    expect(std::equal(g.begin(), g.begin() + prefix, log_reference(f, prefix).begin()), "log prefix", n);
+    expect(g[0] == 0, "log: g[0] = 0", n);
+    const auto coefficient = [&f](std::size_t i) { return i < f.size() ? f[i] : 0; };
+    const std::size_t m = (std::size_t(1) << poly::log_log(n)) / 2;  // where q = f'/f is split
+    std::vector<std::size_t> at = {n - 1, n - 2, m - 1, m, m + 1};
+    for (int i = 0; i < 24; ++i) at.push_back(1 + pick(n - 1));
+    for (std::size_t i : at) {  // i f_i = sum_k k g_k f_(i-k)
+        u64 s = 0;
+        for (std::size_t k = 1; k <= i; ++k) s = (s + u64(k) * g[k] % P * coefficient(i - k)) % P;
+        expect(s == mul(u32(i), coefficient(i)), "f' = f g' at coefficient", n, i);
+    }
+}
+
+void test_log(Fixture& fx) {
+    for (std::size_t n = 1; n <= 160; ++n)
+        for (int kind = 0; kind < 3; ++kind) {
+            auto f = random_poly(n, kind);
+            f[0] = 1;
+            check_log(fx, f, n);
+        }
+    // Edge cases: f = 1 (g = 0), f = 1 - x (g_i = -1 / i), f shorter and longer than n.
+    for (std::size_t n : {65, 66, 1000, 4096, 4097, 4098, 70000}) {
+        check_log(fx, {1}, n);
+        check_log(fx, {1, P - 1}, n);
+        auto f = random_poly(n / 3 + 1);
+        f[0] = 1;
+        check_log(fx, f, n);
+        f = random_poly(2 * n);
+        f[0] = 1;
+        check_log(fx, f, n);
+    }
+    for (int lg = 7; lg <= kLgMax; ++lg) {
+        const std::size_t n = std::size_t(1) << lg;
+        for (std::size_t m : {n - 1, n, n + 1, n + 2, n / 2 + pick(n / 2) + 1}) {
+            if (m > (std::size_t(1) << kLgMax) + 1) continue;
+            auto f = random_poly(m, int(pick(3)));
+            f[0] = 1;
+            check_log(fx, f, m);
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -405,6 +470,7 @@ int main() {
     test_derivative();
     test_divide_by_index();
     test_exp(fx);
+    test_log(fx);
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

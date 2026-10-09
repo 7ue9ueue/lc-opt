@@ -1,12 +1,14 @@
 // a * b mod 1000000007: the product modulo three NTT primes (transform.hpp: lib/ntt's transform
 // with the modulus set at run time), the Chinese remainder theorem straight to residues mod
-// 10^9 + 7 by one Montgomery reduction, fixed-width output (fields11.hpp).
+// 10^9 + 7 by one Montgomery reduction, fixed-width output: 10 bytes per value (fields10.hpp),
+// or 11 in the rare blocks with a value >= 10^9 (fields11.hpp).
 #include <sys/mman.h>
 #include <unistd.h>
 
 #include <array>
 
 #include "lib/io/io.hpp"
+#include "fields10.hpp"
 #include "fields11.hpp"
 #include "transform.hpp"
 
@@ -93,6 +95,12 @@ private:
     std::uintptr_t cur_;
 };
 
+#ifdef FORCE_WIDE
+constexpr bool kForceWide = true;  // test hook: every block in 11-byte fields
+#else
+constexpr bool kForceWide = false;
+#endif
+
 using Residues = std::array<const std::uint32_t*, kPrimes>;
 
 [[gnu::always_inline]] inline Vec load(const std::uint32_t* p) { return _mm256_load_si256(reinterpret_cast<const Vec*>(p)); }
@@ -123,14 +131,18 @@ using Residues = std::array<const std::uint32_t*, kPrimes>;
 }
 
 // Coefficients [begin, begin + count) into out, count a multiple of 8; the residues are readable
-// 8 words past. The quotients of the next 8 are issued before the products of these.
-void reconstruct(const Residues& y, std::size_t begin, std::size_t count, std::uint32_t* out) {
-    Vec t = quotients(y, begin);
+// 8 words past. The quotients of the next 8 are issued before the products of these. Returns
+// whether some coefficient is >= 10^9.
+bool reconstruct(const Residues& y, std::size_t begin, std::size_t count, std::uint32_t* out) {
+    Vec t = quotients(y, begin), top = _mm256_setzero_si256();
     for (std::size_t j = 0; j < count; j += 8) {
-        const Vec next = quotients(y, begin + j + 8);
-        _mm256_store_si256(reinterpret_cast<Vec*>(out + j), combine(y, begin + j, t));
+        const Vec next = quotients(y, begin + j + 8), c = combine(y, begin + j, t);
+        _mm256_store_si256(reinterpret_cast<Vec*>(out + j), c);
+        top = _mm256_max_epu32(top, c);
         t = next;
     }
+    const Vec small = _mm256_cmpgt_epi32(_mm256_set1_epi32(1000000000), top);
+    return _mm256_movemask_epi8(small) != -1;
 }
 
 void solve() {
@@ -143,9 +155,10 @@ void solve() {
     Arena arena(4 * (padded(n) + padded(m) + len + multimod::Transform::table_words(lg) + (kPrimes + 1) * words +
                      fields11::kBlock) +
                 fields11::kTextBytes + 64 * 16);
-    // Zero up to half the length too: the first level reads that far.
+    // Zero up to half the length too: the first level reads that far. b holds the last prime's
+    // transform of b in place.
     auto* a = arena.take<std::uint32_t>(std::max(padded(n), len / 2));
-    auto* b = arena.take<std::uint32_t>(std::max(padded(m), len / 2));
+    auto* b = arena.take<std::uint32_t>(words);
     in.read(a, n);
     in.read(b, m);
 
@@ -154,18 +167,22 @@ void solve() {
     Residues residues;
     for (int k = 0; k < kPrimes; ++k) {
         const Modulus mod(kPrimeList[k][0], kPrimeList[k][1]);
-        auto* r = arena.take<std::uint32_t>(words);
-        transform.multiply(a, n, b, m, r, work, mod, kCrt.scale[k]);
+        const bool last = k + 1 == kPrimes;
+        auto* r = last ? work : arena.take<std::uint32_t>(words);
+        transform.multiply(a, n, b, m, r, last ? b : work, mod, kCrt.scale[k]);
         residues[k] = r;
     }
 
     io::Writer out;
+    static_assert(fields10::kBlock == fields11::kBlock);
+    constexpr std::size_t kBlock = fields10::kBlock;
     char* text = arena.take<char>(fields11::kTextBytes);
-    auto* block = arena.take<std::uint32_t>(fields11::kBlock);
-    for (std::size_t i = 0; i < count; i += fields11::kBlock) {
-        const std::size_t size = std::min(fields11::kBlock, count - i);
-        reconstruct(residues, i, padded(size), block);
-        fields11::write(out, block, size, text, i + size == count);
+    auto* block = arena.take<std::uint32_t>(kBlock);
+    for (std::size_t i = 0; i < count; i += kBlock) {
+        const std::size_t size = std::min(kBlock, count - i);
+        const bool wide = reconstruct(residues, i, padded(size), block);
+        if (wide || kForceWide) fields11::write(out, block, size, text, i + size == count);
+        else fields10::write(out, block, size, text, i + size == count);
     }
 }
 

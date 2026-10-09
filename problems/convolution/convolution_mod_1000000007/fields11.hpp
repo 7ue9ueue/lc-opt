@@ -1,5 +1,6 @@
 // Fixed-width output of residues < 1000000007: each value right-aligned in 10 characters, then a
-// space; the last separator is a newline. Judge-specific: the checker compares tokens, so the
+// space; the last separator is a newline. Used for blocks with a value >= 10^9 (fields10.hpp
+// otherwise). Judge-specific: the checker compares tokens, so the
 // padding is accepted.
 //
 // Per value v: w = v / 100 as 8 digits in a qword (leading zeros blank), and a tail dword with

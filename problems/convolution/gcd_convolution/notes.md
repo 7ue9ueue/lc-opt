@@ -4,8 +4,8 @@ N <= 10^6, a_i, b_i < 998244353; print c_k = sum over gcd(i, j) = k of a_i b_j f
 Large tests: N = 10^6, 999982..999984, 994008..994010 (997^2 - 1 + {0, 1, 2}), random values;
 19.8 MB of input, 10 MB of output.
 
-Record when opened: 37 ms (407011). Best judged: ours, [409190](https://judge.yosupo.jp/submission/409190),
-17 ms.
+Record when opened: 37 ms (407011). Best judged: ours, [409214](https://judge.yosupo.jp/submission/409214),
+15 ms.
 
 ## Design
 
@@ -82,6 +82,9 @@ Record when opened: 37 ms (407011). Best judged: ours, [409190](https://judge.yo
   - `judge.py bench`, 31 rounds, slowest 3 cases: v5 16.28, v6a 15.41 (0.937), v7 15.17 (0.931).
   - Checks: 29/29 official tests; `stress.py` 300 rounds; ASan/UBSan (-O1, x86-64-v3) on all 29
     official tests, file and pipe input, tokens equal to the expected output.
+  - PR #56 merged. CI ratios: EPYC 7763 0.933, EPYC 9V45 0.936 and 0.932 (geomean 0.933).
+- 2026-10-09, claude: submitted the PR #56 `main.cpp` (v7),
+  [409214](https://judge.yosupo.jp/submission/409214): AC, 15 ms, 22.4 MiB (3/5). Was 17 ms.
 
 ## Next
 

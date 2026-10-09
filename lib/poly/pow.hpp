@@ -16,44 +16,42 @@
 #include <cstdlib>
 #include <span>
 
-#include "lib/poly/calculus.hpp"
 #include "lib/poly/exp.hpp"
 #include "lib/poly/log.hpp"
 #include "lib/poly/transform.hpp"
 
 namespace poly {
 
-namespace detail {
-
-// out[i] = a[i] c for i < out.size() = a.size(), any alignment; out may be a.
-inline void scale(std::span<const std::uint32_t> a, std::uint32_t c, std::span<std::uint32_t> out) {
-    const Factor factor(c);
-    const std::size_t full = a.size() / 8 * 8;
-    for (std::size_t i = 0; i < full; i += 8) store_unaligned(out.data() + i, reduce(times(load_unaligned(a.data() + i), factor), kP));
-    for (std::size_t i = full; i < a.size(); ++i) out[i] = ntt::detail::multiply_mod(a[i], c);
-}
-
-}  // namespace detail
-
 // Transform length power uses for n coefficients: the Transform needs lg_max >= this.
-inline int power_log(std::size_t n) { return std::max(log_log(n), exp_log(n)); }
+inline int power_log(std::size_t n) { return std::max(detail::log_derivative_log(n), exp_log(n)); }
 
 // Scratch words for power() of n coefficients.
-inline std::size_t power_scratch(std::size_t n) { return std::max(log_scratch(n), exp_scratch(n)); }
+inline std::size_t power_scratch(std::size_t n) {
+    return Arena::footprint(std::size_t(1) << exp_log(n)) + std::max(detail::log_derivative_scratch(n), detail::exp_newton_scratch(n));
+}
 
 // g = c exp(e log(f / f[0])) mod x^n for n = g.size() >= 1, f[0] != 0, e and c residues.
 // Coefficients of f past f.size() are zero. g may be f; otherwise the two must not overlap.
 // scratch: power_scratch(n) words, 32-byte aligned (from an Arena). t: lg_max >= power_log(n).
+//
+// g solves g' = d g with d = e f'/f and g[0] = c: d by the blocked division of log, then the
+// Newton steps of exp, which do not depend on the scale of g.
 inline void power(const Transform& t, std::span<const std::uint32_t> f, std::uint32_t e, std::uint32_t c,
                   std::span<std::uint32_t> g, std::span<std::uint32_t> scratch) {
-    const std::size_t n = g.size(), size = std::min(f.size(), n);
+    using namespace detail;
+    const std::size_t n = g.size(), len = std::size_t(1) << exp_log(n);
     if (f.empty() || f[0] == 0) std::abort();
-    detail::scale(f.first(size), detail::scalar_inverse(f[0]), g.first(size));
-    std::fill(g.begin() + size, g.end(), 0);
-    log(t, g, g, scratch);
-    detail::scale(g, e, g);
-    exp(t, g, g, scratch);
-    detail::scale(g, c, g);
+    const std::span<std::uint32_t> d = scratch.first(len), rest = scratch.subspan(Arena::footprint(len));
+    const Factor factor(e);
+    if (n >= 2)
+        log_derivative(t, f, n, rest, [&](std::size_t first, std::span<const std::uint32_t> q) {
+            for (std::size_t i = 0; i < q.size(); i += 8) store(d.data() + first + i, reduce(times(load(q.data() + i), factor), kP));
+        });
+    std::fill(d.begin() + std::ptrdiff_t(n - 1), d.end(), 0);
+    const std::span<std::uint32_t> start = g.first(std::min(n, kExpBase));
+    exp_direct(d, start);
+    for (std::uint32_t& x : start) x = ntt::detail::multiply_mod(x, c);
+    if (n > kExpBase) exp_newton(t, d, g, rest);
 }
 
 }  // namespace poly

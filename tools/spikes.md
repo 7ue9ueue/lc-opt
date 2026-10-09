@@ -44,6 +44,6 @@ the program starts (guess).
 ## Consequences
 
 - Score = max over cases, so a spike on any case within 9 ms of the slowest raises the score.
-  P(clean run) = 0.948^k for k such cases. convolution_mod_1000000007 has k = 23: P = 0.29, and
-  both submissions spiked (409262: 31 ms, 409263: 32 ms; clean 23 for both).
+  P(clean run) = 0.948^k for k such cases. convolution_mod_1000000007 has k = 23: P = 0.29.
+  All 5 of its submissions spiked (judged 31-34 ms, clean 23-24; P = 0.18).
 - No code change helps. Count a judged maximum as a spike only if `spikes.py` flags it.

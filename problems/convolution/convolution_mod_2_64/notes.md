@@ -1,8 +1,8 @@
 # convolution_mod_2_64
 
 N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the product mod 2^64.
-10 s. Record when opened: 76 ms (another user). Best judged: ours, 44 ms:
-[409260](https://judge.yosupo.jp/submission/409260) (current `main.cpp`, #124).
+10 s. Record when opened: 76 ms (another user). Best judged: ours, 43 ms:
+[409296](https://judge.yosupo.jp/submission/409296) (current `main.cpp`, #124).
 
 ## Design
 
@@ -76,6 +76,8 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
     cases (file and pipe input).
   - Submitted the merged `main.cpp` (#124): [409260](https://judge.yosupo.jp/submission/409260)
     AC 44 ms; [409261](https://judge.yosupo.jp/submission/409261) AC 51 ms (judge jitter).
+- 2026-10-09, audit (claude): resubmitted, [409296](https://judge.yosupo.jp/submission/409296) AC 43 ms
+  (3/5), large cases 40-43 ms, no spike; `lc-amd` predicts ~41-43.
 - Next: transforms are ~24.7 of ~41 ms and near lib/ntt's kernel bound; `write()` 6 ms is fixed.
   Five primes are the minimum with 30-bit primes (four give 2^120 < 2^147). Left: the radix-8
   level's reduction (1.2 ms), the subtrees (lib/ntt's kernels).

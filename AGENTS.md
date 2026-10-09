@@ -9,7 +9,8 @@ Solve every [Library Checker](https://judge.yosupo.jp) problem, then make each s
   Cite what you used in `notes.md`.
 - QPoly kernels (`../SymPoly/work/`) may be reused, but only after a rewrite to this repo's standards.
   Never use `study/` or vendored files.
-- Never submit to the judge. The user submits.
+- Submit to Library Checker at most 5 times per problem, and only versions that passed CI.
+  Record each submission ID and judged time in `notes.md`. Never commit credentials.
 - No speed claim without passing checks and a measurement.
 
 ## Writing
@@ -81,10 +82,12 @@ A change to `lib/` is re-checked on every problem that uses it.
 
 ## Working in parallel
 
-- Several agents may work on one problem. Each uses its own git worktree and branch: `<agent>/<problem>/<idea>`.
+- One agent per problem at a time. Each agent uses its own git worktree and branch: `<agent>/<problem>`.
 - Read `notes.md` first. Do not repeat a logged attempt without a new reason.
 - Log every attempt, win or loss: date, agent, idea, result, evidence.
-- Replace `main.cpp` only when the candidate passes all checks and beats it on the server and on GitHub runners.
+- `main.cpp` must stay a standalone file that can be submitted as is. It may be generated
+  (e.g. by a Python script or from several files); commit the generator and the generated file.
+- Open a pull request per round. It merges automatically once CI confirms correctness and no slowdown.
 
 ## Correctness
 

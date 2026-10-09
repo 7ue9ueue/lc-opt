@@ -1,0 +1,78 @@
+# Checks every pull request: each changed problem's main.cpp must pass all official tests,
+# and must not be slower than main's version on any of several CI machines (on average).
+# The "verdict" job is the required check for auto-merge.
+name: verify
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      problems: ${{ steps.find.outputs.problems }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: find
+        run: |
+          dirs=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- problems | cut -d/ -f1-3 | sort -u)
+          json=$(for d in $dirs; do [ -f "$d/main.cpp" ] && echo "$d"; done | jq -R . | jq -sc .)
+          echo "problems=$json" >> "$GITHUB_OUTPUT"
+          echo "Changed problems: $json"
+
+  judge:
+    needs: changes
+    if: needs.changes.outputs.problems != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(needs.changes.outputs.problems) }}
+        sample: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/lc-opt
+          key: lc-cases-${{ matrix.dir }}-1814c4e52055
+      - name: Test
+        run: python3 tools/judge.py test "$(basename "${{ matrix.dir }}")" "${{ matrix.dir }}/main.cpp"
+      - name: Bench against main
+        run: |
+          mkdir -p reports
+          base="origin/${{ github.base_ref }}:${{ matrix.dir }}/main.cpp"
+          if git cat-file -e "$base" 2>/dev/null; then
+            git show "$base" > /tmp/main_base.cpp
+            python3 tools/judge.py bench "$(basename "${{ matrix.dir }}")" /tmp/main_base.cpp "${{ matrix.dir }}/main.cpp" \
+              --json "reports/${{ strategy.job-index }}.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "New problem: nothing to compare against." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ strategy.job-index }}
+          path: reports/
+          if-no-files-found: ignore
+
+  verdict:
+    needs: [changes, judge]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require passing tests
+        if: needs.changes.result != 'success' || (needs.judge.result != 'success' && needs.judge.result != 'skipped')
+        run: exit 1
+      - uses: actions/download-artifact@v4
+        continue-on-error: true  # no reports when only new problems changed
+        with:
+          path: reports
+      - name: Require no slowdown
+        run: |
+          mkdir -p reports
+          python3 tools/verdict.py reports | tee -a "$GITHUB_STEP_SUMMARY"

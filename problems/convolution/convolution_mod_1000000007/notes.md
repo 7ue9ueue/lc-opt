@@ -1,0 +1,48 @@
+# convolution_mod_1000000007
+
+N, M <= 2^19 coefficients mod 10^9 + 7; print the N + M - 1 coefficients of the product. 10 s.
+Record when opened: 29 ms (another user). Best judged: none yet.
+
+## Design
+
+- Three NTT primes below 2^30 with 2^20 | p - 1: 998244353, 985661441, 976224257. Product
+  2^89.6 > 2^19 (10^9 + 6)^2 = 2^78.8. Inputs < 10^9 + 7 < 2p, so one conditional subtract
+  makes them canonical.
+- `transform.hpp`, `kernels.hpp`, `gen_kernels.py`: convolution_mod_2_64's run-time-modulus copy
+  of lib/ntt, with 32-bit input (radix-8 first level reads the input and reduces it on the fly).
+  The last prime transforms b in place (b holds 2^lg words) and puts a's result in the scratch
+  array: one 4 MiB array fewer.
+- CRT straight to mod 10^9 + 7: y_k = c / M_k mod p_k (factor folded into the transform's scale),
+  t = floor(sum y_k / p_k) from a float sum + 0.5 (the fraction is c / M < 2^-10), then
+  s = sum y_k (M_k R mod q) + t (-M R mod q) < R q with R = 2^32, and one Montgomery reduction
+  gives c mod q. 12 `vpmuludq` per 8 values.
+- Output per block of 25600 values: 10-byte fields (`fields10.hpp`, convolution_mod's
+  `fields.hpp`) when every value is < 10^9, else 11-byte fields (`fields11.hpp`: v / 100 as 8
+  digits, the last two digits and the separator in a tail dword, six 16-byte `pshufb` chunks per
+  lane of 8 values). A block holds a value >= 10^9 with probability about 1.8e-4 on random data.
+  `-DFORCE_WIDE` forces 11-byte fields for tests.
+- `.preinit_array` start and `_exit`, one huge-page arena (as convolution_mod).
+
+## Log
+
+- 2026-10-09, claude (round 1). `lc-amd`, judge flags.
+  - First version (3 primes, CRT by Montgomery, 11-byte fields everywhere): 48/48 official tests,
+    slowest 24.0 ms (`judge.py test`). I/O floor (`../floor.py`, plain `write_array`): 10.9 ms.
+    Phases on fft_killer_03 (ms, 9 runs, in-process `CLOCK_MONOTONIC`, scratch probe not
+    committed): parse 1.6, prime 0 5.0, prime 1 4.8, prime 2 4.8, CRT 0.49, format 1.02,
+    `write()` ~3.5; 22.2 from `solve()` entry to exit.
+  - 10-byte fields unless a block has a value >= 10^9 (output 10.5 MB instead of 11.5 MB,
+    formatter 0.65 ms instead of 1.02) and the last prime in place: `judge.py bench`, 21 rounds,
+    slowest 3 cases: 25.21 -> 23.99 ms, ratio 0.950. `judge.py test`: slowest 22.9 ms.
+  - Checks: 48/48 official tests; `test_fields.cpp` (fields10 for every value < 10^9, fields11
+    for every value < 10^9 + 7, against a scalar formatter); `stress.py` 400 rounds, 200 with
+    `-DFORCE_WIDE`; ASan/UBSan stress 60 + 40 (`-DFORCE_WIDE`) rounds and 6 official cases with
+    file and pipe input.
+- Next: the transforms are 14.6 of ~23 ms (kernel-bound, as convolution_mod). Ideas: CRT fused
+  into the last prime's final pass; kernel work in lib/ntt carried over.
+
+## Sources
+
+- lib/ntt (our QPoly-derived kernels), convolution_mod_2_64 (run-time modulus transform, float
+  estimate of the CRT multiple), convolution_mod (radix-8 first level, `fields.hpp`, preinit
+  start). Montgomery reduction (Montgomery 1985), written here from the formula.

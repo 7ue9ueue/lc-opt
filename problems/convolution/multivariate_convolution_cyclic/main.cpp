@@ -3000,17 +3000,6 @@ inline void forward_radix2(Vec* f, std::size_t h, bool sparse, std::uint32_t mod
     }
 }
 
-// kernels::forward_identity() on canonical input; z = r[1].
-inline void forward_radix4(Vec* f, std::size_t h, bool sparse, const std::uint32_t* roots, std::uint32_t modulus) {
-    if (!sparse) return kernels::forward_identity(f, h, roots);
-    const Factor z(roots[1], roots[9], modulus);
-    const Vec p2 = broadcast(2 * modulus);
-    for (std::size_t j = 0; j < h; ++j) {
-        const Vec a = f[j], b = f[j + h], zb = multiply(b, z);  // < 4p
-        f[j] = add(a, b), f[j + h] = diff(a, b, p2), f[j + 2 * h] = add(a, zb), f[j + 3 * h] = diff(a, zb, p2);
-    }
-}
-
 // kernels::inverse_identity() and the scale s: canonical output; z = r^-1[1].
 inline void inverse_radix4(Vec* f, std::size_t h, const std::uint32_t* inverse_roots, const Factor& s,
                            std::uint32_t modulus) {
@@ -3026,38 +3015,61 @@ inline void inverse_radix4(Vec* f, std::size_t h, const std::uint32_t* inverse_r
     }
 }
 
-// Coefficients x < 2p -> canonical residues.
+// Coefficients x[0, count), x < 2p, as canonical residues, zero past count. Never reads past count.
 class Narrow {
 public:
-    explicit Narrow(const Modulus& m) : p_(broadcast(m.p)) {}
+    Narrow(const Modulus& m, const std::uint32_t* x, std::size_t count) : p_(broadcast(m.p)), x_(x), count_(count) {}
 
-    // x[0, 8) mod p.
-    Vec operator()(const std::uint32_t* x) const {
-        return reduce(_mm256_loadu_si256(reinterpret_cast<const Vec*>(x)), p_);
+    std::size_t count() const { return count_; }
+
+    // Words [8 v, 8 v + 8).
+    Vec operator()(std::size_t v) const {
+        const std::size_t i = 8 * v;
+        if (i + 8 <= count_) return reduce(_mm256_loadu_si256(reinterpret_cast<const Vec*>(x_ + i)), p_);
+        if (i >= count_) return _mm256_setzero_si256();
+        const Vec keep = _mm256_cmpgt_epi32(broadcast(std::uint32_t(count_ - i)),
+                                            _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7));
+        return reduce(_mm256_maskload_epi32(reinterpret_cast<const int*>(x_ + i), keep), p_);
     }
 
 private:
     Vec p_;
+    const std::uint32_t* x_;
+    std::size_t count_;
 };
 
-// x[0, count) mod p into dst[0, extent), zero past count; x readable up to count rounded up to 8.
-inline void narrow_into(std::uint32_t* dst, const std::uint32_t* x, std::size_t count, std::size_t extent,
-                        const Narrow& narrow) {
-    std::size_t i = 0;
-    for (; i < count; i += 8) _mm256_storeu_si256(reinterpret_cast<Vec*>(dst + i), narrow(x + i));
-    if (i < extent) std::memset(dst + i, 0, (extent - i) * sizeof(std::uint32_t));
+// The narrowed input into dst[0, extent), zero past its count.
+inline void narrow_into(std::uint32_t* dst, std::size_t extent, const Narrow& narrow) {
+    std::size_t v = 0;
+    for (; 8 * v < narrow.count(); ++v) _mm256_storeu_si256(reinterpret_cast<Vec*>(dst + 8 * v), narrow(v));
+    if (8 * v < extent) std::memset(dst + 8 * v, 0, (extent - 8 * v) * sizeof(std::uint32_t));
 }
 
-// First level of a factor x[0, 32q) whose upper half is zero, for
+// kernels::forward_identity() on the narrowed input, f of 4h vectors; z = r[1]. Sparse: the
+// input's upper half is zero, and one pass narrows and transforms.
+inline void forward_radix4(Vec* f, std::size_t h, bool sparse, const Narrow& narrow, const std::uint32_t* roots,
+                           std::uint32_t modulus) {
+    if (!sparse) {
+        narrow_into(reinterpret_cast<std::uint32_t*>(f), 32 * h, narrow);
+        return kernels::forward_identity(f, h, roots);
+    }
+    const Factor z(roots[1], roots[9], modulus);
+    const Vec p2 = broadcast(2 * modulus);
+    for (std::size_t j = 0; j < h; ++j) {
+        const Vec a = narrow(j), b = narrow(j + h), zb = multiply(b, z);  // < 4p
+        f[j] = add(a, b), f[j + h] = diff(a, b, p2), f[j + 2 * h] = add(a, zb), f[j + 3 * h] = diff(a, zb, p2);
+    }
+}
+
+// First level of a factor of 64q words whose upper half is zero, for
 // 2^lg = 2 * 4^j: one pass narrows x and writes the first radix-4 group of both halves of f
 // (as convolution_mod's Product). Outputs < 4p.
-inline void forward_radix8(Vec* f, const std::uint32_t* x, std::size_t q, const std::uint32_t* roots,
-                           const Narrow& narrow, std::uint32_t modulus) {
+inline void forward_radix8(Vec* f, std::size_t q, const std::uint32_t* roots, const Narrow& narrow,
+                           std::uint32_t modulus) {
     const Factor i(roots[1], roots[9], modulus), y(roots[2], roots[10], modulus), z(roots[3], roots[11], modulus);
     const Vec p = broadcast(modulus), p2 = add(p, p);
     for (std::size_t j = 0; j < q; ++j) {
-        const Vec f0 = narrow(x + 8 * j), f1 = narrow(x + 8 * (j + q));
-        const Vec f2 = narrow(x + 8 * (j + 2 * q)), f3 = narrow(x + 8 * (j + 3 * q));
+        const Vec f0 = narrow(j), f1 = narrow(j + q), f2 = narrow(j + 2 * q), f3 = narrow(j + 3 * q);
         const Vec g0 = add(f0, f2), g1 = add(f1, f3);
         const Vec h0 = diff(f0, f2, p), ih1 = multiply(diff(f1, f3, p), i);
         f[j] = add(g0, g1), f[j + q] = diff(g0, g1, p2);
@@ -3084,7 +3096,7 @@ public:
     static std::size_t table_words(int lg) { return 2 * detail::table_words(lg); }
 
     // a b factor mod p into out (canonical, 2^lg words); work: 2^lg words, destroyed. a holds n
-    // coefficients, readable and zero up to max(n rounded up to 8, 2^lg / 2); b likewise with m.
+    // coefficients, b holds m; no word past them is read. work may be b.
     void multiply(const std::uint32_t* a_in, std::size_t n, const std::uint32_t* b_in, std::size_t m_count,
                   std::uint32_t* out, std::uint32_t* work, const Modulus& m, std::uint32_t factor) const {
         using namespace detail;
@@ -3097,28 +3109,28 @@ public:
         const std::uint32_t scale = m.multiply(m.multiply(m.inverse(std::uint32_t(nv)), m.r), factor);
         auto* a = reinterpret_cast<Vec*>(out);
         auto* b = reinterpret_cast<Vec*>(work);
-        const Narrow narrow(m);
+        const Narrow narrow_a(m, a_in, n), narrow_b(m, b_in, m_count);
         const bool sparse_a = n <= len / 2, sparse_b = m_count <= len / 2;
         if (std::countr_zero(nv) % 2 == 1 && nv >= 32 && sparse_a && sparse_b) {  // nv = 2 * 4^j
             const std::size_t h = nv / 2, q = nv / 8;
-            forward_radix8(a, a_in, q, roots_, narrow, m.p);
-            forward_radix8(b, b_in, q, roots_, narrow, m.p);
+            forward_radix8(a, q, roots_, narrow_a, m.p);
+            forward_radix8(b, q, roots_, narrow_b, m.p);
             for (std::size_t c = 0; c < 4; ++c) recursion.visit(a + c * q, b + c * q, q, c);
             kernels::inverse_identity(a, q, inverse_roots_);
             for (std::size_t c = 4; c < 8; ++c) recursion.visit(a + c * q, b + c * q, q, c);
             kernels::inverse(a + h, q, inverse_roots_ + slot(1), inverse_roots_ + slot(2));
             return scale_radix2(a, h, scale, m);
         }
-        narrow_into(out, a_in, n, sparse_a ? len / 2 : len, narrow);
-        narrow_into(work, b_in, m_count, sparse_b ? len / 2 : len, narrow);
         if (std::countr_zero(nv) % 2 == 0) {  // nv = 4^j
             const std::size_t h = nv / 4;
-            forward_radix4(a, h, sparse_a, roots_, m.p);
-            forward_radix4(b, h, sparse_b, roots_, m.p);
+            forward_radix4(a, h, sparse_a, narrow_a, roots_, m.p);
+            forward_radix4(b, h, sparse_b, narrow_b, roots_, m.p);
             for (std::size_t t = 0; t < 4; ++t) recursion.visit(a + t * h, b + t * h, h, t);
             inverse_radix4(a, h, inverse_roots_, Factor(scale, m), m.p);
             return;
         }
+        narrow_into(out, sparse_a ? len / 2 : len, narrow_a);
+        narrow_into(work, sparse_b ? len / 2 : len, narrow_b);
         const std::size_t h = nv / 2;  // nv = 2 * 4^j
         forward_radix2(a, h, sparse_a, m.p);
         forward_radix2(b, h, sparse_b, m.p);
@@ -3365,6 +3377,8 @@ constexpr std::array<std::uint32_t, kPrimes> kCrtScale = [] {
     return scale;
 }();
 
+using Residues = std::array<std::uint32_t*, kPrimes>;
+
 // c = sum_k y_k M_k - t M with t = floor(sum_k y_k / p_k) (the sum's fraction is c / M < 2^-10).
 // Modulo p, times a factor z, with R = 2^32: s = sum_k y_k (M_k R z mod p) + t (-M R z mod p)
 // < (3 2^30 + 3) p < R p, and s / R mod p = c z mod p (Montgomery reduction; p odd).
@@ -3390,29 +3404,44 @@ struct Crt {
         neg_inverse = 0 - x;
     }
 
-    // c z mod p of coefficients [i, i + 8) into out; the residues are readable 8 words past.
-    void reconstruct(const std::array<std::uint32_t*, kPrimes>& y, std::size_t count, std::uint32_t* out) const {
-        for (std::size_t i = 0; i < count; i += 8) {
-            const auto load = [&](int k) { return _mm256_load_si256(reinterpret_cast<const Vec*>(y[k] + i)); };
-            const Vec y0 = load(0), y1 = load(1), y2 = load(2);
-            const auto inv = [](int k) { return _mm256_set1_ps(1.0f / float(kPrimeList[k][0])); };
-            const auto term = [](Vec v) { return _mm256_cvtepi32_ps(v); };
-            const __m256 sum = _mm256_fmadd_ps(term(y0), inv(0), _mm256_fmadd_ps(term(y1), inv(1), _mm256_set1_ps(0.5f)));
-            const Vec t = _mm256_cvttps_epi32(_mm256_fmadd_ps(term(y2), inv(2), sum));  // < 3
-            const auto set = [](std::uint32_t c) { return _mm256_set1_epi64x(c); };
-            // s / R mod p in the high dword of each qword, < 2p; x: the even dwords.
-            const auto montgomery = [&](Vec x0, Vec x1, Vec x2, Vec tx) {
-                const Vec s = _mm256_add_epi64(
-                    _mm256_add_epi64(_mm256_mul_epu32(x0, set(place[0])), _mm256_mul_epu32(x1, set(place[1]))),
-                    _mm256_add_epi64(_mm256_mul_epu32(x2, set(place[2])), _mm256_mul_epu32(tx, set(wrap))));
-                const Vec m = _mm256_mul_epu32(s, set(neg_inverse));
-                return _mm256_add_epi64(s, _mm256_mul_epu32(m, set(p)));
-            };
-            const auto odd = [](Vec x) { return _mm256_srli_epi64(x, 32); };
-            const Vec even_sum = montgomery(y0, y1, y2, t), odd_sum = montgomery(odd(y0), odd(y1), odd(y2), odd(t));
-            const Vec u = _mm256_blend_epi32(_mm256_srli_epi64(even_sum, 32), odd_sum, 0xAA);
-            _mm256_store_si256(reinterpret_cast<Vec*>(out + i), reduce(u, broadcast(p)));
-        }
+    // c z mod p of coefficients [0, count) into out; the residues are readable up to count rounded up to 8.
+    void reconstruct(const Residues& y, std::size_t count, std::uint32_t* out) const {
+        for (std::size_t i = 0; i < count; i += 8) _mm256_store_si256(reinterpret_cast<Vec*>(out + i), at(y, i));
+    }
+
+    // (c_j + c_{j + n}) z mod p for j < n into out[0, n); the residues are readable up to 2n + 7.
+    void reconstruct_folded(const Residues& y, std::size_t n, std::uint32_t* out) const {
+        const Vec bound = broadcast(p);
+        std::size_t i = 0;
+        for (; i + 8 <= n; i += 8)
+            _mm256_storeu_si256(reinterpret_cast<Vec*>(out + i), reduce(add(at(y, i), at(y, i + n)), bound));
+        if (i == n) return;
+        const Vec keep = _mm256_cmpgt_epi32(broadcast(std::uint32_t(n - i)), _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7));
+        _mm256_maskstore_epi32(reinterpret_cast<int*>(out + i), keep, reduce(add(at(y, i), at(y, i + n)), bound));
+    }
+
+private:
+    // c z mod p of coefficients [i, i + 8), canonical.
+    Vec at(const Residues& y, std::size_t i) const {
+        const auto load = [&](int k) { return _mm256_loadu_si256(reinterpret_cast<const Vec*>(y[k] + i)); };
+        const Vec y0 = load(0), y1 = load(1), y2 = load(2);
+        const auto inv = [](int k) { return _mm256_set1_ps(1.0f / float(kPrimeList[k][0])); };
+        const auto term = [](Vec v) { return _mm256_cvtepi32_ps(v); };
+        const __m256 sum = _mm256_fmadd_ps(term(y0), inv(0), _mm256_fmadd_ps(term(y1), inv(1), _mm256_set1_ps(0.5f)));
+        const Vec t = _mm256_cvttps_epi32(_mm256_fmadd_ps(term(y2), inv(2), sum));  // < 3
+        const auto set = [](std::uint32_t c) { return _mm256_set1_epi64x(c); };
+        // s / R mod p in the high dword of each qword, < 2p; x: the even dwords.
+        const auto montgomery = [&](Vec x0, Vec x1, Vec x2, Vec tx) {
+            const Vec s = _mm256_add_epi64(
+                _mm256_add_epi64(_mm256_mul_epu32(x0, set(place[0])), _mm256_mul_epu32(x1, set(place[1]))),
+                _mm256_add_epi64(_mm256_mul_epu32(x2, set(place[2])), _mm256_mul_epu32(tx, set(wrap))));
+            const Vec m = _mm256_mul_epu32(s, set(neg_inverse));
+            return _mm256_add_epi64(s, _mm256_mul_epu32(m, set(p)));
+        };
+        const auto odd = [](Vec x) { return _mm256_srli_epi64(x, 32); };
+        const Vec even_sum = montgomery(y0, y1, y2, t), odd_sum = montgomery(odd(y0), odd(y1), odd(y2), odd(t));
+        const Vec u = _mm256_blend_epi32(_mm256_srli_epi64(even_sum, 32), odd_sum, 0xAA);
+        return reduce(u, broadcast(p));
     }
 };
 
@@ -3483,7 +3512,7 @@ class LongProduct {
 public:
     // The long axes' cyclic factors have a padded extent of at most 2^kMaxLog.
     LongProduct(const std::vector<Axis>& axes, const Field& field, std::uint32_t scale, Arena& arena)
-        : crt_(field, scale), p_(field.p), axes_(axes) {
+        : crt_(field, scale), p_(field.p), axes_(axes), direct_(axes.size() == 1 && axes[0].stride == 1) {
         CyclicFactors factors(axes);
         lengths_ = std::move(factors.length);
         weights_ = std::move(factors.weight);
@@ -3496,7 +3525,7 @@ public:
         lg_ = transform_log(padded_);
         const std::size_t words = (std::size_t(1) << lg_) + multimod::Transform::kPadding;
         a_ = arena.take<std::uint32_t>(words);
-        b_ = arena.take<std::uint32_t>(words);
+        if (!direct_) b_ = arena.take<std::uint32_t>(words);
         for (auto& r : residues_) r = arena.take<std::uint32_t>(words);
         tables_ = arena.take<std::uint32_t>(multimod::Transform::table_words(lg_));
         for (int k = 0; k < kPrimes; ++k) moduli_.emplace_back(kPrimeList[k][0], kPrimeList[k][1]);
@@ -3508,19 +3537,16 @@ public:
         return (2 + kPrimes) * Arena::bytes(words) + Arena::bytes(multimod::Transform::table_words(lg));
     }
 
-    // f[base + offset] <- (f * g)[base + offset] over the long axes, times the scale. Between
-    // calls, a and b are zero but at the points' places; the last call (last = true) leaves them dirty.
+    // f[base + offset] <- (f * g)[base + offset] over the long axes, times the scale. With several
+    // factors, a and b are zero between calls but at the points' places; the last call (last = true)
+    // leaves them dirty.
     void multiply(std::uint32_t* f, const std::uint32_t* g, std::size_t base, bool last) {
+        if (lengths_.size() == 1) return multiply_cyclic(f, g, base);
         for_each_point([&](std::size_t offset, std::size_t place) {
             a_[place] = f[base + offset];
             b_[place] = g[base + offset];
         });
-        const multimod::Transform transform(lg_, tables_);
-        // The last prime's product goes to the work array and transforms b in place.
-        std::uint32_t* const work = residues_[kPrimes - 1];
-        for (int k = 0; k < kPrimes; ++k)
-            transform.multiply(a_, extent_, b_, extent_, residues_[k], k + 1 < kPrimes ? work : b_, moduli_[k],
-                               kCrtScale[k]);
+        products(a_, b_, extent_, b_);
         const std::size_t count = (padded_ + 7) & ~std::size_t(7);
         crt_.reconstruct(residues_, count, a_);
         fold(a_);
@@ -3531,6 +3557,59 @@ public:
     }
 
 private:
+    // One cyclic factor: places are a permutation of [0, D), so a and b need no clearing, and the
+    // CRT folds as it goes. Direct: f and g are read in place and the CRT writes into f.
+    void multiply_cyclic(std::uint32_t* f, const std::uint32_t* g, std::size_t base) {
+        const std::size_t d = lengths_[0];
+        if (direct_) {
+            products(f + base, g + base, d, a_);
+            crt_.reconstruct_folded(residues_, d, f + base);
+            return;
+        }
+        const auto visit = [&](auto action) {
+            if (axes_.size() == 2) for_each_place_block(action);
+            else for_each_point(action);
+        };
+        visit([&](std::size_t offset, std::size_t place) {
+            a_[place] = f[base + offset];
+            b_[place] = g[base + offset];
+        });
+        products(a_, b_, d, b_);
+        crt_.reconstruct_folded(residues_, d, a_);
+        visit([&](std::size_t offset, std::size_t place) { f[base + offset] = a_[place]; });
+    }
+
+    // Two long axes q = axis 0, c = axis 1 as one cyclic factor: place j = r n_c + i_c with
+    // i_q = j mod n_q. visit(offset, place) for blocks of 16 values of i_c, by place inside a block:
+    // the block's points of f stay in cache and the places are written in runs.
+    template <class Visit>
+    void for_each_place_block(Visit visit) const {
+        const Axis q = axes_[0], c = axes_[1];
+        const std::size_t step = c.length % q.length, block = std::min<std::size_t>(16, q.length);
+        for (std::size_t first = 0; first < c.length; first += block) {
+            const std::size_t width = std::min(block, c.length - first);
+            std::size_t start = first % q.length;  // (r n_c + first) mod n_q
+            for (std::size_t place = first; place < lengths_[0]; place += c.length) {
+                // i_q = start + k, wrapping once at k = run.
+                const std::size_t run = std::min(width, q.length - start);
+                const std::size_t at = first * c.stride + start * q.stride, back = q.length * q.stride;
+                for (std::size_t k = 0; k < run; ++k) visit(at + k * (c.stride + q.stride), place + k);
+                for (std::size_t k = run; k < width; ++k) visit(at + k * (c.stride + q.stride) - back, place + k);
+                start += step;
+                if (start >= q.length) start -= q.length;
+            }
+        }
+    }
+
+    // The products of x and y (count words each) mod every prime into the residues. The last
+    // prime uses last_work as its work array (it may be y).
+    void products(const std::uint32_t* x, const std::uint32_t* y, std::size_t count, std::uint32_t* last_work) {
+        const multimod::Transform transform(lg_, tables_);
+        for (int k = 0; k < kPrimes; ++k)
+            transform.multiply(x, count, y, count, residues_[k], k + 1 < kPrimes ? residues_[kPrimes - 1] : last_work,
+                               moduli_[k], kCrtScale[k]);
+    }
+
     // visit(offset in f, place in the Kronecker array) for every point of the long axes, axis 0
     // innermost. After n_i steps along axis i, every y_r is back where it started.
     template <class Visit>
@@ -3591,11 +3670,12 @@ private:
     Crt crt_;
     std::uint32_t p_;
     std::vector<Axis> axes_;
+    bool direct_;  // one long axis of stride 1 (D = n, place = offset); b unused
     std::vector<std::size_t> lengths_, strides_;   // per cyclic factor: D_r, Kronecker stride
     std::vector<std::vector<std::size_t>> weights_;  // CyclicFactors::weight
     std::size_t extent_ = 0, padded_ = 0;
     int lg_ = 0;
-    std::uint32_t *a_, *b_, *tables_;
+    std::uint32_t *a_, *b_ = nullptr, *tables_;
     std::array<std::uint32_t*, kPrimes> residues_{};
     std::vector<multimod::Modulus> moduli_;
 };

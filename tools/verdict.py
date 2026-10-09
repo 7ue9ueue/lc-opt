@@ -5,7 +5,8 @@ Usage: verdict.py REPORT_DIR
 
 Each report compares the main branch's main.cpp (first source) with the pull request's
 (second source) on one CI machine. Per problem, the geometric mean of the ratios must
-not exceed TOLERANCE. Prints a markdown table; exits 1 on a slowdown.
+not exceed TOLERANCE: the new version may not be slower at all. Prints a markdown table;
+exits 1 on a slowdown.
 """
 import json
 import math
@@ -13,7 +14,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-TOLERANCE = 1.02  # allowed new/old time ratio; below this, differences are noise
+TOLERANCE = 1.00  # largest allowed new/old time ratio
 
 
 def main() -> int:
@@ -28,8 +29,8 @@ def main() -> int:
     for problem, rows in sorted(ratios.items()):
         mean = math.exp(sum(math.log(r) for _, r in rows) / len(rows))
         ok &= mean <= TOLERANCE
-        machines = ', '.join(f'{cpu}: {r:.3f}' for cpu, r in rows)
-        print(f'| {problem} | {mean:.3f}{"" if mean <= TOLERANCE else " SLOWER"} | {machines} |')
+        machines = ', '.join(f'{cpu}: {r:.4f}' for cpu, r in rows)
+        print(f'| {problem} | {mean:.4f}{"" if mean <= TOLERANCE else " SLOWER"} | {machines} |')
     if not ratios:
         print('| (no timed problems) | | |')
     return 0 if ok else 1

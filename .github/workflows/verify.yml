@@ -1,11 +1,14 @@
-# Checks every pull request: each changed problem's main.cpp must pass all official tests,
-# and must not be slower than main's version on any of several CI machines (on average).
+# Checks every pull request: each changed main.cpp must pass all official tests and must
+# not be slower than main's version, averaged over several CI machines.
 # The "verdict" job is the required check for auto-merge.
 name: verify
 on:
   pull_request:
 permissions:
   contents: read
+defaults:
+  run:
+    shell: bash  # implies -eo pipefail, so a failure before `| tee` fails the step
 jobs:
   changes:
     runs-on: ubuntu-24.04
@@ -17,8 +20,8 @@ jobs:
           fetch-depth: 0
       - id: find
         run: |
-          dirs=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- problems | cut -d/ -f1-3 | sort -u)
-          json=$(for d in $dirs; do [ -f "$d/main.cpp" ] && echo "$d"; done | jq -R . | jq -sc .)
+          files=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- 'problems/*/*/main.cpp')
+          json=$(for f in $files; do [ -f "$f" ] && dirname "$f"; done | jq -R . | jq -sc .)
           echo "problems=$json" >> "$GITHUB_OUTPUT"
           echo "Changed problems: $json"
 
@@ -49,7 +52,7 @@ jobs:
           if git cat-file -e "$base" 2>/dev/null; then
             git show "$base" > /tmp/main_base.cpp
             python3 tools/judge.py bench "$(basename "${{ matrix.dir }}")" /tmp/main_base.cpp "${{ matrix.dir }}/main.cpp" \
-              --json "reports/${{ strategy.job-index }}.json" | tee -a "$GITHUB_STEP_SUMMARY"
+              --rounds 21 --json "reports/${{ strategy.job-index }}.json" | tee -a "$GITHUB_STEP_SUMMARY"
           else
             echo "New problem: nothing to compare against." | tee -a "$GITHUB_STEP_SUMMARY"
           fi

@@ -1,7 +1,8 @@
 // c[k] = min over i + j = k of a[i] + b[j], a convex. Row k of the matrix b[j] + a[k - j] (columns
 // j with 0 <= k - j < N) is Monge, so the leftmost argmin opt(k) is nondecreasing in k.
-// Divide and conquer finds opt at every kGroup-th row (sample rows); each group of kGroup rows
-// then takes its minima over the columns between its two sample opts, kGroup rows per column.
+// opt is found at every kGroup-th row (sample rows), coarse rows first, each searched between the
+// opts of its neighbors; each group of kGroup rows then takes its minima over the columns between
+// its two sample opts, kGroup rows per column.
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -11,15 +12,16 @@ namespace {
 
 using u32 = std::uint32_t;
 
-constexpr std::size_t kGroup = 16;         // rows per group: two vectors of 8
+constexpr std::size_t kGroup = 16;         // rows per group
+constexpr std::size_t kVecs = kGroup / 8;  // vectors per group
 constexpr u32 kInf = 3'000'000'000u;       // a outside [0, N); kInf + b <= 4e9 < 2^32
 constexpr std::size_t kAPad = kGroup + 8;  // kInf words before and after a
 
 struct Problem {
     std::size_t n, m;  // lengths of a and b
     const u32* a;      // a[-kAPad, n + kAPad), kInf outside [0, n)
-    const u32* b;      // b[0, m + 8)
-    u32* opt;          // opt[t]: leftmost argmin of sample row t * kGroup; opt[groups] = m - 1
+    const u32* b;      // b[0, m)
+    u32* opt;          // opt[t]: leftmost argmin of sample row t * kGroup; m - 1 for t >= groups
     u32* c;            // c[0, groups * kGroup)
 };
 
@@ -38,9 +40,16 @@ __m256i row_chunk(const Problem& p, std::size_t k, std::size_t j) {
     return _mm256_add_epi32(b, _mm256_permutevar8x32_epi32(a, reverse));
 }
 
+// Leftmost column among the lanes holding the least value.
+u32 leftmost(__m256i value, __m256i column) {
+    const __m256i least = _mm256_set1_epi32(int(horizontal_min(value)));
+    const __m256i other = _mm256_xor_si256(_mm256_cmpeq_epi32(value, least), _mm256_set1_epi32(-1));
+    return horizontal_min(_mm256_or_si256(column, other));
+}
+
 // Leftmost j in [lo, hi] minimizing b[j] + a[k - j]; every column in range is valid.
 std::size_t argmin(const Problem& p, std::size_t k, std::size_t lo, std::size_t hi) {
-    if (hi - lo < 16) {
+    if (hi - lo < 8) {
         std::size_t best = lo;
         u32 best_value = p.b[lo] + p.a[k - lo];
         for (std::size_t j = lo + 1; j <= hi; ++j) {
@@ -49,26 +58,38 @@ std::size_t argmin(const Problem& p, std::size_t k, std::size_t lo, std::size_t 
         }
         return best;
     }
-    // Chunks start at lo, lo + 8, ...; the last one at hi - 7 overlaps its predecessor.
+    // Per lane, the least value and its leftmost column. Chunks start at lo, lo + 8, ...; the
+    // last one at hi - 7 overlaps its predecessor, still in increasing column order per lane.
     const std::size_t last = hi - 7;
-    __m256i low = _mm256_set1_epi32(-1);
-    for (std::size_t j = lo; j < last; j += 8) low = _mm256_min_epu32(low, row_chunk(p, k, j));
-    low = _mm256_min_epu32(low, row_chunk(p, k, last));
-    const __m256i target = _mm256_set1_epi32(int(horizontal_min(low)));
-    for (std::size_t j = lo;; j = std::min(j + 8, last)) {
-        const auto hits = u32(_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(row_chunk(p, k, j), target))));
-        if (hits) return j + std::countr_zero(hits);
+    const __m256i lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    __m256i column = _mm256_add_epi32(_mm256_set1_epi32(int(lo)), lanes);
+    __m256i best = _mm256_set1_epi32(-1), best_column = column;
+    const auto take = [&](std::size_t j) {
+        const __m256i low = _mm256_min_epu32(best, row_chunk(p, k, j));
+        best_column = _mm256_blendv_epi8(column, best_column, _mm256_cmpeq_epi32(low, best));
+        best = low;
+    };
+    for (std::size_t j = lo; j < last; j += 8) {
+        take(j);
+        column = _mm256_add_epi32(column, _mm256_set1_epi32(8));
     }
+    column = _mm256_add_epi32(_mm256_set1_epi32(int(last)), lanes);
+    take(last);
+    return leftmost(best, best_column);
 }
 
-// opt of sample rows [t1, t2), known to lie in [lo, hi].
-void sample(const Problem& p, std::size_t t1, std::size_t t2, std::size_t lo, std::size_t hi) {
-    if (t1 == t2) return;
-    const std::size_t t = (t1 + t2) / 2, k = t * kGroup;
-    const std::size_t j = argmin(p, k, std::max(lo, k + 1 > p.n ? k + 1 - p.n : 0), std::min(hi, k));
-    p.opt[t] = u32(j);
-    sample(p, t1, t, lo, j);
-    sample(p, t + 1, t2, j, hi);
+// opt[0, size], size = bit_ceil(groups). Level by level: the rows of one level are independent,
+// so their searches overlap in the core (a depth-first recursion was 13% slower).
+void sample_levels(const Problem& p, std::size_t groups) {
+    const std::size_t size = std::bit_ceil(groups);
+    std::fill(p.opt + groups, p.opt + size + 1, u32(p.m - 1));
+    p.opt[0] = 0;
+    for (std::size_t step = size / 2; step; step /= 2) {
+        for (std::size_t t = step; t < groups; t += 2 * step) {
+            const std::size_t k = t * kGroup, lo = p.opt[t - step], hi = p.opt[t + step];
+            p.opt[t] = u32(argmin(p, k, std::max(lo, k + 1 > p.n ? k + 1 - p.n : 0), std::min(hi, k)));
+        }
+    }
 }
 
 // c[k0, k0 + kGroup) for group t: columns between the sample opts, clamped to rows' valid columns.
@@ -76,15 +97,16 @@ void group(const Problem& p, std::size_t t) {
     const std::size_t k0 = t * kGroup;
     const std::size_t lo = std::max(std::size_t{p.opt[t]}, k0 + 1 > p.n ? k0 + 1 - p.n : 0);
     const std::size_t hi = std::min(std::size_t{p.opt[t + 1]}, k0 + kGroup - 1);
-    __m256i low0 = _mm256_set1_epi32(-1), low1 = low0;
+    __m256i low[kVecs];
+    for (auto& v : low) v = _mm256_set1_epi32(-1);
     for (std::size_t j = lo; j <= hi; ++j) {
         const __m256i b = _mm256_set1_epi32(int(p.b[j]));
-        const u32* a = p.a + (k0 - j);  // index >= -(kGroup - 1)
-        low0 = _mm256_min_epu32(low0, _mm256_add_epi32(b, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a))));
-        low1 = _mm256_min_epu32(low1, _mm256_add_epi32(b, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a + 8))));
+        const auto* a = reinterpret_cast<const __m256i_u*>(p.a + (k0 - j));  // index >= 1 - kGroup
+        for (std::size_t v = 0; v < kVecs; ++v)
+            low[v] = _mm256_min_epu32(low[v], _mm256_add_epi32(b, _mm256_loadu_si256(a + v)));
     }
-    _mm256_storeu_si256(reinterpret_cast<__m256i*>(p.c + k0), low0);
-    _mm256_storeu_si256(reinterpret_cast<__m256i*>(p.c + k0 + 8), low1);
+    auto* c = reinterpret_cast<__m256i_u*>(p.c + k0);
+    for (std::size_t v = 0; v < kVecs; ++v) _mm256_storeu_si256(c + v, low[v]);
 }
 
 // words u32 words, 2 MiB aligned, in huge pages where the kernel allows.
@@ -104,8 +126,8 @@ void solve() {
     io::Reader in;
     const std::size_t n = in.read<u32>(), m = in.read<u32>(), count = n + m - 1;
     const std::size_t groups = (count + kGroup - 1) / kGroup;
-    const std::size_t a_words = n + 2 * kAPad, b_words = m + 8, c_words = groups * kGroup;
-    u32* const memory = allocate(a_words + b_words + c_words + groups + 1);
+    const std::size_t a_words = n + 2 * kAPad, b_words = m, c_words = groups * kGroup;
+    u32* const memory = allocate(a_words + b_words + c_words + std::bit_ceil(groups) + 1);
     u32* const a = memory;
     u32* const b = a + a_words;
     u32* const c = b + b_words;
@@ -116,8 +138,7 @@ void solve() {
     in.read(b, m);
 
     const Problem p{n, m, a + kAPad, b, opt, c};
-    sample(p, 0, groups, 0, m - 1);
-    opt[groups] = u32(m - 1);
+    sample_levels(p, groups);
     for (std::size_t t = 0; t < groups; ++t) group(p, t);
 
     io::Writer out;

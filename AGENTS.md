@@ -64,6 +64,8 @@ They need Linux and Docker: run them on a VM or in CI, not on the Mac.
 - `python3 tools/judge.py bench <problem> <old.cpp> <new.cpp>`: same-run timing on the slowest tests.
   A ratio below 1 means the new file is faster.
 - `python3 tools/cases.py <problem>`: build the official tests only (cached in `~/.cache/lc-opt`).
+- `python3 tools/submit.py <problem> <file.cpp>`: submit to the judge as Aiyiyi and wait for the verdict.
+  Mac only; enforces the 5-per-problem cap. If it says "not logged in", stop and ask the user.
 - Both VMs have the repo at `~/lc-opt`. Run `git fetch` there and check out your branch.
 - `main` is protected. Every change, docs included, goes through a pull request; enable
   `gh pr merge --auto --squash`. CI (`.github/workflows/verify.yml`) tests each changed `main.cpp` and times it

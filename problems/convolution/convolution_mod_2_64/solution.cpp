@@ -143,19 +143,22 @@ void solve() {
 
     Arena arena(8 * (padded(n) + padded(m) + len) + 4 * (multimod::Transform::table_words(lg) + (kPrimes + 1) * words) +
                 8 * fields64::kBlock + fields64::kTextBytes + 64 * 16);
-    // Zero up to half the length too: the first level reads that far.
-    auto* a = arena.take<std::uint64_t>(std::max(padded(n), len / 2));
+    // Zero up to half the length too: the first level reads that far. a's storage also holds the
+    // last prime's work words (at least 2^lg + kPadding).
+    auto* a = arena.take<std::uint64_t>(std::max(padded(n), len / 2) + multimod::Transform::kPadding / 2);
     auto* b = arena.take<std::uint64_t>(std::max(padded(m), len / 2));
     io::read_bulk(in, a, n);
     io::read_bulk(in, b, m);
 
     const multimod::Transform transform(lg, arena.take<std::uint32_t>(multimod::Transform::table_words(lg)));
+    // The last prime's residues go to the work words, and its work to a: no fresh pages for it.
     auto* work = arena.take<std::uint32_t>(words);
     Residues residues;
     for (int k = 0; k < kPrimes; ++k) {
         const Modulus mod(kPrimeList[k][0], kPrimeList[k][1]);
-        auto* r = arena.take<std::uint32_t>(words);
-        transform.multiply(a, n, b, m, r, work, mod, kCrt.scale[k]);
+        const bool last = k + 1 == kPrimes;
+        auto* r = last ? work : arena.take<std::uint32_t>(words);
+        transform.multiply(a, n, b, m, r, last ? reinterpret_cast<std::uint32_t*>(a) : work, mod, kCrt.scale[k]);
         residues[k] = r;
     }
 

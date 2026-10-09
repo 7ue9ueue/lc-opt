@@ -3482,36 +3482,15 @@ class LongProduct {
 public:
     // The long axes' cyclic factors have a padded extent of at most 2^kMaxLog.
     LongProduct(const std::vector<Axis>& axes, const Field& field, std::uint32_t scale, Arena& arena)
-        : crt_(field, scale), p_(field.p) {
-        const CyclicFactors factors(axes);
-        std::vector<std::size_t> place_stride;
-        padded_ = 1;
-        for (const std::size_t d : factors.length) {
-            folds_.push_back({d, padded_});
-            place_stride.push_back(padded_);
+        : crt_(field, scale), p_(field.p), axes_(axes) {
+        CyclicFactors factors(axes);
+        lengths_ = std::move(factors.length);
+        weights_ = std::move(factors.weight);
+        padded_ = extent_ = 1;
+        for (const std::size_t d : lengths_) {
+            strides_.push_back(padded_);
+            extent_ += (d - 1) * padded_;  // the largest place, plus 1
             padded_ *= 2 * d - 1;
-        }
-        // Every point, axis 0 fastest. After n_i steps along axis i, y_r is back where it started.
-        std::size_t count = 1;
-        for (const Axis& axis : axes) count *= axis.length;
-        std::vector<std::size_t> index(axes.size()), y(factors.length.size());
-        std::size_t offset = 0;
-        for (std::size_t t = 0; t < count; ++t) {
-            std::size_t place = 0;
-            for (std::size_t r = 0; r < y.size(); ++r) place += y[r] * place_stride[r];
-            offsets_.push_back(std::uint32_t(offset));
-            places_.push_back(std::uint32_t(place));
-            extent_ = std::max(extent_, place + 1);
-            for (std::size_t i = 0; i < axes.size(); ++i) {
-                offset += axes[i].stride;
-                for (std::size_t r = 0; r < y.size(); ++r) {
-                    y[r] += factors.weight[i][r];
-                    if (y[r] >= factors.length[r]) y[r] -= factors.length[r];
-                }
-                if (++index[i] < axes[i].length) break;
-                index[i] = 0;
-                offset -= axes[i].length * axes[i].stride;
-            }
         }
         lg_ = transform_log(padded_);
         const std::size_t words = (std::size_t(1) << lg_) + multimod::Transform::kPadding;
@@ -3529,12 +3508,12 @@ public:
     }
 
     // f[base + offset] <- (f * g)[base + offset] over the long axes, times the scale. Between
-    // calls, a and b are zero but at places_; the last call (last = true) leaves them dirty.
+    // calls, a and b are zero but at the points' places; the last call (last = true) leaves them dirty.
     void multiply(std::uint32_t* f, const std::uint32_t* g, std::size_t base, bool last) {
-        for (std::size_t t = 0; t < offsets_.size(); ++t) {
-            a_[places_[t]] = f[base + offsets_[t]];
-            b_[places_[t]] = g[base + offsets_[t]];
-        }
+        for_each_point([&](std::size_t offset, std::size_t place) {
+            a_[place] = f[base + offset];
+            b_[place] = g[base + offset];
+        });
         const multimod::Transform transform(lg_, tables_);
         // The last prime's product goes to the work array and transforms b in place.
         std::uint32_t* const work = residues_[kPrimes - 1];
@@ -3544,22 +3523,62 @@ public:
         const std::size_t count = (padded_ + 7) & ~std::size_t(7);
         crt_.reconstruct(residues_, count, a_);
         fold(a_);
-        for (std::size_t t = 0; t < offsets_.size(); ++t) f[base + offsets_[t]] = a_[places_[t]];
+        for_each_point([&](std::size_t offset, std::size_t place) { f[base + offset] = a_[place]; });
         if (last) return;
         std::memset(a_, 0, count * sizeof(std::uint32_t));
         std::memset(b_, 0, (std::size_t(1) << lg_) * sizeof(std::uint32_t));
     }
 
 private:
-    struct Fold {
-        std::size_t length, stride;  // D and the Kronecker stride of a cyclic factor
-    };
+    // visit(offset in f, place in the Kronecker array) for every point of the long axes, axis 0
+    // innermost. After n_i steps along axis i, every y_r is back where it started.
+    template <class Visit>
+    void for_each_point(Visit visit) const {
+        const std::size_t factors = lengths_.size(), n0 = axes_[0].length, s0 = axes_[0].stride;
+        std::vector<std::size_t> index(axes_.size()), y(factors), z(factors);
+        std::size_t offset = 0;
+        for (;;) {
+            if (factors == 1) {
+                const std::size_t d = lengths_[0], w = weights_[0][0];
+                for (std::size_t j = 0, at = offset, place = y[0]; j < n0; ++j, at += s0) {
+                    visit(at, place);
+                    place += w;
+                    place = place >= d ? place - d : place;
+                }
+            } else {
+                z = y;
+                for (std::size_t j = 0, at = offset; j < n0; ++j, at += s0) {
+                    std::size_t place = 0;
+                    for (std::size_t r = 0; r < factors; ++r) place += z[r] * strides_[r];
+                    visit(at, place);
+                    step(z, 0);
+                }
+            }
+            std::size_t i = 1;
+            for (; i < axes_.size(); ++i) {
+                offset += axes_[i].stride;
+                step(y, i);
+                if (++index[i] < axes_[i].length) break;
+                index[i] = 0;
+                offset -= axes_[i].length * axes_[i].stride;
+            }
+            if (i == axes_.size()) return;
+        }
+    }
+
+    // One step along axis i.
+    void step(std::vector<std::size_t>& y, std::size_t i) const {
+        for (std::size_t r = 0; r < y.size(); ++r) {
+            y[r] += weights_[i][r];
+            if (y[r] >= lengths_[r]) y[r] -= lengths_[r];
+        }
+    }
 
     // Index D + j of a factor onto j, for every factor in turn.
     void fold(std::uint32_t* c) const {
         const std::uint32_t p = p_;
-        for (const Fold& fold : folds_) {
-            const std::size_t span = fold.stride * (2 * fold.length - 1), shift = fold.length * fold.stride;
+        for (std::size_t r = 0; r < lengths_.size(); ++r) {
+            const std::size_t span = strides_[r] * (2 * lengths_[r] - 1), shift = lengths_[r] * strides_[r];
             for (std::size_t o = 0; o < padded_; o += span)
                 for (std::size_t i = o; i < o + span - shift; ++i) {
                     const std::uint32_t sum = c[i] + c[i + shift];
@@ -3570,8 +3589,9 @@ private:
 
     Crt crt_;
     std::uint32_t p_;
-    std::vector<std::uint32_t> offsets_, places_;  // index in f, index in the Kronecker array
-    std::vector<Fold> folds_;
+    std::vector<Axis> axes_;
+    std::vector<std::size_t> lengths_, strides_;   // per cyclic factor: D_r, Kronecker stride
+    std::vector<std::vector<std::size_t>> weights_;  // CyclicFactors::weight
     std::size_t extent_ = 0, padded_ = 0;
     int lg_ = 0;
     std::uint32_t *a_, *b_, *tables_;

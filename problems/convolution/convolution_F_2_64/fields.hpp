@@ -26,7 +26,7 @@ constexpr u64 kTen8 = 100000000, kTen16 = kTen8 * kTen8;
 constexpr u64 kExponent52 = 0x4330000000000000;  // the bits of 2^52 as a double
 
 // Each lane as a double; relative error below 2^-53.
-inline __m256d to_double(__m256i x) {
+[[gnu::always_inline]] inline __m256d to_double(__m256i x) {
     const __m256i magic = _mm256_set1_epi64x(std::int64_t(kExponent52));
     const __m256d two52 = _mm256_set1_pd(0x1p52);
     const __m256d high = _mm256_sub_pd(_mm256_castsi256_pd(_mm256_or_si256(_mm256_srli_epi64(x, 32), magic)), two52);
@@ -38,7 +38,7 @@ inline __m256d to_double(__m256i x) {
 // x = q * d + r for each lane, q < 2^31 and d * q < 2^63. scale is 1 / d rounded down by a few
 // ulps, so the estimate floor(x * scale) is q or q - 1; one step corrects it.
 template <u64 D>
-inline __m256i divide(__m256i x, double scale, __m256i& r) {
+[[gnu::always_inline]] inline __m256i divide(__m256i x, double scale, __m256i& r) {
     const __m256d t = _mm256_mul_pd(to_double(x), _mm256_set1_pd(scale));
     __m256i q = _mm256_cvtepu32_epi64(_mm256_cvttpd_epi32(t));
     __m256i p = _mm256_mul_epu32(q, _mm256_set1_epi64x(std::int64_t(D & 0xFFFFFFFF)));
@@ -56,7 +56,7 @@ constexpr double kScale16 = 1e-16 * (1 - 0x1p-50), kScale8 = 1e-8 * (1 - 0x1p-50
 // Each 64-bit lane n < 10^8 to its 8 digits as text, most significant at the lowest address.
 // Each step splits a part x into [x % d, x / d] in place as x + (x / d) * (2^k - d); the digits
 // come out least significant first and one byte shuffle reverses them.
-inline __m256i digits8(__m256i n) {
+[[gnu::always_inline]] inline __m256i digits8(__m256i n) {
     const __m256i q4 = _mm256_srli_epi64(_mm256_mul_epu32(n, _mm256_set1_epi64x(109951163)), 40);  // n / 10^4
     const __m256i w4 = _mm256_add_epi64(n, _mm256_mul_epu32(q4, _mm256_set1_epi64x(0xFFFFD8F0)));  // dwords < 10^4
     const __m256i q2 = _mm256_srli_epi16(_mm256_mulhi_epu16(w4, _mm256_set1_epi32(5243)), 3);  // / 100
@@ -70,7 +70,7 @@ inline __m256i digits8(__m256i n) {
 
 // Each lane h < 10^4 to 4 characters in its low dword, most significant first, leading zeros
 // (all four when h = 0) as spaces.
-inline __m256i digits4(__m256i h) {
+[[gnu::always_inline]] inline __m256i digits4(__m256i h) {
     const __m256i q2 = _mm256_srli_epi16(_mm256_mulhi_epu16(h, _mm256_set1_epi32(5243)), 3);
     const __m256i w2 = _mm256_add_epi32(h, _mm256_mullo_epi32(q2, _mm256_set1_epi32(65436)));
     const __m256i q1 = _mm256_mulhi_epu16(w2, _mm256_set1_epi16(6554));
@@ -88,8 +88,17 @@ inline __m256i digits4(__m256i h) {
 inline void store16(char* p, __m128i v) { _mm_storeu_si128(reinterpret_cast<__m128i*>(p), v); }
 inline void store8(char* p, __m128i v) { _mm_storel_epi64(reinterpret_cast<__m128i*>(p), v); }
 
+// Blanks the leading zeros of fields whose bit is set in small (values below 10^16).
+[[gnu::noinline, gnu::cold]] inline void blank_small(char* p, int small) {
+    for (int k = 0; k < 4; ++k) {
+        if (!(small >> k & 1)) continue;
+        char* f = p + k * kWidth;
+        for (std::size_t j = 4; j < 19 && f[j] == '0'; ++j) f[j] = ' ';
+    }
+}
+
 // Fields of the four values x at p; stores 3 bytes past the last field.
-inline void format4(char* p, __m256i x) {
+[[gnu::always_inline]] inline void format4(char* p, __m256i x) {
     __m256i r, l;
     const __m256i h = divide<kTen16>(x, kScale16, r);
     const __m256i m = divide<kTen8>(r, kScale8, l);
@@ -108,13 +117,7 @@ inline void format4(char* p, __m256i x) {
     store16(p + 3 * kWidth, _mm256_extracti128_si256(odd, 1));
     store8(p + 3 * kWidth + 16, _mm_unpackhi_epi64(c23, c23));
     const int small = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(h, _mm256_setzero_si256())));
-    if (small) [[unlikely]] {
-        for (int k = 0; k < 4; ++k) {
-            if (!(small >> k & 1)) continue;
-            char* f = p + k * kWidth;
-            for (std::size_t j = 4; j < 19 && f[j] == '0'; ++j) f[j] = ' ';
-        }
-    }
+    if (small) [[unlikely]] blank_small(p, small);
 }
 
 inline constexpr std::size_t kBlock = 3104;  // values per write(2): 65184 bytes, then 3 overhang

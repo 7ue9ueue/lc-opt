@@ -36,6 +36,16 @@ faults on ~9 MB of scratch).
     r = x q g mod (x^m - 1) uncorrected (t then exceeds h (g q - g') / x^(m-1) by x q, which the
     division's loader subtracts); vector negation. In process 14.15 vs 14.70 ms (0.962, 41
     paired runs, outputs equal); 18.7 ms on the max tests.
-- Next: fused transform-domain products in `Transform` (inverse of a product of two stored
-  transforms; forward then product kept as a transform), estimated 0.9 ms; a scheduled leaf
-  product (lib/poly/notes.md), estimated 1.5 ms.
+  - Merged as #113 (19.09 ms whole process on `lc-amd`).
+  - Fused transform-domain products in `Transform` (lib/poly/notes.md): e = g h by
+    `inverse_product` of the stored transforms; T_m(r) = `forward_product` of x q with T_m(g),
+    kept as the lower half of T_2m(r) (r itself by an out-of-place `inverse`, its upper half by
+    `forward_upper`), t by `inverse_product`. 8 transforms per step instead of 8.5. In process
+    13.55 vs 14.26 ms (0.950, 41 paired runs, outputs equal). Phases (ms): forward g 0.59,
+    e 1.03, h product 1.59, negation 0.03, T_m(r) 1.18, r 0.54, forward h 1.20, t 2.75,
+    division 0.45, forward_upper g 0.62, g s product 3.32, copy 0.06, start 0.14.
+    `judge.py bench` (21 rounds, slowest 3): 18.80 vs 19.46 ms (0.9694). inv: `.text`
+    byte-identical; bench 1.0013 (noise).
+- Next: the leaf products are ~3.5 ms of the 13.5 (3.5 per step at ~1.0 ms per length-2m
+  unit); a scheduled asm leaf product (lib/poly/notes.md) is the largest item left. The
+  division (0.45 ms) could halve with a stored inverse table folded into the transform's scale.

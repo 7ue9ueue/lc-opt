@@ -20,9 +20,11 @@ powers of two and their neighbours up to 2^20, random sizes; also run under ASan
   `inverse_identity`, `scale_radix2`) and its inverse radix-4 top level. New here, intrinsics:
   the bottom level (h = 1) with or without leaf products, the forward top level, the inverse top
   level for one output half.
-- Separate calls instead of lib/ntt's fused convolution: `forward`, `inverse`, `multiply`,
-  `multiply_add`, and `cyclic_product` (forward of a, leaf products with a stored transform b,
-  inverse, depth first in one pass).
+- Separate calls instead of lib/ntt's fused convolution: `forward`, `inverse` (in place or out
+  of place), `multiply`, `multiply_add`, and fused depth-first passes: `cyclic_product` (forward
+  of a, leaf products with a stored transform b, inverse), `inverse_product` (leaf products of
+  two stored transforms, inverse), `forward_product` (forward of a, leaf products with b, kept
+  as a transform).
 - Sources: the forward top level reads x^shift in[0, size) from any span (in place or not);
   coefficients outside are zero and not read. Outputs: `Half` computes one half only.
 - Leaf product: a window [w a, a] (canonical) gives x^i a mod (x^8 - w) as words [8 - i, 16 - i);
@@ -56,19 +58,20 @@ upper-half input and output. 5 transforms of length 2k and 2 leaf products per s
 
 Newton from m to 2m, with g = exp(f) mod x^m, h = 1 / g mod x^(m/2) and H = T_m(h) (the previous
 step's transform of length 2m' = m), d = f', q = d mod x^(m-1):
-- G_lo = T_m(g); e = (g h)[m/2, m) by `multiply` of a copy of G_lo with H, `inverse` upper half;
+- G_lo = T_m(g); e = (g h)[m/2, m) by `inverse_product` of G_lo and H, upper half;
   h[m/2, m) = -(x^(m/2) e h mod (x^m - 1))[m/2, m) by `cyclic_product` with H.
-- r = x q g mod (x^m - 1) (`cyclic_product` with G_lo, shift 1). As polynomials of degree < m,
-  r = (g q - g') / x^(m-1) + x g', since g' = g q mod x^(m-1).
-- H = T_2m(h); t = h r mod x^m (`cyclic_product`, lower half). Then t exceeds
-  h (g q - g') / x^(m-1) mod x^m by x h g' = x q mod x^m.
+- r = x q g mod (x^m - 1): T_m(r) = `forward_product` of x q with G_lo, then r by an
+  out-of-place `inverse`. As polynomials of degree < m, r = (g q - g') / x^(m-1) + x g', since
+  g' = g q mod x^(m-1).
+- H = T_2m(h); T_2m(r) = [T_m(r), `forward_upper` of r]; t = h r mod x^m by `inverse_product`,
+  lower half. Then t exceeds h (g q - g') / x^(m-1) mod x^m by x h g' = x q mod x^m.
 - log g = integral of g'/g, g'/g = q - h (g q - g') mod x^(2m-1), so
   s = (f - log g)[m, 2m) = (d[m-1+i] + t_i - d[i-1]) / (m + i): `divide_by_index` with a loader.
 - g[m, 2m) = g s mod x^m: G = T_2m(g) by `forward_upper`, `cyclic_product` of x^m s (in place at
   w[m, 2m)), upper half.
-- Per step 8.5 transforms of length 2m (T_m(g), the inverse for e, 2 + 2 for the length-m
-  products, T_2m(h), 2 + 2 for the length-2m products, the upper half of T_2m(g)) and 3.5 leaf
-  products of that length. In all about 17 T(n) + 7 LP(n) for n = 2^19 (inverse: 10 T + 4 LP).
+- Per step 8 transforms of length 2m (in halves: T_m(g) 1, e 1, h 2, T_m(r) 1, r 1, T_2m(h) 2,
+  upper half of T_2m(r) 1, t 2, upper half of T_2m(g) 1, g s 4) and 3.5 leaf products of that
+  length. In all about 16 T(n) + 7 LP(n) for n = 2^19 (inverse: 10 T + 4 LP).
 - Below 64 coefficients: the recurrence n g_n = sum_k k f_k g_(n-k); h mod x^32 by
   `inverse_direct`.
 - f is only read by the first pass (into d = f'), so g may be f.
@@ -130,9 +133,14 @@ products 1.77 and 1.69).
   levels and ~3.2 ms in leaf products (estimate from the per-op times above).
 - e = g h from the stored T_m(g) (copy, `multiply`, `inverse`) instead of `cyclic_product`
   (which transforms g again), the uncorrected r, vector negation: 14.15 vs 14.70 ms.
-- Considered, not done: a fused "inverse of a product of two transforms" and "forward then
-  product, kept as a transform" in `Transform` would save ~0.5 + 0.5 T per step (estimate
-  ~0.9 ms); they change `transform.hpp`, which inv bundles. A relaxed (online) exp with
+- Added `Transform::inverse_product`, `forward_product` and an out-of-place `inverse` (new
+  bottoms; `ProductBottom` unchanged). exp with them: 13.55 vs 14.26 ms (0.950); inv's `.text`
+  is byte-identical. Tests: each against the cyclic product, output halves, in place on either
+  operand, forward_product from x^shift in; a mutation (no 2^32 correction) fails them.
+- `vbroadcastss` (`_mm256_broadcast_ss`) for the broadcasts of b in `leaf_product`
+  (-1 cycle in isolation, see above): `judge.py bench` 21 rounds, exp 1.0003, inv 0.9984.
+  Not kept.
+- Considered, not done: a relaxed (online) exp with
   B-ary blocks: with leaf products at ~0.75 of a transform, 16-ary blocks cost ~4 levels x (15
   LP + 4 T) per coefficient, far above Newton; it would need full-depth transforms with
   cheap pointwise products, and its serial base case (one modular chain per coefficient,

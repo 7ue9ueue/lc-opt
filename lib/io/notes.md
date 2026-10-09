@@ -100,6 +100,10 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
   +1.5 ms with the input on tmpfs). Removed.
 - Software prefetch 512 B-8 KiB ahead of the separator scan: +0.8% to +3.6% on many_aplusb.
 - `write()` chunk size, 20 MB: 16 KiB +9%, 64 and 256 KiB equal, 1 MiB +1%, one 20 MB write +94%.
+- Input mapping, 40 MB: `MAP_SHARED` equal to `MAP_PRIVATE`; `MAP_SHARED | MAP_POPULATE` +15%.
+- uint64 batch write (scalar split into three 8-digit limbs, AVX2 digits for eight values, three
+  stores per value): 5.5 ns per value vs 4.4 for the scalar formatter in the same loop. Not kept;
+  the limb split and digit count are scalar either way.
 - Judge harness (`tools/judge.py`): inputs now on tmpfs, as on the judge, instead of the VM's disk
   cache. Same timings for these programs.
 
@@ -118,4 +122,4 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
 
 - Bulk write is 1.3 ns per value slower than fixed-width output; the vector work, not the stores,
   is the limit (in-memory: compute 1.4, with movemask 1.7, full 2.4 ns per value).
-- Bulk reads for 64-bit and signed values; bulk write for 64-bit values.
+- Bulk reads for 64-bit and signed values.

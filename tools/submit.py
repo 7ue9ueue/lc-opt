@@ -5,7 +5,7 @@
                             token is kept, in macOS Keychain; the password is not stored.
   submit.py PROBLEM FILE    Submit FILE as C++23, wait for the verdict, print it.
 
-At most CAP submissions per problem, counting those since CAP_SINCE.
+At most CAP submissions per version: earlier submissions with the same source count.
 """
 from __future__ import annotations  # macOS ships Python 3.9
 
@@ -23,7 +23,6 @@ API = 'https://v3.api.judge.yosupo.jp'
 FIREBASE_KEY = 'AIzaSyCmpkoMVbKRDm2H0MJHB0iZ43uQtSqiLV0'  # public web key of judge.yosupo.jp
 USER = 'Aiyiyi'
 CAP = 5
-CAP_SINCE = '2026-10-09'  # earlier, hand-made submissions do not count
 KEYCHAIN = ['-a', 'lc-opt', '-s', 'lc-opt-judge-token']
 FINAL = {'AC', 'WA', 'RE', 'TLE', 'MLE', 'PE', 'Fail', 'CE', 'IE', 'ICE'}
 
@@ -70,17 +69,17 @@ def id_token() -> str:
     return refreshed['id_token']
 
 
-def used(problem: str) -> int:
+def used(problem: str, source: str) -> int:
     query = urllib.parse.urlencode({'problem': problem, 'user': USER, 'limit': 1000})
     submissions = call(f'{API}/submissions?{query}')['submissions']
-    return sum(s['submission_time'] >= CAP_SINCE for s in submissions)
+    return sum(call(f'{API}/submissions/{s["id"]}')['source'] == source for s in submissions)
 
 
 def submit(problem: str, file: str) -> int:
-    count = used(problem)
-    if count >= CAP:
-        sys.exit(f'{problem}: cap reached ({count}/{CAP} submissions since {CAP_SINCE})')
     source = Path(file).read_text()
+    count = used(problem, source)
+    if count >= CAP:
+        sys.exit(f'{problem}: cap reached ({count}/{CAP} submissions of this version)')
     sid = call(f'{API}/submit', {'problem': problem, 'source': source, 'lang': 'cpp'}, token=id_token())['id']
     print(f'submission {sid} ({count + 1}/{CAP}): https://judge.yosupo.jp/submission/{sid}', flush=True)
     for _ in range(120):

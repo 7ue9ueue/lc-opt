@@ -1,0 +1,64 @@
+# gcd_convolution
+
+N <= 10^6, a_i, b_i < 998244353; print c_k = sum over gcd(i, j) = k of a_i b_j for k = 1..N. 5 s.
+Large tests: N = 10^6, 999982..999984, 994008..994010 (997^2 - 1 + {0, 1, 2}), random values;
+19.8 MB of input, 10 MB of output.
+
+Record when opened: 37 ms. Best judged: none yet.
+
+## Design
+
+- c = Moebius(zeta(a) zeta(b)), where zeta sums over multiples. Each is a product of commuting
+  per-prime passes, so the passes can go in any order and be grouped.
+- a and b interleaved as 64-bit pairs [a, b R mod P]: one load fetches both. b is pre-scaled by
+  R = 2^32 so one Montgomery reduction gives a b mod P.
+- Memory: one mapping in 2 MiB pages (12 MB): the pairs, with a parsed into their first half
+  (the interleave runs downwards, so it only overwrites a values already read), then b, later c.
+- Primes 2..13: one AVX2 pass each. Zeta 3 is fused with the interleave; zeta 2 with the product
+  and Moebius 2 (c_i = A_i B_i - A_2i B_2i, the second product recomputed).
+- Primes >= 17 together: x_i += sum of x_im over m coprime to 30030 ("rough", m > 1), from a
+  wheel (5760 spokes, rank table; both constexpr). Zeta takes the sources segment by segment
+  upwards (each source is read before it changes), Moebius uses c_i = C_i - sum of final c_im with
+  segments downwards; segment 0 goes by target. Multipliers m <= 2048 go by m over a run of
+  targets; larger ones by target (i <= N / 2049) into 64-bit sums. No sieve is needed.
+- Output: `../fixed_width.hpp` (10-byte fields).
+
+## Log
+
+- 2026-10-09, claude, round 1. `lc-amd` (EPYC 7B13), judge flags, `tools/judge.py bench`, 21
+  rounds, slowest 3 cases, median ms:
+  - v0: scalar per-prime passes on `std::vector`s, byte sieve: 26.6 (`judge.py test`: 25.5).
+    In-process phases: allocation 3.3, parse 3.0, sieve 2.8, zeta 5.4, product 0.9, Moebius 2.7,
+    output 4.3.
+  - v1: pairs, AVX2 small-prime passes, fused passes above, huge pages, all primes p^2 > N in one
+    pass by target: 18.6 (0.70 of v0).
+  - v2: one 12 MB mapping instead of five (13 huge pages zeroed before, 6 now), segmented sieve
+    (2.8 -> 0.4 ms): 17.3 (0.927 of v1).
+  - v4: one sweep for all primes >= 17, no sieve: 16.2 (0.956 of v2).
+  - v5: scalar loads instead of `vpgatherdd` for strided dwords: 16.1 (same as v4 within noise;
+    kept, simpler). `judge.py test`: 13.6-14.9 ms on the large cases.
+  - I/O floor (read a and b into the same mapping, print a): 11.3. So 4.8 ms of compute remain.
+- In-process phases of v5 (ms): parse a 1.5, parse b 1.75, interleave + zeta 3 0.5, zeta 5..13
+  0.58, rough zeta 1.5, zeta 2 + product + Moebius 2 0.49, Moebius 3..13 0.45, rough Moebius 1.43,
+  output 4.5, exit 0.24; start ~1.0 before `main`.
+- Why the rough sweep is not faster: per-prime passes for p >= 17 touch 1.51 N lines from L3 at
+  ~1 ns each (~3 cycles; at L3 bandwidth). The sweep has 2.14 N contributions (composite m add
+  0.63 N), each a separate line from L2, and Zen 3 fills L1 from L2 at 32 B/cycle: ~2 cycles each.
+  Measured: 2.2 TSC cycles per contribution by m, 2.5 by target. Net 0.1 ms per transform, plus
+  no sieve.
+- Sweep tuning: segment 2^13..2^16 pairs: 2^15 best (smaller: more per-segment overhead; larger:
+  no gain). Split 1024 / 2048 / 4096: 1.58 / 1.50 / 1.50 ms rough zeta. Carrying the next index
+  per target and multiplier, and floor division by reciprocal multiply (no `div`): 1.58 -> 1.50.
+- Counted, not built: splitting the rough sweep into stages by prime size cuts contributions
+  (17..1000 and > 1000: 1.93 N; three stages: 1.72 N) but adds a pass over the array per stage.
+- Page faults on `lc-amd` in Docker: 0.10 ms per 2 MiB page with MADV_HUGEPAGE, 0.86-0.91 ms per
+  2 MiB in 4 KiB pages.
+- Harness: `judge.py bench` reruns write the same output file; truncating 10 MB of tmpfs adds
+  ~1-2 ms per run compared with `judge.py test`. Same for every source.
+
+## Next
+
+- Fuse the rough zeta sweep with parsing b (sources then come straight from the parser); needs an
+  upward interleave, with a in the second half of the pair array.
+- L1-sized segments for the smallest rough multipliers (17..61, 0.38 N contributions).
+- The rest is I/O (parse 3.3 ms, output 4.5 ms): `lib/io` and `fixed_width.hpp`.

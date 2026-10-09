@@ -45,8 +45,25 @@ Record when opened: 29 ms (another user). Best judged: ours, 31 ms:
     [409263](https://judge.yosupo.jp/submission/409263) AC 32 ms from three outliers
     (max_ans_zero_00 32, fft_killer_07 31, random_00 30; the rest 20-23). Matches `lc-amd`
     (22.9). The judged maximum is jitter; no further submissions of this version.
-- Next: the transforms are 14.6 of ~23 ms (kernel-bound, as convolution_mod). Ideas: CRT fused
-  into the last prime's final pass; kernel work in lib/ntt carried over.
+- 2026-10-09, claude (round 2). `lc-amd`, judge flags. Phases on fft_killer_05 (ms, median of
+  21, in-process `CLOCK_MONOTONIC`, scratch probe not committed): parse / transforms / output
+  (CRT + format + `write()` to /dev/null).
+  - Base (main): 1.54 / 14.17 / 1.22.
+  - CRT fused into the last prime's final pass: the pass hands each finished vector (or chunk of
+    vectors) to a callback that overwrites y2 with c mod q; the formatter then reads c straight
+    from the transform's array, with a max scan per block for the 10/11-byte choice.
+    Per vector: 1.54 / 14.77 / 0.80. Per chunk of 32, 128, 512 or 2048 vectors (CRT from L1):
+    14.69-14.88 / 0.80-0.82. The same pass with an empty callback: 14.13 / 0.80. So the CRT costs
+    0.42 ms standalone (writing an L2 block) and 0.57-0.63 ms fused: it is compute-bound, the
+    memory traffic it saves was not the limit, and the fused loop reloads the residue pointers
+    and spills constants. `judge.py bench`, 21 rounds, slowest 3: base 23.84, fused 24.19 ms
+    (ratio 1.013); a second run: base 24.05, per vector 24.21 (1.005), with the asm scale kernel
+    for the first two primes 24.26 (1.012). Dropped.
+  - Not tried, estimated small: CRT with (y2 + (2 - t) p2) M2 instead of the t M term saves 2 of
+    12 `vpmuludq` per 8 values (~0.05 ms, guess); a 4 MiB array fewer (in-place last prime for a
+    needs a's buffer at 2^lg words, but primes 0-1 still need a 4 MiB scratch): no saving.
+- Next: everything left is in the transforms (14.2 of ~23 ms, lib/ntt's kernels) and fixed I/O.
+  No problem-local idea left that is worth more than noise.
 
 ## Sources
 

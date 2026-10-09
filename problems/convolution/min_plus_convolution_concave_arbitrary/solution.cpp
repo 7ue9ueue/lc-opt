@@ -31,6 +31,7 @@ void sweep(const std::uint32_t* a, const std::uint32_t* b, std::uint32_t* c, std
     auto before = [](std::uint32_t x, std::uint32_t y) { return Step > 0 ? x < y : x > y; };
     std::uint32_t top = 0;
     for (std::uint32_t x = first, k = 0;; x += Step, ++k) {
+        while (top && before(stack[top - 1].last, x)) --top;
         if (k < enter_count) {
             const std::uint32_t j = enter_first + Step * k;
             const std::uint32_t at_x = value(j, x);
@@ -59,7 +60,6 @@ void sweep(const std::uint32_t* a, const std::uint32_t* b, std::uint32_t* c, std
             if (!top) won = last;
             if (won != x - Step) stack[top++] = {j, won};
         }
-        while (before(stack[top - 1].last, x)) --top;
         const std::uint32_t o = stack[top - 1].column;
         c[x] = std::min(c[x], value(o, x));
         if (x == last) break;

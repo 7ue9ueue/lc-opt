@@ -51,6 +51,8 @@ def main() -> int:
         rng = random.Random(1)
         for r in range(rounds):
             n, m = length(rng), length(rng)
+            if r % 10 == 9:  # several output blocks of 25600 values
+                n, m = rng.randint(1, 8), rng.randint(25000, 80000)
             a, b = convex(rng, n), arbitrary(rng, m)
             text = f'{n} {m}\n{" ".join(map(str, a))}\n{" ".join(map(str, b))}\n'
             got = subprocess.run([work / 'main'], input=text, capture_output=True, text=True, check=True).stdout

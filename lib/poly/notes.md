@@ -4,7 +4,8 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
 
 - `transform.hpp`: transforms of length 2^6 .. 2^25 and products in the transform domain.
 - `calculus.hpp`: coefficient-wise operations: `derivative`, `divide_by_index` (integration).
-- One header per operation on top: `inverse.hpp`, `exp.hpp` (Newton iterations).
+- One header per operation on top: `inverse.hpp`, `exp.hpp` (Newton iterations), `log.hpp`
+  (division f'/f).
 
 APIs and usage: the header of each file. Tests: `test.cpp` (O(n^2) references; sizes 1..64,
 powers of two and their neighbours up to 2^20, random sizes; also run under ASan/UBSan in CI).
@@ -77,6 +78,21 @@ step's transform of length 2m' = m), d = f', q = d mod x^(m-1):
 - f is only read by the first pass (into d = f'), so g may be f.
 - Scratch: d, G, H, w (length 2^lg each), h (2^(lg-1)).
 
+## Log
+
+log f = integral of q, q = f'/f mod x^(n-1), d = f'. Karp and Markstein: with transforms of
+length 2m >= n - 1 and h = 1 / f mod x^m (`inverse`), H = T_2m(h):
+- q0 = q mod x^m = d h mod x^m: `cyclic_product` of d[0, m) with H, lower half.
+- e = (f q0 - d)[m, 2m): `cyclic_product` of q0 with T_2m(f), upper half (exact there: the
+  product has degree < 3m - 1), then d subtracted.
+- q[m, 2m) = -(h e mod x^m): `cyclic_product` of x^m e with H, upper half.
+- 8 transforms of length 2m and 3 leaf products, after the inverse to m (10 transforms of
+  length m and 4 leaf products): about 13 T(2m) + 5 LP(2m) in all. The integral divides by
+  index with `divide_by_index`, whose loader reads q.
+- d is kept in g[1, n) until q replaces it there; scratch: H, T_2m(f), work (length 2m each).
+- exp's step computes log g [m, 2m) for its own g (degree < m, with h = 1/g kept from the
+  previous step), not log of a given f, so the two share only calculus.hpp.
+
 ## Measurements
 
 AMD EPYC 7B13 (`lc-amd`, 3.48 GHz), GCC 15.2, judge flags, 2026-10-09. ns per coefficient,
@@ -146,6 +162,16 @@ products 1.77 and 1.69).
   cheap pointwise products, and its serial base case (one modular chain per coefficient,
   ~20 cycles) alone costs ~3 ms.
 
+2026-10-09, claude (issue #64, log_of_formal_power_series):
+- Added `log.hpp` (`log`, `log_log`, `log_scratch`); `transform.hpp`, `inverse.hpp`,
+  `calculus.hpp` and `exp.hpp` unchanged. Tests: log against the O(n^2) recurrence (n <= 160,
+  edge cases f = 1, f = 1 - x, f shorter and longer than n), longer outputs by a prefix and
+  i f_i = sum k g_k f_(i-k) at random i and around the split m; sizes 2^k - 1 .. 2^k + 2 to
+  2^20 + 1.
+- log at N = 500000 on `lc-amd`: 10.81 ms in process (phases in
+  problems/polynomial/log_of_formal_power_series/notes.md): inverse to 2^18 3.89, three
+  `cyclic_product`s 5.09, two forwards 1.28, calculus 0.55.
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -159,3 +185,6 @@ products 1.77 and 1.69).
   no code read.
 - Batch inversion: P. Montgomery, "Speeding the Pollard and elliptic curve methods of
   factorization", Math. Comp. 48 (1987).
+- Division with the inverse's last Newton step merged: A. Karp, P. Markstein, "High-precision
+  division and square root", ACM TOMS 23 (1997) (the idea, as described by Hanrot and
+  Zimmermann above). Derived and written here; no code read.

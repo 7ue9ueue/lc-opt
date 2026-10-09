@@ -4,7 +4,8 @@
 // - Ranked: every n_l <= 3 and at least three n_l = 2. Each variable is evaluated at n_l points
 //   ({0, 1} or {0, 1, -1}); a rank t^|d| tracks the total degree, so terms that wrapped are dropped.
 // - Graded: any shape. One cyclic NTT over the flat index, graded by chi(i) = sum_j floor(i / P_j)
-//   mod m; a carry adds 1 to chi, so a product term is valid iff no grade was lost. m >= k, m | P - 1.
+//   mod m; each carry adds 1 to chi, so a product term is valid iff chi(i) + chi(j) = chi(i + j)
+//   mod m. m >= k, m | P - 1.
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -3166,55 +3167,69 @@ std::size_t round8(std::size_t n) { return (n + 7) & ~std::size_t(7); }
 // ordinary convolution: c_i = (1/m) sum_s w^(-s chi_i) [(f w^(s chi)) * (g w^(s chi))]_i.
 
 u32 grade_modulus(std::size_t k) {
-    for (u32 m : {1, 2, 4, 7, 8, 14, 16, 17, 28, 32, 56, 64})
+    for (u32 m : {1, 2, 4, 7, 8, 14, 16, 17, 28, 32})
         if (m >= k) return m;
     std::abort();
 }
 
-void graded(const std::vector<u32>& n, std::size_t size, const u32* f, const u32* g, u32* c) {
-    const std::size_t k = n.size(), padded = round8(size);
-    const u32 m = grade_modulus(k);
-    const u32 root = power_mod(3, (kP - 1) / m), inverse_root = inverse_mod(root);
+// table[index] for 8 indices < 8 Tables, table in Tables vectors.
+template <int Tables>
+Vec lookup(const Vec* table, Vec index) {
+    const auto pick = [index](Vec x, Vec y, int bit) {  // x or y by the given bit of index
+        const __m256 select = _mm256_castsi256_ps(_mm256_slli_epi32(index, 31 - bit));
+        return _mm256_castps_si256(_mm256_blendv_ps(_mm256_castsi256_ps(x), _mm256_castsi256_ps(y), select));
+    };
+    const Vec x = _mm256_permutevar8x32_epi32(table[0], index);
+    if constexpr (Tables == 1) {
+        return x;
+    } else {
+        const Vec low = pick(x, _mm256_permutevar8x32_epi32(table[1], index), 3);
+        if constexpr (Tables == 2) return low;
+        const Vec high = pick(_mm256_permutevar8x32_epi32(table[2], index),
+                              _mm256_permutevar8x32_epi32(table[3], index), 3);
+        return pick(low, high, 4);
+    }
+}
 
-    // base_i = w^chi_i, inverse_base_i = w^-chi_i, in Montgomery form.
-    std::array<u32, 64> powers{}, inverse_powers{};
-    for (u32 r = 0, x = 1, y = 1; r < m; ++r, x = multiply_mod(x, root), y = multiply_mod(y, inverse_root))
-        powers[r] = montgomery(x), inverse_powers[r] = montgomery(y);
-    u32* base = allocate<u32>(padded);
-    u32* inverse_base = allocate<u32>(padded);
+template <int Tables>
+void graded(const std::vector<u32>& n, std::size_t size, const u32* f, const u32* g, u32* c, u32 m) {
+    const std::size_t k = n.size(), padded = round8(size);
+    const u32 root = power_mod(3, (kP - 1) / m), inverse_m = inverse_mod(m);
+
+    std::uint8_t* grade = allocate<std::uint8_t>(padded);  // chi mod m
     {
-        std::vector<u32> digit(k + 1, 0);
-        u32 chi = 0;  // mod m
+        std::vector<u32> digit(k, 0);
+        std::uint8_t chi = 0;
         for (std::size_t i = 0; i < size; ++i) {
-            base[i] = powers[chi], inverse_base[i] = inverse_powers[chi];
+            grade[i] = chi;
             for (std::size_t j = 0; j + 1 < k && ++digit[j] == n[j]; ++j) {
                 digit[j] = 0;
                 if (++chi == m) chi = 0;
             }
         }
     }
+    const auto grades = [grade](std::size_t i) {
+        return _mm256_cvtepu8_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(grade + i)));
+    };
 
     ntt::Convolution product(size, size);
     // Both factors fill at most half the transform, so lib/ntt reads only that half ("sparse").
     const std::size_t half = (std::size_t(1) << std::max(6, int(std::bit_width(2 * size - 2)))) / 2;
     u32 *a = product.a(), *b = product.b();
-    const Vec scale = all(montgomery(inverse_mod(m)));
-    u32* weight = allocate<u32>(padded);          // w^(s chi), Montgomery form
-    u32* inverse_weight = allocate<u32>(padded);  // w^(-s chi) / m, Montgomery form
     for (u32 s = 0; s < m; ++s) {
+        // w^(s r) and w^(-s r) / m in Montgomery form, r < m.
+        alignas(32) u32 forward[32] = {}, inverse[32] = {};
+        const u32 step = power_mod(root, s), inverse_step = inverse_mod(step);
+        for (u32 r = 0, x = 1, y = inverse_m; r < m; ++r, x = multiply_mod(x, step), y = multiply_mod(y, inverse_step))
+            forward[r] = montgomery(x), inverse[r] = montgomery(y);
+        const Vec* weights = reinterpret_cast<const Vec*>(forward);
+        const Vec* inverse_weights = reinterpret_cast<const Vec*>(inverse);
         if (s == 0) {
             std::memcpy(a, f, size * sizeof(u32));
             std::memcpy(b, g, size * sizeof(u32));
         } else {
             for (std::size_t i = 0; i < padded; i += 8) {
-                Vec w = load(base + i), iw = load(inverse_base + i);
-                if (s == 1) {
-                    iw = montgomery_multiply(iw, scale);
-                } else {
-                    w = montgomery_multiply(w, load(weight + i));
-                    iw = montgomery_multiply(iw, load(inverse_weight + i));
-                }
-                store(weight + i, w), store(inverse_weight + i, iw);
+                const Vec w = lookup<Tables>(weights, grades(i));
                 store(a + i, montgomery_multiply(load(f + i), w));
                 store(b + i, montgomery_multiply(load(g + i), w));
             }
@@ -3223,13 +3238,17 @@ void graded(const std::vector<u32>& n, std::size_t size, const u32* f, const u32
         std::memset(b + size, 0, (half - size) * sizeof(u32));
         const u32* h = product.multiply();  // rebuilds its tables; reads only a() and b()
         for (std::size_t i = 0; i < padded; i += 8) {
-            const Vec x = load(h + i);
-            if (s == 0)
-                store(c + i, montgomery_multiply(x, scale));
-            else
-                store(c + i, add_mod(load(c + i), montgomery_multiply(x, load(inverse_weight + i))));
+            const Vec x = montgomery_multiply(load(h + i), lookup<Tables>(inverse_weights, grades(i)));
+            store(c + i, s == 0 ? x : add_mod(load(c + i), x));
         }
     }
+}
+
+void graded(const std::vector<u32>& n, std::size_t size, const u32* f, const u32* g, u32* c) {
+    const u32 m = grade_modulus(n.size());
+    if (m <= 8) return graded<1>(n, size, f, g, c, m);
+    if (m <= 16) return graded<2>(n, size, f, g, c, m);
+    graded<4>(n, size, f, g, c, m);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3368,12 +3387,10 @@ public:
             }
             spread(top_f, a);
             spread(top_g, b);
-            for (int r = 0; r <= rank_; ++r) {
-                bottom_transform<false>(a + r * vectors);
-                bottom_transform<false>(b + r * vectors);
-            }
+            bottom_transform<false>(a);
+            bottom_transform<false>(b);
             pointwise(a, b, top_cap_[t], top_nz_[t]);
-            for (int r = 0; r <= rank_; ++r) bottom_transform<true>(a + r * vectors);
+            bottom_transform<true>(a);
             gather(a, top_f);
             interpolate_top(top_f, t, co);
         }
@@ -3463,7 +3480,7 @@ private:
         }
     }
 
-    // Planes [top rank][Nb] of x (our order) evaluated at top point t.
+    // Planes [top rank][Nb / 8] of x (our order) evaluated at top point t.
     void evaluate_top(const u32* x, std::size_t t, Vec* planes) const {
         const std::size_t vectors = bottom_size_ / 8;
         std::memset(static_cast<void*>(planes), 0, std::size_t(planes_) * vectors * sizeof(Vec));
@@ -3488,14 +3505,15 @@ private:
         }
     }
 
+    // Along the block's variables above the lanes, on all ranks at once.
     template <bool Inverse>
     void bottom_transform(Vec* x) const {
-        const std::size_t count = bottom_size_ / 8;
-        for (std::size_t l = 3, stride = 1; l < bottom_; stride *= size_of_[l++])
+        const std::size_t ranks = std::size_t(rank_ + 1), count = bottom_size_ / 8 * ranks;
+        for (std::size_t l = 3, stride = ranks; l < bottom_; stride *= size_of_[l++])
             variable_transform<Inverse>(x, count, size_of_[l], stride);
     }
 
-    // Top-rank planes -> rank planes [R + 1][Nb / 8] with the lane variables evaluated: rank r of
+    // Top-rank planes -> ranks [Nb / 8][R + 1] with the lane variables evaluated: rank r of
     // position 8u + v is top rank r - sum(u) - popcount(v).
     void spread(const Vec* planes, Vec* out) const {
         const std::size_t vectors = bottom_size_ / 8;
@@ -3510,9 +3528,10 @@ private:
                 for (int j = 0; j < 4; ++j) x[rho + j] = _mm256_or_si256(x[rho + j], _mm256_and_si256(v, mask[j]));
             }
             const int d = vector_sum_[u], last = std::min(rank_, d + planes_ + 2);
-            for (int r = 0; r < d; ++r) out[r * vectors + u] = zero;
-            for (int r = d; r <= last; ++r) out[r * vectors + u] = lanes_transform<false>(x[r - d]);
-            for (int r = last + 1; r <= rank_; ++r) out[r * vectors + u] = zero;
+            Vec* ranks = out + u * (rank_ + 1);
+            for (int r = 0; r < d; ++r) ranks[r] = zero;
+            for (int r = d; r <= last; ++r) ranks[r] = lanes_transform<false>(x[r - d]);
+            for (int r = last + 1; r <= rank_; ++r) ranks[r] = zero;
         }
     }
 
@@ -3524,7 +3543,7 @@ private:
         for (std::size_t u = 0; u < vectors; ++u) {
             const int d = vector_sum_[u], last = std::min(rank_, d + planes_ + 2);
             Vec m[kMaxRank + 4];
-            for (int r = d; r <= last; ++r) m[r - d] = lanes_transform<true>(in[r * vectors + u]);
+            for (int r = d; r <= last; ++r) m[r - d] = lanes_transform<true>(in[u * (rank_ + 1) + r]);
             for (int rho = 0; rho < planes_; ++rho) {
                 Vec x = _mm256_setzero_si256();
                 for (int j = 0; j < 4 && d + rho + j <= rank_; ++j)
@@ -3542,9 +3561,11 @@ private:
             const int cap = std::min(rank_, top_cap + vector_cap_[u] + 3);
             const int nz = top_nz + vector_nz_[u];
             Vec ae[kMaxRank], ao[kMaxRank], be[kMaxRank], bo[kMaxRank];
+            Vec* x = a + u * (rank_ + 1);
+            const Vec* y = b + u * (rank_ + 1);
             for (int i = 0; i <= cap; ++i) {
-                ae[i] = a[i * vectors + u], ao[i] = _mm256_srli_epi64(ae[i], 32);
-                be[i] = b[i * vectors + u], bo[i] = _mm256_srli_epi64(be[i], 32);
+                ae[i] = x[i], ao[i] = _mm256_srli_epi64(ae[i], 32);
+                be[i] = y[i], bo[i] = _mm256_srli_epi64(be[i], 32);
             }
             for (int r = std::min(rank_, 2 * cap); r >= nz; --r) {
                 Vec even = _mm256_setzero_si256(), odd = even;
@@ -3559,7 +3580,7 @@ private:
                     even = _mm256_add_epi64(even, _mm256_mul_epu32(ae[i], be[r - i]));
                     odd = _mm256_add_epi64(odd, _mm256_mul_epu32(ao[i], bo[r - i]));
                 }
-                a[r * vectors + u] = reduce<true>(even, odd);
+                x[r] = reduce<true>(even, odd);
             }
         }
     }

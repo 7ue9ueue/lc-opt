@@ -16,8 +16,11 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
   (hi (2^32 mod p) + lo; lo < 8p brought below 2p by two halvings).
 - CRT, not Garner: the transform for prime k returns y_k = c / M_k mod p_k (the factor is folded
   into the final scale). c = sum y_k M_k - t M with t = floor(sum y_k / p_k); the fraction is
-  c / M < 0.2, so t comes from a float sum + 0.4. Then c mod 2^64 from 64-bit constants: 12
-  `vpmuludq` per 4 values, no dependency chain between primes.
+  c / M < 0.2, so t comes from a float sum + 0.4. Then c mod 2^64 from 64-bit constants
+  C = lo + 2^32 hi: y lo by `vpmuludq` (even and odd lanes apart), y hi mod 2^32 by `vpmulld` in
+  8 lanes. 18 multiplies per 8 values, no dependency chain between primes.
+- Memory: a, b (64-bit), work, residues of primes 0-3: 7 arrays of 4 MiB at the largest size.
+  The last prime writes its residues to work and uses a's storage as its work.
 - Output (`fields64.hpp`, judge-specific): every value right-aligned in 20 characters after a
   space. top = x / 10^16, mid, low from multiply-shift estimates on the high bits, corrected once.
   mid and low -> 4-digit chunks -> digit bytes in 16-bit lanes; two stores per value (8 bytes of
@@ -50,9 +53,30 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
   - Submitted the merged `main.cpp` (#114): [409249](https://judge.yosupo.jp/submission/409249)
     AC 54 ms from one outlier (gen_524288_00 54, the other large cases 43-44);
     [409250](https://judge.yosupo.jp/submission/409250) AC 45 ms. Matches `lc-amd` (42.8).
-- Next: the transforms are 25 of 43 ms (kernel-bound, as convolution_mod); `write()` 6 ms is fixed.
-  Ideas: CRT fused into the last prime's final pass (its residues are hot); fewer page faults
-  (residues 5 x 4 MiB fresh); parse into the reduced form directly.
+- 2026-10-09, claude (round 2). `lc-amd`, judge flags, all_same_01, in-process phases as round 1.
+  Profile on `lc-intel` (`perf record`, whole process): 18% kernel time, `kernel_init_pages` 12%
+  (zeroing fresh pages). Page cost on `lc-amd`: 32 MiB of huge pages first touched in 1.1-1.6 ms.
+  Transform split (5 primes, ms): tables 0.28, radix-8 first level 4.0, subtrees 19.7, inverse
+  top 0.56, final radix-2 and scale 0.62.
+  - CRT high halves: y hi only matters mod 2^32, so one `vpmulld` in 8 lanes replaces two
+    `vpmuludq`; even/odd lanes instead of `vpmovzxdq`. 1.96 -> 1.03 ms. Hot residues (CRT run
+    twice) also took 1.94 before: it was compute-bound, not memory-bound. Kept.
+  - Last prime: residues into work, its work in a's storage (a is read in full before work is
+    written). 4 MiB fewer fresh pages; last prime 4.97 -> 4.77 ms. Kept.
+  - Lost: -t M from two `vpermd` table lookups instead of three multiplies (t < 5): CRT 1.03 ->
+    1.08. CRT fused into the formatter's loads (no block buffer): CRT + format 3.63 -> 5.36 (register
+    pressure). Formatter with two independent 8-value groups per iteration: 2.60 -> 2.71.
+  - Measured, not pursued: the radix-8 level's 64-bit reduction costs 1.2 of its 4.0 ms (a trivial
+    stand-in: 2.88 -> 1.67 ms when hot); the arithmetic is ~17 ops per 8 values and no cheaper
+    form was found (Montgomery 2^-32 variant: 16). Prefaulting everything: no net gain.
+  - `tools/judge.py bench` (base = main): slowest 3 cases, 21 rounds 45.91 -> 44.74 ms
+    median (ratio 0.973); 31 rounds 46.05 -> 44.84 (ratio 0.973). The VM was busier than in round 1
+    (base 42.8 then).
+  - Checks: 44/44 official tests; stress 300 rounds; ASan/UBSan stress 60 rounds and 5 official
+    cases (file and pipe input).
+- Next: transforms are ~24.7 of ~41 ms and near lib/ntt's kernel bound; `write()` 6 ms is fixed.
+  Five primes are the minimum with 30-bit primes (four give 2^120 < 2^147). Left: the radix-8
+  level's reduction (1.2 ms), the subtrees (lib/ntt's kernels).
 
 ## Sources
 

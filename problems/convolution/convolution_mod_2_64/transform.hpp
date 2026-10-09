@@ -6,7 +6,7 @@
 //   t.multiply(a, n, b, m, out, work, mod, factor);   // out <- a * b * factor mod p
 //
 // a and b are 64-bit coefficients; out and work hold 2^lg words plus 16 of padding (the kernels
-// read 4 bytes past).
+// read 4 bytes past). work may share a's storage: a is read in full before work is written.
 #pragma once
 
 #include <immintrin.h>

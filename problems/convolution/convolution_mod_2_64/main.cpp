@@ -1146,7 +1146,7 @@ inline std::size_t format(char* text, const std::uint64_t* values, std::size_t c
 //   t.multiply(a, n, b, m, out, work, mod, factor);   // out <- a * b * factor mod p
 //
 // a and b are 64-bit coefficients; out and work hold 2^lg words plus 16 of padding (the kernels
-// read 4 bytes past).
+// read 4 bytes past). work may share a's storage: a is read in full before work is written.
 
 #include <immintrin.h>
 
@@ -3438,24 +3438,24 @@ using Residues = std::array<const std::uint32_t*, kPrimes>;
     return _mm256_cvttps_epi32(_mm256_add_ps(_mm256_add_ps(sum01, sum23), sum4));  // < 5
 }
 
-// c mod 2^64 of coefficients [i, i + 8) into out[0, 8), given their t.
+// c mod 2^64 of coefficients [i, i + 8) into out[0, 8), given their t. With c_k = lo + 2^32 hi,
+// y c_k mod 2^64 = y lo + 2^32 (y hi mod 2^32): y lo in 64 bits (even and odd lanes apart), y hi
+// in 32-bit lanes.
 [[gnu::always_inline]] inline void combine(const Residues& y, std::size_t i, Vec t, std::uint64_t* out) {
-    for (int h = 0; h < 2; ++h) {
-        // Products by 64-bit constants: the low and high 32 bits separately, summed in pairs.
-        Vec low[kPrimes + 1], high[kPrimes + 1];
-        const auto times = [&](int k, Vec x, std::uint64_t c) {
-            low[k] = _mm256_mul_epu32(x, _mm256_set1_epi64x(std::int64_t(c & 0xFFFFFFFF)));
-            high[k] = _mm256_mul_epu32(x, _mm256_set1_epi64x(std::int64_t(c >> 32)));
-        };
-        for (int k = 0; k < kPrimes; ++k)
-            times(k, _mm256_cvtepu32_epi64(_mm_load_si128(reinterpret_cast<const __m128i*>(y[k] + i + 4 * h))), kCrt.place[k]);
-        times(kPrimes, _mm256_cvtepu32_epi64(h ? _mm256_extracti128_si256(t, 1) : _mm256_castsi256_si128(t)), 0 - kCrt.modulus);
-        const auto sum = [](const Vec (&v)[kPrimes + 1]) {
-            return _mm256_add_epi64(_mm256_add_epi64(_mm256_add_epi64(v[0], v[1]), _mm256_add_epi64(v[2], v[3])),
-                                    _mm256_add_epi64(v[4], v[5]));
-        };
-        _mm256_storeu_si256(reinterpret_cast<Vec*>(out + 4 * h), _mm256_add_epi64(sum(low), _mm256_slli_epi64(sum(high), 32)));
-    }
+    Vec even = _mm256_setzero_si256(), odd = even, high = even;
+    const auto term = [&](Vec x, std::uint64_t c) {
+        const Vec lo = _mm256_set1_epi64x(std::int64_t(c & 0xFFFFFFFF));
+        even = _mm256_add_epi64(even, _mm256_mul_epu32(x, lo));
+        odd = _mm256_add_epi64(odd, _mm256_mul_epu32(_mm256_srli_epi64(x, 32), lo));
+        high = _mm256_add_epi32(high, _mm256_mullo_epi32(x, _mm256_set1_epi32(int(c >> 32))));
+    };
+    for (int k = 0; k < kPrimes; ++k) term(_mm256_load_si256(reinterpret_cast<const Vec*>(y[k] + i)), kCrt.place[k]);
+    term(t, 0 - kCrt.modulus);
+    even = _mm256_add_epi64(even, _mm256_slli_epi64(high, 32));                                   // coefficients 0 2 4 6
+    odd = _mm256_add_epi64(odd, _mm256_and_si256(high, _mm256_set1_epi64x(std::int64_t(0xFFFFFFFF00000000))));  // 1 3 5 7
+    const Vec low = _mm256_unpacklo_epi64(even, odd), top = _mm256_unpackhi_epi64(even, odd);  // 0 1 4 5, 2 3 6 7
+    _mm256_storeu_si256(reinterpret_cast<Vec*>(out), _mm256_permute2x128_si256(low, top, 0x20));
+    _mm256_storeu_si256(reinterpret_cast<Vec*>(out + 4), _mm256_permute2x128_si256(low, top, 0x31));
 }
 
 // Coefficients [begin, begin + count) into out, count a multiple of 8; the residues are readable
@@ -3478,19 +3478,22 @@ void solve() {
 
     Arena arena(8 * (padded(n) + padded(m) + len) + 4 * (multimod::Transform::table_words(lg) + (kPrimes + 1) * words) +
                 8 * fields64::kBlock + fields64::kTextBytes + 64 * 16);
-    // Zero up to half the length too: the first level reads that far.
-    auto* a = arena.take<std::uint64_t>(std::max(padded(n), len / 2));
+    // Zero up to half the length too: the first level reads that far. a's storage also holds the
+    // last prime's work words (at least 2^lg + kPadding).
+    auto* a = arena.take<std::uint64_t>(std::max(padded(n), len / 2) + multimod::Transform::kPadding / 2);
     auto* b = arena.take<std::uint64_t>(std::max(padded(m), len / 2));
     io::read_bulk(in, a, n);
     io::read_bulk(in, b, m);
 
     const multimod::Transform transform(lg, arena.take<std::uint32_t>(multimod::Transform::table_words(lg)));
+    // The last prime's residues go to the work words, and its work to a: no fresh pages for it.
     auto* work = arena.take<std::uint32_t>(words);
     Residues residues;
     for (int k = 0; k < kPrimes; ++k) {
         const Modulus mod(kPrimeList[k][0], kPrimeList[k][1]);
-        auto* r = arena.take<std::uint32_t>(words);
-        transform.multiply(a, n, b, m, r, work, mod, kCrt.scale[k]);
+        const bool last = k + 1 == kPrimes;
+        auto* r = last ? work : arena.take<std::uint32_t>(words);
+        transform.multiply(a, n, b, m, r, last ? reinterpret_cast<std::uint32_t*>(a) : work, mod, kCrt.scale[k]);
         residues[k] = r;
     }
 

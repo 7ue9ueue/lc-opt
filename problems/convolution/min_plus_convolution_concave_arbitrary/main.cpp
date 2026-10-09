@@ -788,57 +788,82 @@ struct Entry {
 // Sweeps len rows: first, first + Step, ... (Step = +1 or -1). Column enter_first + Step t joins
 // at offset t for t < enter_count. c[x] = min(c[x], envelope at x).
 template <int Step>
-void sweep(const std::uint32_t* __restrict a, const std::uint32_t* __restrict b, std::uint32_t* __restrict c,
-           std::uint32_t first, std::uint32_t len, std::uint32_t enter_first, std::uint32_t enter_count,
-           Entry* __restrict stack) {
-    auto value = [&](std::uint32_t j, std::uint32_t t) { return a[first + Step * t - j] + b[j]; };
-    auto beats = [&](std::uint32_t j, std::uint32_t o, std::uint32_t t) { return value(j, t) <= value(o, t); };
-    std::uint32_t top = 0;
-    // Column k joins at row t, where every entry still owns rows from t on.
-    auto insert = [&](std::uint32_t k, std::uint32_t t) {
-        if (top && !beats(k, stack[top - 1].column, t)) return;  // loses at once: never wins
-        while (top) {
-            Entry& q = stack[top - 1];
+class Sweep {
+public:
+    Sweep(const std::uint32_t* a, const std::uint32_t* b, std::uint32_t first, std::uint32_t len, Entry* stack)
+        : a_(a), b_(b), first_(first), len_(len), stack_(stack) {}
+
+    void run(std::uint32_t* c, std::uint32_t enter_first, std::uint32_t enter_count) {
+        for (std::uint32_t t = 0; t < len_; ++t) {
+            std::uint32_t at_t = expire(t);
+            if (t < enter_count) {
+                const std::uint32_t k = enter_first + Step * t;
+                if (const std::uint32_t v = value(k, t); v <= at_t) {
+                    insert(k, t);
+                    at_t = v;
+                }
+            }
+            const std::uint32_t x = first_ + Step * t;
+            c[x] = std::min(c[x], at_t);
+        }
+    }
+
+private:
+    std::uint32_t value(std::uint32_t j, std::uint32_t t) const { return a_[first_ + Step * t - j] + b_[j]; }
+    bool beats(std::uint32_t j, std::uint32_t o, std::uint32_t t) const { return value(j, t) <= value(o, t); }
+
+    // Pops the entries that stopped owning rows before t; returns the top's value at t (any value
+    // if the stack is empty).
+    std::uint32_t expire(std::uint32_t t) {
+        while (top_) {
+            Entry& e = stack_[top_ - 1];
+            const std::uint32_t v = value(e.column, t);
+            if (top_ == 1 || t <= e.lo) return v;
+            if (t < e.hi && v <= value(stack_[top_ - 2].column, t)) {
+                e.lo = t;
+                return v;
+            }
+            --top_;
+        }
+        return ~0u;
+    }
+
+    // Column k joins at row t, where it beats the top; every entry owns rows from t on.
+    [[gnu::noinline]] void insert(std::uint32_t k, std::uint32_t t) {
+        while (top_) {
+            Entry& q = stack_[top_ - 1];
             // Pop q if k beats it at q's last row; else q keeps rows and k loses to q from there.
             // Narrow q's bracket until one of the two is known.
             while (!beats(k, q.column, q.hi - 1)) {
                 for (;;) {
                     const std::uint32_t lo = std::max(q.lo, t);
                     if (lo == q.hi - 1) {
-                        stack[top++] = {k, t, lo};
+                        stack_[top_++] = {k, t, lo};
                         return;
                     }
                     if (q.lo > t && !beats(k, q.column, q.lo)) {
-                        stack[top++] = {k, t, q.lo};
+                        stack_[top_++] = {k, t, q.lo};
                         return;
                     }
                     const std::uint32_t mid = lo + (q.hi - lo) / 2;
-                    if (!beats(q.column, stack[top - 2].column, mid)) {
+                    if (!beats(q.column, stack_[top_ - 2].column, mid)) {
                         q.hi = mid;
                         break;
                     }
                     q.lo = mid;
                 }
             }
-            --top;
+            --top_;
         }
-        stack[top++] = {k, len - 1, len};
-    };
-    for (std::uint32_t t = 0; t < len; ++t) {
-        // The top owns row t while it beats the entry below.
-        while (top > 1) {
-            Entry& e = stack[top - 1];
-            if (t < e.hi && (t <= e.lo || beats(e.column, stack[top - 2].column, t))) {
-                e.lo = std::max(e.lo, t);
-                break;
-            }
-            --top;
-        }
-        if (t < enter_count) insert(enter_first + Step * t, t);
-        const std::uint32_t x = first + Step * t;
-        c[x] = std::min(c[x], value(stack[top - 1].column, t));
+        stack_[top_++] = {k, len_ - 1, len_};
     }
-}
+
+    const std::uint32_t* a_;
+    const std::uint32_t* b_;
+    std::uint32_t first_, len_;
+    Entry* stack_;
+    std::uint32_t top_ = 0;
+};
 
 void solve() {
     io::Reader in;
@@ -851,8 +876,8 @@ void solve() {
     std::vector<Entry> stack(std::min(n, m));
     for (std::uint32_t j0 = 0; j0 < m; j0 += n) {
         const std::uint32_t j1 = std::min(m, j0 + n);
-        sweep<1>(a.data(), b.data(), c.data(), j0, n, j0, j1 - j0, stack.data());
-        sweep<-1>(a.data(), b.data(), c.data(), j1 + n - 2, n, j1 - 1, j1 - j0, stack.data());
+        Sweep<1>(a.data(), b.data(), j0, n, stack.data()).run(c.data(), j0, j1 - j0);
+        Sweep<-1>(a.data(), b.data(), j1 + n - 2, n, stack.data()).run(c.data(), j1 - 1, j1 - j0);
     }
 
     io::Writer out;

@@ -9,7 +9,8 @@ Solve every [Library Checker](https://judge.yosupo.jp) problem, then make each s
   Cite what you used in `notes.md`.
 - QPoly kernels (`../SymPoly/work/`) may be reused, but only after a rewrite to this repo's standards.
   Never use `study/` or vendored files.
-- Submit to Library Checker at most 5 times per problem, and only versions that passed CI.
+- Submit to Library Checker at most 5 times per version, and only versions that passed CI.
+  If a version needs more, label the issue `blocked` and leave it to the user.
   Record each submission ID and judged time in `notes.md`. Never commit credentials.
 - No speed claim without passing checks and a measurement.
 
@@ -94,7 +95,7 @@ They need Linux and Docker: run them on a VM or in CI, not on the Mac.
   A ratio below 1 means the new file is faster.
 - `python3 tools/cases.py <problem>`: build the official tests only (cached in `~/.cache/lc-opt`).
 - `python3 tools/submit.py <problem> <file.cpp>`: submit to the judge as Aiyiyi and wait for the verdict.
-  Mac only; enforces the 5-per-problem cap. If it says "not logged in", stop and ask the user.
+  Mac only; enforces the 5-per-version cap. If it says "not logged in", stop and ask the user.
 - `tools/isa_probe.cpp`: submit as aplusb to re-check the judge's instruction set. AC means every check holds;
   otherwise the answer is off by a bitmask of the failed checks, listed on stderr.
 - Both VMs have the repo at `~/lc-opt`. Run `git fetch` there and check out your branch.

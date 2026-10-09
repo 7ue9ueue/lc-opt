@@ -3,7 +3,8 @@
 Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two layers:
 
 - `transform.hpp`: transforms of length 2^6 .. 2^25 and products in the transform domain.
-- One header per operation on top: `inverse.hpp` (Newton iteration).
+- `calculus.hpp`: coefficient-wise operations: `derivative`, `divide_by_index` (integration).
+- One header per operation on top: `inverse.hpp`, `exp.hpp` (Newton iterations).
 
 APIs and usage: the header of each file. Tests: `test.cpp` (O(n^2) references; sizes 1..64,
 powers of two and their neighbours up to 2^20, random sizes; also run under ASan/UBSan in CI).
@@ -37,6 +38,41 @@ Newton from k to 2k with transforms of length 2k: G = T(g_k) (lower half input);
 e = f g_k mod (x^2k - 1), upper half only; g[k, 2k) = -(x^k e[k, 2k) g_k mod (x^2k - 1))[k, 2k),
 upper-half input and output. 5 transforms of length 2k and 2 leaf products per step, about
 10 T(n) + 4 LP(n) in all. Below 32 coefficients: the direct recurrence.
+
+## Calculus
+
+- `derivative`: one Montgomery product per vector with the indices k 2^32 mod P, kept as a
+  vector and stepped by 8 2^32 mod P.
+- `divide_by_index(a, first, q)`: q[i] = a[i] / (first + i), Montgomery's batch inversion in 4
+  interleaved vector chains (32 lanes; lane l takes the integers first + l + 32 j). Forward:
+  prefix products into q; one scalar inversion for all 32 lane totals; backward: each reciprocal
+  from the previous prefix and the running inverse, times a[i]. The factor 2^-32 of each
+  Montgomery step cancels between the passes. 4 Montgomery products per coefficient; 0.43 ms
+  for the ~2^19 divisions of exp at N = 500000 (`lc-amd`). `detail::divide_by_index` takes a
+  loader for a, so callers fuse the computation of a into the backward pass.
+- Integral: `divide_by_index(a, 1, q.subspan(1))`, q[0] = 0.
+
+## Exp
+
+Newton from m to 2m, with g = exp(f) mod x^m, h = 1 / g mod x^(m/2) and H = T_m(h) (the previous
+step's transform of length 2m' = m), d = f', q = d mod x^(m-1):
+- G_lo = T_m(g); e = (g h)[m/2, m) by `multiply` of a copy of G_lo with H, `inverse` upper half;
+  h[m/2, m) = -(x^(m/2) e h mod (x^m - 1))[m/2, m) by `cyclic_product` with H.
+- r = x q g mod (x^m - 1) (`cyclic_product` with G_lo, shift 1). As polynomials of degree < m,
+  r = (g q - g') / x^(m-1) + x g', since g' = g q mod x^(m-1).
+- H = T_2m(h); t = h r mod x^m (`cyclic_product`, lower half). Then t exceeds
+  h (g q - g') / x^(m-1) mod x^m by x h g' = x q mod x^m.
+- log g = integral of g'/g, g'/g = q - h (g q - g') mod x^(2m-1), so
+  s = (f - log g)[m, 2m) = (d[m-1+i] + t_i - d[i-1]) / (m + i): `divide_by_index` with a loader.
+- g[m, 2m) = g s mod x^m: G = T_2m(g) by `forward_upper`, `cyclic_product` of x^m s (in place at
+  w[m, 2m)), upper half.
+- Per step 8.5 transforms of length 2m (T_m(g), the inverse for e, 2 + 2 for the length-m
+  products, T_2m(h), 2 + 2 for the length-2m products, the upper half of T_2m(g)) and 3.5 leaf
+  products of that length. In all about 17 T(n) + 7 LP(n) for n = 2^19 (inverse: 10 T + 4 LP).
+- Below 64 coefficients: the recurrence n g_n = sum_k k f_k g_(n-k); h mod x^32 by
+  `inverse_direct`.
+- f is only read by the first pass (into d = f'), so g may be f.
+- Scratch: d, G, H, w (length 2^lg each), h (2^(lg-1)).
 
 ## Measurements
 
@@ -83,6 +119,25 @@ products 1.77 and 1.69).
   Newton above. Schoenhage's 1.5 M(n) step needs length-3k transforms (3 does not divide P - 1).
   Neither pursued.
 
+2026-10-09, claude (issue #63, exp_of_formal_power_series):
+- Added `calculus.hpp` (derivative, divide_by_index) and `exp.hpp`; `transform.hpp` and
+  `inverse.hpp` unchanged. Tests: derivative (in place, short and long f), divide_by_index
+  (sizes 0 .. 100 and to 10^5, first up to P - n) against scalar code; exp against the O(n^2)
+  recurrence (n <= 160 and edge cases), longer outputs by a prefix and i g_i = sum k f_k g_(i-k)
+  at random i, sizes 2^k - 1, 2^k, 2^k + 1 to 2^20, in place and not.
+- exp at N = 500000 on `lc-amd`: 14.1 ms in process (phases in
+  problems/polynomial/exp_of_formal_power_series/notes.md). Of that ~10.7 ms in transform
+  levels and ~3.2 ms in leaf products (estimate from the per-op times above).
+- e = g h from the stored T_m(g) (copy, `multiply`, `inverse`) instead of `cyclic_product`
+  (which transforms g again), the uncorrected r, vector negation: 14.15 vs 14.70 ms.
+- Considered, not done: a fused "inverse of a product of two transforms" and "forward then
+  product, kept as a transform" in `Transform` would save ~0.5 + 0.5 T per step (estimate
+  ~0.9 ms); they change `transform.hpp`, which inv bundles. A relaxed (online) exp with
+  B-ary blocks: with leaf products at ~0.75 of a transform, 16-ary blocks cost ~4 levels x (15
+  LP + 4 T) per coefficient, far above Newton; it would need full-depth transforms with
+  cheap pointwise products, and its serial base case (one modular chain per coefficient,
+  ~20 cycles) alone costs ~3 ms.
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -90,3 +145,9 @@ products 1.77 and 1.69).
   Math. Comp. 80 (2011), https://arxiv.org/abs/0910.1926 (read for the cost analysis; no code).
 - Middle product and Newton with transform reuse: G. Hanrot, M. Quercia, P. Zimmermann, "The
   middle product algorithm I", AAECC 14 (2004) (as cited by Harvey).
+- Exp by Newton iteration with a simultaneous inverse: the standard scheme (Brent; Hanrot and
+  Zimmermann, "Newton iteration revisited", 2004; D. Harvey, "Faster exponentials of power
+  series", https://arxiv.org/abs/0911.3110, for the cost accounting). Derived and written here;
+  no code read.
+- Batch inversion: P. Montgomery, "Speeding the Pollard and elliptic curve methods of
+  factorization", Math. Comp. 48 (1987).

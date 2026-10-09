@@ -5,7 +5,7 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
 - `transform.hpp`: transforms of length 2^6 .. 2^25 and products in the transform domain.
 - `calculus.hpp`: coefficient-wise operations: `derivative`, `divide_by_index` (integration).
 - One header per operation on top: `inverse.hpp`, `exp.hpp` (Newton iterations), `log.hpp`
-  (division f'/f).
+  (division f'/f), `pow.hpp` (c (f / f[0])^e as exp(e log)).
 
 APIs and usage: the header of each file. Tests: `test.cpp` (O(n^2) references; sizes 1..64,
 powers of two and their neighbours up to 2^20, random sizes; also run under ASan/UBSan in CI).
@@ -104,6 +104,18 @@ divisible by x^(jk), and
 - exp's step computes log g [m, 2m) for its own g (degree < m, with h = 1/g kept from the
   previous step), not log of a given f, so the two share only calculus.hpp.
 
+## Power
+
+g = c (f / f[0])^e = c exp(e log(f / f[0])) mod x^n for residues e, c and f[0] != 0. For an
+integer M >= 0 and n <= P, f^M = power(f, M mod P, f[0]^M): (f / f[0])^M has constant term 1,
+so only M mod P matters. Callers handle leading zeros (f = x^k u gives x^(kM) u^M). A square
+root is power(f, 1/2, sqrt(f[0])).
+- First version: f / f[0] into g, `log` in place, times e, `exp` in place, times c (three
+  vector passes). Scratch: the larger of the two (exp's), shared.
+- Alternatives considered: Newton directly on the ODE f g' = e f' g (residual
+  f g' - e f' g, then division by f g) needs 1/f and 1/g and two more products per step,
+  about 30 T(n) against 27.5 T(n) for log (11.5 T) and exp (16 T). Not tried.
+
 ## Measurements
 
 AMD EPYC 7B13 (`lc-amd`, 3.48 GHz), GCC 15.2, judge flags, 2026-10-09. ns per coefficient,
@@ -197,6 +209,16 @@ products 1.77 and 1.69).
   and inv's `.text` are again identical to before #128 on `lc-amd` and `lc-intel`. log
   (`judge.py bench`, 21 rounds, ratios to Karp-Markstein): `lc-amd` #128 0.9600, fix 0.9582;
   `lc-intel` 0.9648, 0.9544.
+
+2026-10-09, claude (issue #65, pow_of_formal_power_series):
+- Added `pow.hpp` (`power`, `power_log`, `power_scratch`) as a composition of `log` and
+  `exp`; no other header changed (inv, exp and log bundles unchanged). Tests: power against
+  the O(n^2) recurrence f[0] i g_i = sum_(0<j<=i) (e j - (i - j)) f_j g_(i-j) (n <= 160, e in
+  {0, 1, 1/2, random}), longer outputs by a prefix and the recurrence at random i; edge cases
+  f constant, f = 1 - x with e = -1, f shorter and longer than n, in place; sizes 2^k - 1 ..
+  2^k + 1 to 2^20. A mutation (e + 1) fails them.
+- pow at N = 500000 on `lc-amd`: 28.7 ms whole process (`judge.py test`); floor (read and
+  write) 4.5 ms.
 
 ## Sources
 

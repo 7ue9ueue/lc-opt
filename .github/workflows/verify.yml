@@ -39,6 +39,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Free disk space if short  # convolution_mod_large's tests take 12 GB
+        run: |
+          if [ "$(df --output=avail -BG / | tail -1 | tr -dc 0-9)" -lt 40 ]; then
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          fi
+          df -h / /dev/shm
       - uses: actions/cache@v4
         with:
           path: ~/.cache/lc-opt
@@ -69,6 +75,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Bundled main.cpp files match their solution.cpp
         run: python3 tools/bundle.py --check
+      - name: Generated NTT kernels match their generator
+        run: python3 lib/ntt/gen_kernels.py --check
       - name: Library tests, judge flags and ASan/UBSan
         run: |
           image=$(cd tools && python3 -c 'import judge; print(judge.IMAGE)')

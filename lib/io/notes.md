@@ -121,6 +121,13 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
   token; assembly would save little.
 - Judge harness (`tools/judge.py`): inputs now on tmpfs, as on the judge, instead of the VM's disk
   cache. Same timings for these programs.
+- Writer buffer for large outputs, convolution_mod_large (331 MB out), output phase (ms, `lc-amd`):
+  64 KiB 155.6, 160 KiB 151.9, 256 KiB 151.1, 1 MiB 151.3. As a template capacity
+  (`BasicWriter<Capacity>`, `Writer` the 64 KiB alias): the sample problems' code is unchanged,
+  but aplusb's functions moved; CI measured aplusb at 1.006 and 1.014 (Intel 8573C 1.027, 1.033)
+  and blocked it. Not kept. Instead the convolution formatter fills 250 KB blocks and passes each
+  to `write(std::string_view)`, which sends strings longer than the buffer straight to `write(2)`:
+  output 144.3 ms. Large outputs need no Writer change.
 
 ## Sources
 

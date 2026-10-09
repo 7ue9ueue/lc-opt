@@ -101,6 +101,10 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
     run of 31 rounds 0.956.
   - Checks: 53/53 official tests, stress 500 rounds, ASan/UBSan on 11 official cases (file and
     pipe input).
+  - Submitted the merged `main.cpp` (#50): [409208](https://judge.yosupo.jp/submission/409208)
+    AC 21 ms, from one outlier (max_random_01 21 ms, random_02 16). The 17 large cases have a
+    median of 12 ms (409184: 13), min 11, and the rest are at most 13. The judged maximum is jitter;
+    best judged stays 14 ms (409184).
 - Next: assembly for the formatter loop (34 cycles per 16 values against ~25); the parse
   (lib/io) and the transform kernels (lib/ntt) are the largest parts left in user code.
   `convolution_mod_large` could use `fields.hpp` (its formatter takes ~35 ms of 425).

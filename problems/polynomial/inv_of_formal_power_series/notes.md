@@ -3,7 +3,8 @@
 N <= 500000 coefficients of f mod 998244353, f[0] != 0; print the first N coefficients of 1/f.
 10 s. Largest tests: max_random_* (N = 500000, transforms up to 2^19).
 
-Best judged: none yet. Record when opened (issue #62): 25 ms.
+Best judged: ours, 13 ms: [409242](https://judge.yosupo.jp/submission/409242) (`main.cpp` of #107).
+Record when opened (issue #62): 25 ms.
 
 ## Design
 
@@ -35,6 +36,8 @@ tables 0.07, inverse 8.26, format 0.32 (to /dev/null); total 9.5. Whole process 
   - Not kept, measured (details in lib/poly/notes.md): b in window form, lib/ntt's asm
     `bottom_last`, other tile sizes, two-leaf interleaving. Not pursued: Harvey's 13/9 M(n)
     reciprocal and Schoenhage's 3k-length step (estimates in lib/poly/notes.md).
+  - Submitted the merged `main.cpp` (#107): [409242](https://judge.yosupo.jp/submission/409242)
+    AC 13 ms, 14.9 MiB.
 - Next: the transform levels run at ~4.5 cycles per vector per radix-4 level, near the ~3.6 cycle
   uop bound; the leaf product at ~23 cycles per leaf inside `cyclic_product` (bound ~11 by uop
   count). A scheduled asm bottom (as lib/ntt's generator does) is the largest item left; then

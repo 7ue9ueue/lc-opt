@@ -3,7 +3,7 @@
 N <= 500000 coefficients of f mod 998244353, f[0] = 0; print the first N coefficients of exp(f).
 10 s. Largest tests: max_* (N = 500000, transforms up to 2^19).
 
-Best judged: none yet.
+Best judged: ours, 19 ms: [409248](https://judge.yosupo.jp/submission/409248) (`main.cpp` of #116).
 Record when opened (issue #63): 38 ms.
 
 ## Design
@@ -45,7 +45,9 @@ faults on ~9 MB of scratch).
     e 1.03, h product 1.59, negation 0.03, T_m(r) 1.18, r 0.54, forward h 1.20, t 2.75,
     division 0.45, forward_upper g 0.62, g s product 3.32, copy 0.06, start 0.14.
     `judge.py bench` (21 rounds, slowest 3): 18.80 vs 19.46 ms (0.9694). inv: `.text`
-    byte-identical; bench 1.0013 (noise).
+    byte-identical; bench 1.0013 (noise). Merged as #116.
+  - Submitted the merged `main.cpp` (#116): [409248](https://judge.yosupo.jp/submission/409248)
+    AC 19 ms, 17.5 MiB.
 - Next: the leaf products are ~3.5 ms of the 13.5 (3.5 per step at ~1.0 ms per length-2m
   unit); a scheduled asm leaf product (lib/poly/notes.md) is the largest item left. The
   division (0.45 ms) could halve with a stored inverse table folded into the transform's scale.

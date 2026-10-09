@@ -27,7 +27,7 @@ from pathlib import Path
 
 import cases
 
-IMAGE = 'gcc:15.2.0@sha256:3ae15afe768b06d0c0fe088d822ba5f8045c26630bdacc8d8e7713cf5d8e7289'
+IMAGE = 'mirror.gcr.io/library/gcc:15.2.0@sha256:3ae15afe768b06d0c0fe088d822ba5f8045c26630bdacc8d8e7713cf5d8e7289'
 COMPILE = 'g++ -O2 -std=c++23 -DEVAL -DONLINE_JUDGE -march=native -o main main.cpp'
 TOOLS = Path(__file__).resolve().parent
 

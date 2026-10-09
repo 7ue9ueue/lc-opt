@@ -62,6 +62,11 @@ Record when opened: 29 ms (another user). Best judged: ours, 31 ms:
   - Not tried, estimated small: CRT with (y2 + (2 - t) p2) M2 instead of the t M term saves 2 of
     12 `vpmuludq` per 8 values (~0.05 ms, guess); a 4 MiB array fewer (in-place last prime for a
     needs a's buffer at 2^lg words, but primes 0-1 still need a 4 MiB scratch): no saving.
+- 2026-10-09, audit (claude): resubmitted 3 times to clear the outlier, now 5/5 (cap).
+  [409297](https://judge.yosupo.jp/submission/409297) AC 32 ms, [409302](https://judge.yosupo.jp/submission/409302)
+  AC 34, [409306](https://judge.yosupo.jp/submission/409306) AC 33. In all 5 runs the large cases take
+  22-24 ms (expected 23.8, `judge.py bench`), and 1-4 of the ~30 large cases spike to 30-34 ms.
+  With this many large cases a spike-free run is unlikely; best judged stays 31 ms.
 - Next: everything left is in the transforms (14.2 of ~23 ms, lib/ntt's kernels) and fixed I/O.
   No problem-local idea left that is worth more than noise.
 

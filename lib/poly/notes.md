@@ -137,6 +137,9 @@ products 1.77 and 1.69).
   bottoms; `ProductBottom` unchanged). exp with them: 13.55 vs 14.26 ms (0.950); inv's `.text`
   is byte-identical. Tests: each against the cyclic product, output halves, in place on either
   operand, forward_product from x^shift in; a mutation (no 2^32 correction) fails them.
+- `vbroadcastss` (`_mm256_broadcast_ss`) for the broadcasts of b in `leaf_product`
+  (-1 cycle in isolation, see above): `judge.py bench` 21 rounds, exp 1.0003, inv 0.9984.
+  Not kept.
 - Considered, not done: a relaxed (online) exp with
   B-ary blocks: with leaf products at ~0.75 of a transform, 16-ary blocks cost ~4 levels x (15
   LP + 4 T) per coefficient, far above Newton; it would need full-depth transforms with

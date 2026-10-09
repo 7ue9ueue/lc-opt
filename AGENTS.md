@@ -174,4 +174,16 @@ measurements in `notes.md`.
 - Each problem has one GitHub issue, labeled `ready`, `running`, `blocked` or `done`.
 - After each round, comment on the issue: what you tried, the numbers, and a last line that is exactly
   `Result: gain` or `Result: no gain`. `/work` reads that line.
-- Keep `notes.md` current: best judged time, record, next idea. Do not edit `STATUS.md` from a problem round.
+- `notes.md` opens with a progress table for the user, right under the title. Add it if missing;
+  update it whenever one of its numbers changes:
+
+  ```
+  | Judged (ours) | lc-amd | Fastest other | Updated |
+  |---|---|---|---|
+  | **12 ms**, [409202](https://judge.yosupo.jp/submission/409202) | 13.16 ms | 26 ms, adamant | 2026-10-09 |
+  ```
+
+  Judged: our best Library Checker time, linked. lc-amd: current `main.cpp`, median of the slowest
+  tests from `judge.py bench`. Fastest other: best leaderboard time by another user, with the name,
+  no link. Bold the faster of ours and theirs.
+- Keep the rest of `notes.md` current: next idea. Do not edit `STATUS.md` from a problem round.

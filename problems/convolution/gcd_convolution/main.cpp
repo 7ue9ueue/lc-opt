@@ -984,9 +984,11 @@ Vec gather_pairs(const std::uint64_t* p, std::size_t s) {
     return _mm256_set_epi64x(std::int64_t(p[3 * s]), std::int64_t(p[2 * s]), std::int64_t(p[s]), std::int64_t(p[0]));
 }
 
-// Dwords 0, s, ..., 7s at p; index holds 0, s, ..., 7s.
-Vec gather_dwords(const std::uint32_t* p, Vec index) {
-    return _mm256_i32gather_epi32(reinterpret_cast<const int*>(p), index, 4);
+// Dwords 0, s, ..., 7s at p. Scalar loads: on Zen 3 vpgatherdd costs 1.38 cycles per element,
+// a load 0.9 (AGENTS.md).
+Vec gather_dwords(const std::uint32_t* p, std::size_t s) {
+    return _mm256_setr_epi32(int(p[0]), int(p[s]), int(p[2 * s]), int(p[3 * s]), int(p[4 * s]), int(p[5 * s]),
+                             int(p[6 * s]), int(p[7 * s]));
 }
 
 void add_pair(std::uint64_t* dst, const std::uint64_t* src) { store_pair(dst, add(load_pair(dst), load_pair(src))); }
@@ -1215,8 +1217,7 @@ void moebius_pass(std::uint32_t* c, std::uint32_t n, std::uint32_t p) {
     const std::uint32_t last = n / p;
     std::uint32_t i = 1;
     for (; i < 4 && i <= last; ++i) c[i] = sub(c[i], c[i * p]);
-    const Vec index = _mm256_mullo_epi32(_mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), broadcast(p));
-    for (; i + 7 <= last; i += 8) store(c + i, sub(load(c + i), gather_dwords(c + i * p, index)));
+    for (; i + 7 <= last; i += 8) store(c + i, sub(load(c + i), gather_dwords(c + i * p, p)));
     for (; i <= last; ++i) c[i] = sub(c[i], c[i * p]);
 }
 
@@ -1237,10 +1238,9 @@ void moebius_rough(std::uint32_t* c, std::uint32_t n) {
         for (std::uint32_t start = n / kSegment * kSegment; start >= kSegment; start -= kSegment) {
             for (std::uint32_t k = 1; k < kSmall; ++k) {
                 const std::uint32_t m = kRough.spoke[k], last = last_target[k];
-                const Vec index = _mm256_mullo_epi32(_mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), broadcast(m));
                 std::uint32_t i = divide(start - 1, kSmallReciprocal[k]) + 1;
                 last_target[k] = i - 1;
-                for (; i + 7 <= last; i += 8) store(c + i, sub(load(c + i), gather_dwords(c + i * m, index)));
+                for (; i + 7 <= last; i += 8) store(c + i, sub(load(c + i), gather_dwords(c + i * m, m)));
                 for (; i <= last; ++i) c[i] = sub(c[i], c[i * m]);
             }
             const std::uint32_t last_source = std::min(n, start + kSegment - 1);
@@ -1254,8 +1254,10 @@ void moebius_rough(std::uint32_t* c, std::uint32_t n) {
         for (std::uint32_t i = 1; i <= targets; ++i) c[i] = sub(c[i], std::uint32_t(sums[i] % kP));
     }
     const std::uint32_t end0 = std::min(n + 1, kSegment);
-    for (std::uint32_t i = (end0 - 1) / 17; i >= 1; --i)
-        c[i] = sub(c[i], std::uint32_t(sum_multiples(i, 1, kRough.index((end0 - 1) / i + 1), std::uint64_t{}, value) % kP));
+    for (std::uint32_t i = (end0 - 1) / 17; i >= 1; --i) {
+        const std::uint64_t sum = sum_multiples(i, 1, kRough.index((end0 - 1) / i + 1), std::uint64_t{}, value);
+        c[i] = sub(c[i], std::uint32_t(sum % kP));
+    }
 }
 
 }  // namespace

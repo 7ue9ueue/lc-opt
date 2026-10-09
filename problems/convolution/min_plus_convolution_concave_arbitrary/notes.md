@@ -3,7 +3,7 @@
 c_k = min over i + j = k of a_i + b_j; a concave, b arbitrary. N, M <= 2^19, values in
 [0, 10^9], so c_k < 2^31 fits uint32. 5 s.
 
-Best judged: 31 ms, [409228](https://judge.yosupo.jp/submission/409228) (round 1).
+Best judged: 27 ms, [409239](https://judge.yosupo.jp/submission/409239) (current `main.cpp`).
 Record when the issue opened: 117 ms.
 
 ## Design
@@ -74,6 +74,9 @@ Record when the issue opened: 117 ms.
     for uint32 problems on main (`if constexpr` outside a template); measured with a local fix.
   - Checks: 41/41 official tests; `stress.py` 2000 rounds; ASan/UBSan on 12 official cases
     (file and pipe input).
+  - CI (#102), slowest 3 cases: EPYC 9V74 0.859, Xeon 6973P-C 0.874, EPYC 7763 0.869.
+  - Submitted the merged `main.cpp` (#102): [409239](https://judge.yosupo.jp/submission/409239)
+    AC 27 ms, 23.1 MiB (was 31 ms).
 - Next: monotone_01/02 sweeps (~16 ms over the others). Idea, untried: for consecutive columns
   (d = 1) the crossing is a rank in a's sorted slopes, and for distance d it lies in a window of
   d rows below the rank of b's gap / d; a value-bucketed rank table could set tight brackets.

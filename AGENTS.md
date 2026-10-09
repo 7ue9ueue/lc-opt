@@ -36,8 +36,33 @@ Solve every [Library Checker](https://judge.yosupo.jp) problem, then make each s
 - Judge: AMD EPYC 7B13 (Zen 3), one core, 1 GiB.
 - Compile: `g++ -O2 -std=c++23 -DEVAL -DONLINE_JUDGE -march=native main.cpp`.
 - Time covers the whole process: start, I/O, page faults, exit. The score is the slowest case.
-- Aim for code that is fast on AMD Zen in general. AVX2 at most; no AVX-512.
+- Aim for code that is fast on AMD Zen in general. Vectors are AVX2 at most; see Instruction sets.
 - Judge-specific tricks (e.g. padded output the checker accepts) stay in the problem's `main.cpp`, never in `lib/`.
+
+## Instruction sets
+
+Checked on the judge with `tools/isa_probe.cpp` (aplusb, [409083](https://judge.yosupo.jp/submission/409083): AC) and on `lc-amd`.
+
+- Vectors: AVX2, 16 ymm registers. AVX-512 instructions fault with SIGILL.
+- `-march=native` also enables the extensions below. Use them where they fit.
+
+| Extension | Instructions | Use |
+|---|---|---|
+| BMI1, BMI2, LZCNT, POPCNT | `tzcnt`, `lzcnt`, `popcnt`, `pdep`, `pext`, `mulx` | bitsets, rank/select, bit packing, 64-bit modmul |
+| ADX | `adcx`, `adox` | two independent carry chains in big-integer multiply |
+| PCLMUL, VPCLMULQDQ | carry-less multiply, xmm and ymm | GF(2) polynomials, mod-2 matrices |
+| AES, VAES, SSE4.2 | `aesenc` (xmm, ymm), `crc32` | hash mixing |
+
+- Zen 3 costs, measured on `lc-amd`: `pdep` and `pext` take 3 cycles latency, 1 per cycle.
+  `vpgatherdd` costs 1.38 cycles per element against 0.90 for scalar loads (table in L1/L2);
+  on `lc-intel` the gather wins, 0.58 against 0.71. Look up other costs on uops.info, then measure.
+- Prefer intrinsics from `<immintrin.h>`. Use inline asm when no intrinsic yields the instruction:
+  GCC 15 compiles `_addcarryx_u64` to `adc`, never `adcx`/`adox`.
+- Guard each use with its macro (e.g. `#ifdef __VPCLMULQDQ__`), keep a portable fallback, and test both.
+- `-march=x86-64-v3` lacks ADX, PCLMUL, VPCLMULQDQ, AES and VAES, so guarded code falls back there.
+  To build the judge's path elsewhere, add `-madx -mpclmul -mvpclmulqdq -maes -mvaes` (`lc-intel` has them all).
+- On an AVX-512 machine, `-march=native` lets GCC emit AVX-512 unasked (mask registers in a plain `-O2` loop
+  on `lc-intel`). Timings of such a build measure code the judge cannot run.
 
 ## Machines
 
@@ -67,6 +92,8 @@ They need Linux and Docker: run them on a VM or in CI, not on the Mac.
 - `python3 tools/cases.py <problem>`: build the official tests only (cached in `~/.cache/lc-opt`).
 - `python3 tools/submit.py <problem> <file.cpp>`: submit to the judge as Aiyiyi and wait for the verdict.
   Mac only; enforces the 5-per-problem cap. If it says "not logged in", stop and ask the user.
+- `tools/isa_probe.cpp`: submit as aplusb to re-check the judge's instruction set. AC means every check holds;
+  otherwise the answer is off by a bitmask of the failed checks, listed on stderr.
 - Both VMs have the repo at `~/lc-opt`. Run `git fetch` there and check out your branch.
 - `main` is protected. Every change, docs included, goes through a pull request; enable
   `gh pr merge --auto --squash`. CI (`.github/workflows/verify.yml`) tests each changed `main.cpp` and times it
@@ -95,7 +122,7 @@ The passes below are the usual order of what to try.
 0. **Research**: algorithms, papers, limits. Measure the floor (read input, write output, nothing else)
    and compare it with the record to estimate headroom.
 1. **High level**: algorithm, data layout, memory, I/O. Portable C++.
-2. **SIMD**: AVX2 kernels. For pointer-heavy problems: memory layout, prefetching, branch-free code.
+2. **SIMD**: AVX2 kernels and the extensions under Instruction sets. For pointer-heavy problems: memory layout, prefetching, branch-free code.
 3. **Assembly**: inline asm and instruction scheduling, only where profiling shows compiled code is the limit.
 
 Stop when the solution sits at the floor or leads the record by more than noise.

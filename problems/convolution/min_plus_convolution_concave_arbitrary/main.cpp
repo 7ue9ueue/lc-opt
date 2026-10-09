@@ -803,13 +803,20 @@ void sweep(const std::uint32_t* a, const std::uint32_t* b, std::uint32_t* c, std
                 }
                 // Wins at from? Then the last win in [from, s.last).
                 if (from == x ? at_x <= value(s.column, x) : value(j, from) <= value(s.column, from)) {
-                    std::uint32_t lo = from, hi = s.last;  // wins at lo, loses at hi
-                    while (lo != hi - Step) {
-                        const std::uint32_t mid = Step > 0 ? lo + (hi - lo) / 2 : lo - (lo - hi) / 2;
-                        if (value(j, mid) <= value(s.column, mid)) lo = mid;
-                        else hi = mid;
+                    const std::uint32_t o = s.column;
+                    auto wins = [&](std::uint32_t t) { return value(j, from + Step * t) <= value(o, from + Step * t); };
+                    // Wins at offset base, loses at base + len. Short wins are common: try 1 first.
+                    std::uint32_t base = 0, len = Step > 0 ? s.last - from : from - s.last;
+                    if (len > 1 && wins(1)) {
+                        base = 1;
+                        --len;
+                        while (len > 1) {
+                            const std::uint32_t half = len / 2;
+                            base = wins(base + half) ? base + half : base;
+                            len -= half;
+                        }
                     }
-                    won = lo;
+                    won = from + Step * base;
                 }
                 break;
             }

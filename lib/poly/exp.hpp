@@ -43,11 +43,6 @@ inline void negate(std::span<const std::uint32_t> a, std::span<std::uint32_t> ou
     for (std::size_t i = 0; i < a.size(); i += 8) store(out.data() + i, reduce(_mm256_sub_epi32(broadcast(kP), load(a.data() + i)), kP));
 }
 
-// out = a, sizes multiples of 8, both 32-byte aligned.
-inline void copy(std::span<const std::uint32_t> a, std::span<std::uint32_t> out) {
-    for (std::size_t i = 0; i < a.size(); i += 8) store(out.data() + i, load(a.data() + i));
-}
-
 }  // namespace detail
 
 // Transform length exp uses for n coefficients: the Transform needs lg_max >= this.
@@ -72,8 +67,8 @@ inline std::size_t exp_scratch(std::size_t n) {
 //   t = h r mod x^m                                = h (g q - g') / x^(m-1) + x q mod x^m
 //   s = (f - log g)[m, 2m) = (d[m-1, 2m-1) + t - x q) / (m + i)
 //   g[m, 2m) = g s mod x^m
-// since g'/g = q - h (g q - g') mod x^(2m-1). Per step: 8.5 transforms of length 2m and 3.5
-// leaf products of that length.
+// since g'/g = q - h (g q - g') mod x^(2m-1). T_m(r) = T_m(x q) T_m(g) is the lower half of
+// T_2m(r). Per step: 8 transforms of length 2m and 3.5 leaf products of that length.
 inline void exp(const Transform& t, std::span<const std::uint32_t> f, std::span<std::uint32_t> g,
                 std::span<std::uint32_t> scratch) {
     using namespace detail;
@@ -99,15 +94,16 @@ inline void exp(const Transform& t, std::span<const std::uint32_t> f, std::span<
         const std::span<std::uint32_t> g_low = gt.first(m), h_low = ht.first(m), w_low = w.first(m);
         t.forward(g.first(m), 0, g_low);
         // h[m/2, m) = -(h e mod x^(m/2)), e = (g h)[m/2, m)
-        copy(g_low, w_low);
-        t.multiply(w_low, h_low);
-        t.inverse(w_low, Half::kUpper);
+        t.inverse_product(g_low, h_low, w_low, Half::kUpper);
         t.cyclic_product(w_low.subspan(half), half, w_low, h_low, Half::kUpper);
         negate(w_low.subspan(half), h.subspan(half, half));
-        // r, then t
-        t.cyclic_product(d.first(m - 1), 1, w_low, g_low);
+        // T_m(r) = T_m(x q) G_lo at w[0, m), r at gt[m, 2m) until G's upper half goes there
+        t.forward_product(d.first(m - 1), 1, w_low, g_low);
+        t.inverse(w_low, gt.subspan(m, m));
+        // t = h r mod x^m from T_2m(r) = [T_m(r), its upper half] and T_2m(h)
         t.forward(h.first(m), 0, ht.first(2 * m));
-        t.cyclic_product(w_low, 0, w.first(2 * m), ht.first(2 * m), Half::kLower);
+        t.forward_upper(gt.subspan(m, m), 0, w.subspan(m, m));
+        t.inverse_product(w.first(2 * m), ht.first(2 * m), w.first(2 * m), Half::kLower);
         // s at w[m, 2m), then g s mod x^m there
         detail::divide_by_index(m, w.subspan(m, m), [&](std::size_t i) {
             const Vec x = reduce(add(load(w.data() + i), load_unaligned(d.data() + m - 1 + i)), kP);

@@ -208,6 +208,39 @@ void test_transforms(Fixture& fx) {
                 expect(acc[i] == add(c[i], ab), "multiply_add", lg, i);
                 expect(tc[i] == cyclic_coefficient(c, c, i), "multiply (squared)", lg, i);
             }
+
+            // Out-of-place inverse; inverse_product out of place and in place on either operand,
+            // with output halves; forward_product of x^shift in.
+            ta = fx.load(0, a);
+            tb = fx.load(1, b);
+            fx.t.forward(ta);
+            fx.t.forward(tb);
+            auto out = fx.load(2, c);  // garbage
+            fx.t.inverse(ta, out);
+            expect(equal(out, a), "inverse out of place", lg, kind);
+            const poly::Half half = kind == 0 ? poly::Half::kBoth : kind == 1 ? poly::Half::kLower : poly::Half::kUpper;
+            const std::size_t lo = half == poly::Half::kUpper ? n / 2 : 0, hi = half == poly::Half::kLower ? n / 2 : n;
+            out = fx.load(2, c);
+            fx.t.inverse_product(ta, tb, out, half);
+            for (std::size_t i : at)
+                if (i >= lo && i < hi) expect(out[i] == cyclic_coefficient(a, b, i), "inverse_product", lg, i);
+            auto tb_copy = fx.load(3, std::vector<u32>(tb.begin(), tb.end()));
+            fx.t.inverse_product(ta, tb_copy, tb_copy, half);  // into b
+            for (std::size_t i : at)
+                if (i >= lo && i < hi) expect(tb_copy[i] == cyclic_coefficient(a, b, i), "inverse_product into b", lg, i);
+            fx.t.inverse_product(ta, tb, ta);  // into a
+            for (std::size_t i : at) expect(ta[i] == cyclic_coefficient(a, b, i), "inverse_product into a", lg, i);
+
+            const std::size_t shift = kind == 0 ? 0 : pick(n), size = kind == 2 ? n - shift : pick(n - shift + 1);
+            std::vector<u32> shifted(n, 0);
+            for (std::size_t i = 0; i < size; ++i) shifted[shift + i] = a[i];
+            const auto source = fx.load(0, a);
+            out = fx.load(2, c);
+            fx.t.forward_product(std::span<const u32>(source).first(size), shift, out, tb);
+            for (std::size_t p : leaves_to_check(n))
+                for (int k = 0; k < 8; ++k) expect(out[8 * p + k] < P, "forward_product canonical", lg, p);
+            fx.t.inverse(out);
+            for (std::size_t i : at) expect(out[i] == cyclic_coefficient(shifted, b, i), "forward_product", lg, i);
         }
     }
 }

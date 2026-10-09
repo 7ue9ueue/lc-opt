@@ -803,6 +803,8 @@ private:
 //   t.cyclic_product(a, b);                    // a = a b mod (x^n - 1), b unchanged
 //   t.multiply(b, c);                          // b = b c, both transforms
 //   t.inverse(b);                              // a transform back to coefficients
+//   t.inverse_product(b, c, a);                // a = b c mod (x^n - 1) from transforms b, c
+//   t.forward_product(a, 0, c, b);             // c = the transform of a b mod (x^n - 1)
 //   t.forward(f.first(m), 0, a);               // out of place: a = transform of f[0, m), m <= n
 //   t.cyclic_product(a.subspan(n / 2), n / 2, a, b, poly::Half::kUpper);
 //                                              // a = x^(n/2) a[n/2, n) b mod (x^n - 1), upper half
@@ -3146,15 +3148,17 @@ struct ForwardBottom {
     }
 };
 
-// Inverse: inverse butterflies.
+// Inverse: inverse butterflies of the leaves of in (read by index; in may be the output).
 struct InverseBottom {
     static constexpr bool kForward = false, kInverse = true;
     const std::uint32_t* inverse_roots;
+    const std::uint32_t* in;
 
     void operator()(std::uint32_t* a, std::size_t count, std::size_t first) const {
-        for (std::size_t j = 0; j < count; ++j, a += 32) {
+        const std::uint32_t* from = in + 32 * first;
+        for (std::size_t j = 0; j < count; ++j, a += 32, from += 32) {
             const Group w(inverse_roots, first + j);
-            Vec f[4] = {load(a), load(a + 8), load(a + 16), load(a + 24)};
+            Vec f[4] = {load(from), load(from + 8), load(from + 16), load(from + 24)};
             inverse_h1(f, w);
             for (int t = 0; t < 4; ++t) store(a + 8 * t, f[t]);
         }
@@ -3189,6 +3193,46 @@ struct ProductBottom {
         for (std::size_t j = 0; j < count; ++j, a += 32) {
             if (j + 1 < count) prepare(a + 32, first + j + 1, window[(j + 1) & 1]);
             finish(a, first + j, window[j & 1]);
+        }
+    }
+};
+
+// Inverse of a product of two transforms: leaf products of a and b (both read by index; either
+// may be the output), then inverse butterflies as in ProductBottom.
+struct InverseProductBottom {
+    static constexpr bool kForward = false, kInverse = true;
+    ProductBottom product;  // holds b
+    const std::uint32_t* a;
+
+    void prepare(std::size_t g, Window (&window)[4]) const {
+        for (std::size_t p = 4 * g; p < 4 * g + 4; ++p) fill_window(window[p % 4], load(a + 8 * p), leaf_weight(product.roots, p));
+    }
+
+    void operator()(std::uint32_t* out, std::size_t count, std::size_t first) const {
+        Window window[2][4];
+        prepare(first, window[0]);
+        for (std::size_t j = 0; j < count; ++j, out += 32) {
+            if (j + 1 < count) prepare(first + j + 1, window[(j + 1) & 1]);
+            product.finish(out, first + j, window[j & 1]);
+        }
+    }
+};
+
+// Forward butterflies, then leaf products with b, canonical: the transform of a product. The
+// factor 2^-32 of each leaf product is undone by a Shoup multiplication by 2^32.
+struct ForwardProductBottom {
+    static constexpr bool kForward = true, kInverse = false;
+    ProductBottom product;  // holds b
+
+    void operator()(std::uint32_t* a, std::size_t count, std::size_t first) const {
+        const Factor undo_montgomery(kR);
+        Window window[2][4];
+        product.prepare(a, first, window[0]);
+        for (std::size_t j = 0; j < count; ++j, a += 32) {
+            if (j + 1 < count) product.prepare(a + 32, first + j + 1, window[(j + 1) & 1]);
+            const std::uint32_t* b = product.b + 32 * (first + j);
+            for (int t = 0; t < 4; ++t)
+                store(a + 8 * t, reduce(times(leaf_product(window[j & 1][t], b + 8 * t), undo_montgomery), kP));
         }
     }
 };
@@ -3385,12 +3429,16 @@ public:
         recursion.visit(out.data() + 8 * h, h, 3);
     }
 
-    // Transform -> coefficients in [0, P).
-    void inverse(std::span<std::uint32_t> a, Half output = Half::kBoth) const {
+    // out = the coefficients in [0, P) of the transform in, both of length n = out.size(). in may
+    // be out; otherwise the two must not overlap.
+    void inverse(std::span<const std::uint32_t> in, std::span<std::uint32_t> out, Half output = Half::kBoth) const {
         using namespace ntt::detail;
-        const std::uint32_t scale = power(std::uint32_t(a.size() / 8), kP - 2);  // undoes the factor n / 8
-        run(a, detail::Source(nullptr, 0, 0), detail::InverseBottom{inverse_roots_}, scale, output);
+        const std::uint32_t scale = power(std::uint32_t(out.size() / 8), kP - 2);  // undoes the factor n / 8
+        run(out, detail::Source(nullptr, 0, 0), detail::InverseBottom{inverse_roots_, in.data()}, scale, output);
     }
+
+    // In place: transform -> coefficients in [0, P).
+    void inverse(std::span<std::uint32_t> a, Half output = Half::kBoth) const { inverse(a, a, output); }
 
     // out = (x^shift in) b mod (x^n - 1) for b a transform of length n = out.size(); in as for
     // forward(). Only the output half of out is computed.
@@ -3403,6 +3451,24 @@ public:
 
     // In place: a = a b mod (x^n - 1).
     void cyclic_product(std::span<std::uint32_t> a, std::span<const std::uint32_t> b) const { cyclic_product(a, 0, a, b); }
+
+    // out = the coefficients of a b mod (x^n - 1) for transforms a and b of length n = out.size().
+    // Only the output half of out is computed. out may be a or b; otherwise none may overlap.
+    void inverse_product(std::span<const std::uint32_t> a, std::span<const std::uint32_t> b, std::span<std::uint32_t> out,
+                         Half output = Half::kBoth) const {
+        using namespace ntt::detail;
+        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
+        const detail::ProductBottom product{roots_, inverse_roots_, b.data()};
+        run(out, detail::Source(nullptr, 0, 0), detail::InverseProductBottom{product, a.data()}, scale, output);
+    }
+
+    // out = the transform of (x^shift in) b mod (x^n - 1) for b a transform of length
+    // n = out.size(); in as for forward(). out and b must not overlap.
+    void forward_product(std::span<const std::uint32_t> in, std::size_t shift, std::span<std::uint32_t> out,
+                         std::span<const std::uint32_t> b) const {
+        const detail::ProductBottom product{roots_, inverse_roots_, b.data()};
+        run(out, source(in, shift, out.size()), detail::ForwardProductBottom{product}, 0, Half::kBoth);
+    }
 
     // a = a b, both transforms of the same length.
     void multiply(std::span<std::uint32_t> a, std::span<const std::uint32_t> b) const {
@@ -3699,11 +3765,6 @@ inline void negate(std::span<const std::uint32_t> a, std::span<std::uint32_t> ou
     for (std::size_t i = 0; i < a.size(); i += 8) store(out.data() + i, reduce(_mm256_sub_epi32(broadcast(kP), load(a.data() + i)), kP));
 }
 
-// out = a, sizes multiples of 8, both 32-byte aligned.
-inline void copy(std::span<const std::uint32_t> a, std::span<std::uint32_t> out) {
-    for (std::size_t i = 0; i < a.size(); i += 8) store(out.data() + i, load(a.data() + i));
-}
-
 }  // namespace detail
 
 // Transform length exp uses for n coefficients: the Transform needs lg_max >= this.
@@ -3728,8 +3789,8 @@ inline std::size_t exp_scratch(std::size_t n) {
 //   t = h r mod x^m                                = h (g q - g') / x^(m-1) + x q mod x^m
 //   s = (f - log g)[m, 2m) = (d[m-1, 2m-1) + t - x q) / (m + i)
 //   g[m, 2m) = g s mod x^m
-// since g'/g = q - h (g q - g') mod x^(2m-1). Per step: 8.5 transforms of length 2m and 3.5
-// leaf products of that length.
+// since g'/g = q - h (g q - g') mod x^(2m-1). T_m(r) = T_m(x q) T_m(g) is the lower half of
+// T_2m(r). Per step: 8 transforms of length 2m and 3.5 leaf products of that length.
 inline void exp(const Transform& t, std::span<const std::uint32_t> f, std::span<std::uint32_t> g,
                 std::span<std::uint32_t> scratch) {
     using namespace detail;
@@ -3755,15 +3816,16 @@ inline void exp(const Transform& t, std::span<const std::uint32_t> f, std::span<
         const std::span<std::uint32_t> g_low = gt.first(m), h_low = ht.first(m), w_low = w.first(m);
         t.forward(g.first(m), 0, g_low);
         // h[m/2, m) = -(h e mod x^(m/2)), e = (g h)[m/2, m)
-        copy(g_low, w_low);
-        t.multiply(w_low, h_low);
-        t.inverse(w_low, Half::kUpper);
+        t.inverse_product(g_low, h_low, w_low, Half::kUpper);
         t.cyclic_product(w_low.subspan(half), half, w_low, h_low, Half::kUpper);
         negate(w_low.subspan(half), h.subspan(half, half));
-        // r, then t
-        t.cyclic_product(d.first(m - 1), 1, w_low, g_low);
+        // T_m(r) = T_m(x q) G_lo at w[0, m), r at gt[m, 2m) until G's upper half goes there
+        t.forward_product(d.first(m - 1), 1, w_low, g_low);
+        t.inverse(w_low, gt.subspan(m, m));
+        // t = h r mod x^m from T_2m(r) = [T_m(r), its upper half] and T_2m(h)
         t.forward(h.first(m), 0, ht.first(2 * m));
-        t.cyclic_product(w_low, 0, w.first(2 * m), ht.first(2 * m), Half::kLower);
+        t.forward_upper(gt.subspan(m, m), 0, w.subspan(m, m));
+        t.inverse_product(w.first(2 * m), ht.first(2 * m), w.first(2 * m), Half::kLower);
         // s at w[m, 2m), then g s mod x^m there
         detail::divide_by_index(m, w.subspan(m, m), [&](std::size_t i) {
             const Vec x = reduce(add(load(w.data() + i), load_unaligned(d.data() + m - 1 + i)), kP);

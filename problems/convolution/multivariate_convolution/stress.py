@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Compare main.cpp with brute.cpp on random inputs (tokens, since the output is padded).
-main.cpp runs in three builds: as submitted, with the graded method forced (-DFORCE_GRADED), and
-with a tiny ranked block (-DBLOCK_BYTES=1) so that every variable above the lanes is a top one.
+main.cpp runs in four builds: as submitted, with the graded method forced (-DFORCE_GRADED), with
+the cheapest split forced (-DFORCE_SPLIT), and with a tiny ranked block (-DBLOCK_BYTES=1) so that
+every variable above the lanes is a top one.
 Needs g++ on x86-64 with AVX2.
 
 Usage: stress.py [ROUNDS]
@@ -14,7 +15,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 P = 998244353
-BUILDS = {'main': [], 'graded': ['-DFORCE_GRADED'], 'top': ['-DBLOCK_BYTES=1']}
+BUILDS = {'main': [], 'graded': ['-DFORCE_GRADED'], 'split': ['-DFORCE_SPLIT'], 'top': ['-DBLOCK_BYTES=1']}
 
 
 def values(rng: random.Random, size: int) -> list[int]:

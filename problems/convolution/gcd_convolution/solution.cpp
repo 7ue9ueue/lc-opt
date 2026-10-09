@@ -1,12 +1,14 @@
 // c_k = sum over gcd(i, j) = k of a_i b_j mod 998244353, 1 <= k <= N <= 10^6.
-// Sums over multiples (zeta) of a and b, pointwise product, then the inverse (Moebius), one pass
-// per prime p (pass order is free). Zeta: a_i += a_ip for i descending; Moebius: c_i -= c_ip for i
-// ascending. a and b are interleaved as pairs, so a scattered read fetches both.
+// Sums over multiples (zeta) of a and b, pointwise product, then the inverse (Moebius). Both are
+// products of commuting per-prime passes. Primes 2..13: one pass each (zeta: x_i += x_ip, i
+// descending; Moebius: x_i -= x_ip, i ascending). Primes >= 17 together: one sweep over the
+// multipliers m coprime to 30030 ("rough"), segment by segment so the sources stay in L2.
+// a and b are interleaved as pairs, so one load fetches both.
 #include <immintrin.h>
 #include <sys/mman.h>
 
 #include <algorithm>
-#include <bit>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -27,10 +29,13 @@ constexpr std::uint32_t kR2 = std::uint32_t((std::uint64_t(1) << 32) % kP * ((st
 
 using Vec = __m256i;
 using Half = __m128i;
+using AliasWord [[gnu::may_alias]] = std::uint32_t;
 
 Vec broadcast(std::uint32_t x) { return _mm256_set1_epi32(int(x)); }
 Vec load(const void* p) { return _mm256_loadu_si256(static_cast<const Vec*>(p)); }
 void store(void* p, Vec x) { _mm256_storeu_si256(static_cast<Vec*>(p), x); }
+Half load_pair(const std::uint64_t* p) { return _mm_loadl_epi64(reinterpret_cast<const Half*>(p)); }
+void store_pair(std::uint64_t* p, Half x) { _mm_storel_epi64(reinterpret_cast<Half*>(p), x); }
 
 // Per dword, for x, y < P.
 Vec add(Vec x, Vec y) {
@@ -44,6 +49,14 @@ Vec sub(Vec x, Vec y) {
 Half add(Half x, Half y) {
     const Half s = _mm_add_epi32(x, y);
     return _mm_min_epu32(s, _mm_sub_epi32(s, _mm_set1_epi32(int(kP))));
+}
+std::uint32_t add(std::uint32_t x, std::uint32_t y) {
+    const std::uint32_t s = x + y;
+    return std::min(s, s - kP);
+}
+std::uint32_t sub(std::uint32_t x, std::uint32_t y) {
+    const std::uint32_t d = x - y;
+    return std::min(d, d + kP);
 }
 
 // Montgomery: for 64-bit lanes t < 2^62, (t + m P) / 2^32 = t / 2^32 mod P in the high dword,
@@ -68,25 +81,27 @@ Vec even_pairs(const std::uint64_t* p) {
     return _mm256_permute4x64_epi64(_mm256_unpacklo_epi64(load(p), load(p + 4)), 0xD8);
 }
 
-Vec gather_pairs(const std::uint64_t* p, std::size_t stride) {
-    return _mm256_set_epi64x(std::int64_t(p[3 * stride]), std::int64_t(p[2 * stride]), std::int64_t(p[stride]),
-                             std::int64_t(p[0]));
+// Pairs 0, s, 2s, 3s at p.
+Vec gather_pairs(const std::uint64_t* p, std::size_t s) {
+    return _mm256_set_epi64x(std::int64_t(p[3 * s]), std::int64_t(p[2 * s]), std::int64_t(p[s]), std::int64_t(p[0]));
 }
 
-void add_pair(std::uint64_t* dst, const std::uint64_t* src) {
-    const Half x = _mm_loadl_epi64(reinterpret_cast<const Half*>(dst));
-    const Half y = _mm_loadl_epi64(reinterpret_cast<const Half*>(src));
-    _mm_storel_epi64(reinterpret_cast<Half*>(dst), add(x, y));
+// Dwords 0, s, ..., 7s at p; index holds 0, s, ..., 7s.
+Vec gather_dwords(const std::uint32_t* p, Vec index) {
+    return _mm256_i32gather_epi32(reinterpret_cast<const int*>(p), index, 4);
 }
 
-std::uint32_t add(std::uint32_t x, std::uint32_t y) {
-    const std::uint32_t s = x + y;
-    return std::min(s, s - kP);
+void add_pair(std::uint64_t* dst, const std::uint64_t* src) { store_pair(dst, add(load_pair(dst), load_pair(src))); }
+
+// Adds 64-bit lane sums [a, b] to the pair at dst.
+void add_sums(std::uint64_t* dst, Half sums) {
+    const auto a = std::uint32_t(std::uint64_t(_mm_cvtsi128_si64(sums)) % kP);
+    const auto b = std::uint32_t(std::uint64_t(_mm_extract_epi64(sums, 1)) % kP);
+    store_pair(dst, add(load_pair(dst), _mm_setr_epi32(int(a), int(b), 0, 0)));
 }
-std::uint32_t sub(std::uint32_t x, std::uint32_t y) {
-    const std::uint32_t d = x - y;
-    return std::min(d, d + kP);
-}
+
+// The pair at p as two 64-bit lanes.
+Half widen_pair(const std::uint64_t* p) { return _mm_cvtepu32_epi64(load_pair(p)); }
 
 // Zeroed memory in 2 MiB pages where the kernel allows. Never freed.
 template <class T>
@@ -102,48 +117,69 @@ T* allocate(std::size_t count) {
     return reinterpret_cast<T*>(aligned);
 }
 
-// Primes up to n <= 2^21, ascending; returns their count. Segmented sieve over the odd numbers
-// 2k + 1, one byte each (nonzero: composite). Multiples of 3..13 come from a periodic pattern.
-std::uint32_t sieve(std::uint32_t n, std::uint32_t* primes) {
-    constexpr std::uint32_t kSegment = 1 << 15, kPeriod = 3 * 5 * 7 * 11 * 13;
-    alignas(32) static std::uint8_t pattern[kPeriod + kSegment], segment[kSegment + 32];
-    if (n < 2) return 0;
-    std::uint32_t count = 0;
-    primes[count++] = 2;
-    for (const std::uint32_t p : {3, 5, 7, 11, 13}) {
-        if (p > n) return count;
-        primes[count++] = p;
-        for (std::uint32_t k = p / 2; k < kPeriod + kSegment; k += p) pattern[k] = 1;
-    }
-    // Sieving primes 17 <= p <= sqrt(n), with the index of the next odd multiple to mark.
-    std::uint32_t sieving[256], next[256], sieving_count = 0;
-    for (std::uint32_t p = 17; p * p <= n; p += 2) {
-        bool prime = true;
-        for (std::uint32_t d = 3; d * d <= p && prime; d += 2) prime = p % d != 0;
-        if (prime) sieving[sieving_count] = p, next[sieving_count++] = p * p / 2;
-    }
-    const std::uint32_t odds = (n + 1) / 2;  // odd numbers 2k + 1 <= n
-    for (std::uint32_t low = 0; low < odds; low += kSegment) {
-        const std::uint32_t high = std::min(odds, low + kSegment);
-        std::memcpy(segment, pattern + low % kPeriod, kSegment);
-        for (std::uint32_t j = 0; j < sieving_count; ++j) {
-            std::uint32_t k = next[j];
-            for (; k < high; k += sieving[j]) segment[k - low] = 1;
-            next[j] = k;
-        }
-        if (low == 0) segment[0] = 1, segment[1] = segment[2] = segment[3] = segment[5] = segment[6] = 1;  // 1, 3..13
-        std::memset(segment + (high - low), 1, 32);
-        for (std::uint32_t k = 0; k < high - low; k += 32) {
-            const Vec bytes = _mm256_load_si256(reinterpret_cast<const Vec*>(segment + k));
-            for (auto mask = std::uint32_t(_mm256_movemask_epi8(_mm256_cmpeq_epi8(bytes, Vec{}))); mask;
-                 mask &= mask - 1)
-                primes[count++] = 2 * (low + k + std::uint32_t(std::countr_zero(mask))) + 1;
+// The rough numbers (coprime to 30030 = 2 3 5 7 11 13) as a wheel: the one with index t is
+// (t / kSpokes) kWheel + spoke[t % kSpokes]. Index 0 is 1, index 1 is 17.
+constexpr std::uint32_t kWheel = 30030, kSpokes = 5760;
+
+struct Wheel {
+    std::uint16_t spoke[kSpokes];
+    std::uint16_t rank[kWheel];  // spokes below r
+
+    constexpr Wheel() : spoke(), rank() {
+        bool shared[kWheel] = {};
+        for (const std::uint32_t p : {2, 3, 5, 7, 11, 13})
+            for (std::uint32_t r = 0; r < kWheel; r += p) shared[r] = true;
+        std::uint16_t count = 0;
+        for (std::uint32_t r = 0; r < kWheel; ++r) {
+            rank[r] = count;
+            if (!shared[r]) spoke[count++] = std::uint16_t(r);
         }
     }
-    return count;
+
+    // Index of the first rough number >= x.
+    constexpr std::uint32_t index(std::uint32_t x) const { return x / kWheel * kSpokes + rank[x % kWheel]; }
+};
+
+constexpr Wheel kRough;
+
+// Sum over the rough m with index in [t0, t1) of term(i m), in two interleaved chains. i m < 2^32.
+template <class T, class Term>
+[[gnu::always_inline]] inline T sum_multiples(std::uint32_t i, std::uint32_t t0, std::uint32_t t1, T sum, Term term) {
+    T other{};
+    std::uint32_t k = t0 % kSpokes, base = t0 / kSpokes * kWheel * i;
+    for (std::uint32_t left = t1 - t0; left; k = 0, base += kWheel * i) {
+        const std::uint32_t end = std::min(kSpokes, k + left);
+        left -= end - k;
+        for (; k + 2 <= end; k += 2) {
+            sum += term(base + i * kRough.spoke[k]);
+            other += term(base + i * kRough.spoke[k + 1]);
+        }
+        if (k < end) sum += term(base + i * kRough.spoke[k]);
+    }
+    return sum + other;
 }
 
-using AliasWord [[gnu::may_alias]] = std::uint32_t;
+// floor(x / d) = (x r) >> 42 with r = reciprocal(d), for x, d < 2^20.
+constexpr std::uint64_t reciprocal(std::uint32_t d) { return (std::uint64_t(1) << 42) / d + 1; }
+inline std::uint32_t divide(std::uint32_t x, std::uint64_t r) { return std::uint32_t(x * r >> 42); }
+
+// Rough multipliers 17 <= m <= kSplit go by m, each over a run of targets i; larger ones by
+// target i <= n / (kSplit + 1), into 64-bit sums. Sources come in segments that fit in L2.
+constexpr std::uint32_t kSplit = 2048;
+constexpr std::uint32_t kSmall = kRough.index(kSplit + 1);  // small m: spoke[1..kSmall)
+constexpr std::uint32_t kMaxN = 1 << 20;
+constexpr std::uint32_t kMaxTargets = kMaxN / (kSplit + 1) + 1;
+
+constexpr auto kSmallReciprocal = [] {
+    std::array<std::uint64_t, kSmall> r{};
+    for (std::uint32_t k = 1; k < kSmall; ++k) r[k] = reciprocal(kRough.spoke[k]);
+    return r;
+}();
+constexpr auto kTargetReciprocal = [] {
+    std::array<std::uint64_t, kMaxTargets> r{};
+    for (std::uint32_t i = 1; i < kMaxTargets; ++i) r[i] = reciprocal(i);
+    return r;
+}();
 
 // pairs[i] = (a_i, b_i R mod P) for 1 <= i <= n, then the zeta pass of p = 3. a may be the first
 // half of pairs: i descends, so pairs[i] only overwrites a_2i and a_2i+1, which are read already.
@@ -189,46 +225,52 @@ void interleave_zeta3(const AliasWord* a, const std::uint32_t* b, std::uint64_t*
 }
 
 // Zeta pass of p >= 5 on the pairs: four targets at a time from the top, then one at a time.
-void zeta_pass_vector(std::uint64_t* pairs, std::uint32_t n, std::uint32_t p) {
+void zeta_pass(std::uint64_t* pairs, std::uint32_t n, std::uint32_t p) {
     std::uint32_t i = n / p + 1;
     while (i >= 5) {
         i -= 4;
-        store(pairs + i, add(load(pairs + i), gather_pairs(pairs + std::size_t(p) * i, p)));
+        store(pairs + i, add(load(pairs + i), gather_pairs(pairs + p * i, p)));
     }
     while (i > 1) {
         --i;
-        add_pair(pairs + i, pairs + std::size_t(p) * i);
+        add_pair(pairs + i, pairs + p * i);
     }
 }
 
-void zeta_pass(std::uint64_t* pairs, std::uint32_t n, std::uint32_t p) {
-    for (std::uint32_t i = n / p; i >= 1; --i) add_pair(pairs + i, pairs + std::size_t(i) * p);
-}
-
-// Zeta of every prime p with p^2 > n at once: no source ip is a target of another such prime.
-void zeta_large(std::uint64_t* pairs, std::uint32_t n, const std::uint32_t* primes, std::uint32_t first,
-                std::uint32_t count) {
-    std::uint32_t end = count;
-    for (std::uint32_t i = 1;; ++i) {
-        const std::uint32_t limit = n / i;
-        while (end > first && primes[end - 1] > limit) --end;
-        if (end == first) break;
-        // 64-bit lane sums of [a, bR]: fewer than 2^17 values below 2^30 each.
-        Half s0 = _mm_setzero_si128(), s1 = _mm_setzero_si128();
-        std::uint32_t k = first;
-        for (; k + 2 <= end; k += 2) {
-            s0 = _mm_add_epi64(s0, _mm_cvtepu32_epi64(_mm_loadl_epi64(reinterpret_cast<const Half*>(pairs + std::size_t(i) * primes[k]))));
-            s1 = _mm_add_epi64(s1, _mm_cvtepu32_epi64(_mm_loadl_epi64(reinterpret_cast<const Half*>(pairs + std::size_t(i) * primes[k + 1]))));
+// pairs[i] += sum of pairs[i m] over rough m > 1, im <= n: the zeta passes of all primes >= 17.
+// Sources go segment by segment, ascending, so each is read before it changes: the targets of a
+// segment's sources lie in earlier segments. Segment 0 goes by target, ascending.
+void zeta_rough(std::uint64_t* pairs, std::uint32_t n) {
+    constexpr std::uint32_t kSegment = 1 << 15;  // 256 KiB of pairs
+    auto widened = [&](std::uint32_t j) { return widen_pair(pairs + j); };
+    const std::uint32_t end0 = std::min(n + 1, kSegment);
+    for (std::uint32_t i = 1; 17 * i < end0; ++i)  // below 2^15 terms of 2^30 per lane
+        add_sums(pairs + i, sum_multiples(i, 1, kRough.index((end0 - 1) / i + 1), Half{}, widened));
+    if (n < kSegment) return;
+    // Per small m: the next target. Per large target: the next multiplier index, and the sums
+    // (below 2^18 terms of 2^30 per lane).
+    static std::uint32_t next_target[kSmall], next_index[kMaxTargets];
+    static Half sums[kMaxTargets];
+    for (std::uint32_t k = 1; k < kSmall; ++k) next_target[k] = (kSegment - 1) / kRough.spoke[k] + 1;
+    const std::uint32_t targets = n / (kSplit + 1);
+    for (std::uint32_t i = 1; i <= targets; ++i)
+        next_index[i] = std::max(kSmall, kRough.index((kSegment - 1) / i + 1));
+    for (std::uint32_t start = kSegment; start <= n; start += kSegment) {
+        const std::uint32_t last_source = std::min(n, start + kSegment - 1);
+        for (std::uint32_t k = 1; k < kSmall; ++k) {
+            const std::uint32_t m = kRough.spoke[k], last = divide(last_source, kSmallReciprocal[k]);
+            std::uint32_t i = next_target[k];
+            for (; i + 3 <= last; i += 4) store(pairs + i, add(load(pairs + i), gather_pairs(pairs + i * m, m)));
+            for (; i <= last; ++i) add_pair(pairs + i, pairs + i * m);
+            next_target[k] = i;
         }
-        if (k < end)
-            s0 = _mm_add_epi64(s0, _mm_cvtepu32_epi64(_mm_loadl_epi64(reinterpret_cast<const Half*>(pairs + std::size_t(i) * primes[k]))));
-        const Half s = _mm_add_epi64(s0, s1);
-        const std::uint64_t sa = std::uint64_t(_mm_cvtsi128_si64(s)) % kP;
-        const std::uint64_t sb = std::uint64_t(_mm_extract_epi64(s, 1)) % kP;
-        const std::uint32_t ai = add(std::uint32_t(pairs[i]), std::uint32_t(sa));
-        const std::uint32_t bi = add(std::uint32_t(pairs[i] >> 32), std::uint32_t(sb));
-        pairs[i] = ai | std::uint64_t(bi) << 32;
+        for (std::uint32_t i = 1; i * (kSplit + 1) <= last_source; ++i) {
+            const std::uint32_t end = kRough.index(divide(last_source, kTargetReciprocal[i]) + 1);
+            sums[i] = sum_multiples(i, next_index[i], end, sums[i], widened);
+            next_index[i] = end;
+        }
     }
+    for (std::uint32_t i = 1; i <= targets; ++i) add_sums(pairs + i, sums[i]);
 }
 
 // Zeta pass of p = 2 fused with the product and the Moebius pass of 2:
@@ -271,40 +313,51 @@ void zeta2_product_moebius2(std::uint64_t* pairs, std::uint32_t* c, std::uint32_
 }
 
 // Moebius pass of p on c: eight targets at a time from i = 4 up (sources ip > i + 7 are unchanged).
-void moebius_pass_vector(std::uint32_t* c, std::uint32_t n, std::uint32_t p) {
-    const std::uint32_t last = n / p;
-    std::uint32_t i = 1;
-    for (; i < 4 && i <= last; ++i) c[i] = sub(c[i], c[std::size_t(i) * p]);
-    const Vec index = _mm256_mullo_epi32(_mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), broadcast(p));
-    for (; i + 7 <= last; i += 8) {
-        const Vec src = _mm256_i32gather_epi32(reinterpret_cast<const int*>(c + std::size_t(i) * p), index, 4);
-        store(c + i, sub(load(c + i), src));
-    }
-    for (; i <= last; ++i) c[i] = sub(c[i], c[std::size_t(i) * p]);
-}
-
 void moebius_pass(std::uint32_t* c, std::uint32_t n, std::uint32_t p) {
     const std::uint32_t last = n / p;
-    for (std::uint32_t i = 1; i <= last; ++i) c[i] = sub(c[i], c[std::size_t(i) * p]);
+    std::uint32_t i = 1;
+    for (; i < 4 && i <= last; ++i) c[i] = sub(c[i], c[i * p]);
+    const Vec index = _mm256_mullo_epi32(_mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), broadcast(p));
+    for (; i + 7 <= last; i += 8) store(c + i, sub(load(c + i), gather_dwords(c + i * p, index)));
+    for (; i <= last; ++i) c[i] = sub(c[i], c[i * p]);
 }
 
-// Moebius of every prime p with p^2 > n at once.
-void moebius_large(std::uint32_t* c, std::uint32_t n, const std::uint32_t* primes, std::uint32_t first,
-                   std::uint32_t count) {
-    std::uint32_t end = count;
-    for (std::uint32_t i = 1;; ++i) {
-        const std::uint32_t limit = n / i;
-        while (end > first && primes[end - 1] > limit) --end;
-        if (end == first) break;
-        std::uint64_t s0 = 0, s1 = 0;
-        std::uint32_t k = first;
-        for (; k + 2 <= end; k += 2) {
-            s0 += c[std::size_t(i) * primes[k]];
-            s1 += c[std::size_t(i) * primes[k + 1]];
+// c_i -= sum of c_im over rough m > 1, im <= n, with final values c_im: the Moebius passes of all
+// primes >= 17 (inverting zeta_rough: x_i = y_i - sum over m > 1 of x_im). Segments descend, so a
+// segment is final when read; segment 0 goes by target, descending.
+void moebius_rough(std::uint32_t* c, std::uint32_t n) {
+    constexpr std::uint32_t kSegment = 1 << 16;  // 256 KiB
+    auto value = [&](std::uint32_t j) { return std::uint64_t(c[j]); };
+    if (n >= kSegment) {
+        // Per small m: the last target. Per large target: the end of its multiplier indices,
+        // and the sums (below 2^18 terms of 2^30).
+        static std::uint32_t last_target[kSmall], end_index[kMaxTargets];
+        static std::uint64_t sums[kMaxTargets];
+        for (std::uint32_t k = 1; k < kSmall; ++k) last_target[k] = n / kRough.spoke[k];
+        const std::uint32_t targets = n / (kSplit + 1);
+        for (std::uint32_t i = 1; i <= targets; ++i) end_index[i] = kRough.index(n / i + 1);
+        for (std::uint32_t start = n / kSegment * kSegment; start >= kSegment; start -= kSegment) {
+            for (std::uint32_t k = 1; k < kSmall; ++k) {
+                const std::uint32_t m = kRough.spoke[k], last = last_target[k];
+                const Vec index = _mm256_mullo_epi32(_mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), broadcast(m));
+                std::uint32_t i = divide(start - 1, kSmallReciprocal[k]) + 1;
+                last_target[k] = i - 1;
+                for (; i + 7 <= last; i += 8) store(c + i, sub(load(c + i), gather_dwords(c + i * m, index)));
+                for (; i <= last; ++i) c[i] = sub(c[i], c[i * m]);
+            }
+            const std::uint32_t last_source = std::min(n, start + kSegment - 1);
+            for (std::uint32_t i = 1; i * (kSplit + 1) <= last_source; ++i) {
+                const std::uint32_t begin =
+                    std::max(kSmall, kRough.index(divide(start - 1, kTargetReciprocal[i]) + 1));
+                if (begin < end_index[i]) sums[i] = sum_multiples(i, begin, end_index[i], sums[i], value);
+                end_index[i] = begin;
+            }
         }
-        if (k < end) s0 += c[std::size_t(i) * primes[k]];
-        c[i] = sub(c[i], std::uint32_t((s0 + s1) % kP));
+        for (std::uint32_t i = 1; i <= targets; ++i) c[i] = sub(c[i], std::uint32_t(sums[i] % kP));
     }
+    const std::uint32_t end0 = std::min(n + 1, kSegment);
+    for (std::uint32_t i = (end0 - 1) / 17; i >= 1; --i)
+        c[i] = sub(c[i], std::uint32_t(sum_multiples(i, 1, kRough.index((end0 - 1) / i + 1), std::uint64_t{}, value) % kP));
 }
 
 }  // namespace
@@ -312,37 +365,22 @@ void moebius_large(std::uint32_t* c, std::uint32_t n, const std::uint32_t* prime
 int main() {
     io::Reader in;
     const auto n = in.read<std::uint32_t>();
-    // One region: the pairs, with a parsed into their first half; then b (later c); then the primes.
+    // One region: the pairs, with a parsed into their first half; then b, later c.
     constexpr std::size_t kPad = 64;
     const std::size_t words = n + kPad;
-    auto* region = allocate<std::uint32_t>(3 * words + n / 2 + kPad);
+    auto* region = allocate<std::uint32_t>(3 * words);
     auto* pairs = reinterpret_cast<std::uint64_t*>(region);
     std::uint32_t* const b = region + 2 * words;
-    std::uint32_t* const primes = b + words;
     in.read(region + 1, n);
     in.read(b + 1, n);
 
-    const std::uint32_t count = sieve(n, primes);
-    // Zeta passes 2 and 3 are fused with other work; primes from index first_large have p^2 > n.
-    std::uint32_t first_large = std::min<std::uint32_t>(2, count);
-    while (first_large < count && std::uint64_t(primes[first_large]) * primes[first_large] <= n) ++first_large;
-
     interleave_zeta3(region, b, pairs, n);
-    for (std::uint32_t k = 2; k < first_large; ++k) {  // primes[0..1] = 2, 3
-        const std::uint32_t p = primes[k];
-        if (p <= 7) zeta_pass_vector(pairs, n, p);
-        else zeta_pass(pairs, n, p);
-    }
-    zeta_large(pairs, n, primes, first_large, count);
-
+    for (const std::uint32_t p : {5, 7, 11, 13}) zeta_pass(pairs, n, p);
+    zeta_rough(pairs, n);
     std::uint32_t* const c = b;
     zeta2_product_moebius2(pairs, c, n);
-    for (std::uint32_t k = 1; k < first_large; ++k) {
-        const std::uint32_t p = primes[k];
-        if (p <= 13) moebius_pass_vector(c, n, p);
-        else moebius_pass(c, n, p);
-    }
-    moebius_large(c, n, primes, first_large, count);
+    for (const std::uint32_t p : {3, 5, 7, 11, 13}) moebius_pass(c, n, p);
+    moebius_rough(c, n);
 
     io::Writer out;
     fixed_width::write(out, c + 1, n);

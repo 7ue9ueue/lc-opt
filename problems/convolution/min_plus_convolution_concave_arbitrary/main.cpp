@@ -778,11 +778,13 @@ private:
 namespace {
 
 // Rows are sweep offsets t in [0, len). The last row where the column beats the entry below is in
-// [lo, hi); the bottom entry has [len - 1, len).
+// [lo, hi); the bottom entry has [len - 1, len). Its values at lo and hi are kept, so most tests
+// load one value of a instead of two.
 struct Entry {
-    std::uint32_t column;
-    std::uint32_t lo;  // beats the entry below here
-    std::uint32_t hi;  // loses to it here
+    std::int32_t shift;  // value at row t: a[shift + Step t] + bias
+    std::uint32_t bias;
+    std::uint32_t lo, hi;
+    std::uint32_t at_lo, at_hi;  // at_hi unused for the bottom entry
 };
 
 // Sweeps len rows: first, first + Step, ... (Step = +1 or -1). Column enter_first + Step t joins
@@ -790,47 +792,60 @@ struct Entry {
 template <int Step>
 void sweep(const std::uint32_t* a, const std::uint32_t* b, std::uint32_t* c, std::uint32_t first,
            std::uint32_t len, std::uint32_t enter_first, std::uint32_t enter_count, Entry* stack) {
-    auto value = [&](std::uint32_t j, std::uint32_t t) { return a[first + Step * t - j] + b[j]; };
-    auto beats = [&](std::uint32_t j, std::uint32_t o, std::uint32_t t) { return value(j, t) <= value(o, t); };
+    auto value = [&](const Entry& e, std::uint32_t t) { return a[e.shift + Step * std::int32_t(t)] + e.bias; };
     std::uint32_t top = 0;
-    // Column k joins at row t, where every entry still owns rows from t on.
-    auto insert = [&](std::uint32_t k, std::uint32_t t) {
-        if (top && !beats(k, stack[top - 1].column, t)) return;  // loses at once: never wins
+    // Column k joins at row t, where every entry still owns rows from t on; at_t: the top's value.
+    auto insert = [&](std::uint32_t k, std::uint32_t t, std::uint32_t at_t) {
+        Entry e{std::int32_t(first - k), b[k], t, 0, 0, 0};
+        e.at_lo = value(e, t);
+        if (top && e.at_lo > at_t) return;  // loses at once: never wins
         while (top) {
             Entry& q = stack[top - 1];
             // Pop q if k beats it at q's last row; else q keeps rows and k loses to q from there.
+            // Narrow q's bracket until one of the two is known.
+            bool new_lo = true, new_hi = true;
             for (;;) {
+                if (new_hi && q.hi < len && value(e, q.hi) <= q.at_hi) break;
+                if (new_lo && q.lo > t) {
+                    if (const std::uint32_t v = value(e, q.lo); v > q.at_lo) {
+                        e.hi = q.lo, e.at_hi = v;
+                        stack[top++] = e;
+                        return;
+                    }
+                }
                 const std::uint32_t lo = std::max(q.lo, t);
-                if (beats(k, q.column, q.hi - 1)) break;
-                if (lo == q.hi - 1) {
-                    stack[top++] = {k, t, lo};
-                    return;
-                }
-                if (q.lo > t && !beats(k, q.column, q.lo)) {
-                    stack[top++] = {k, t, q.lo};
-                    return;
-                }
+                if (lo + 1 == q.hi) break;  // k beats q at q's last row
                 const std::uint32_t mid = lo + (q.hi - lo) / 2;
-                if (beats(q.column, stack[top - 2].column, mid)) q.lo = mid;
-                else q.hi = mid;
+                const std::uint32_t v = value(q, mid);
+                new_lo = v <= value(stack[top - 2], mid);
+                new_hi = !new_lo;
+                (new_lo ? q.lo : q.hi) = mid;
+                (new_lo ? q.at_lo : q.at_hi) = v;
             }
             --top;
         }
-        stack[top++] = {k, len - 1, len};
+        e.lo = len - 1, e.hi = len, e.at_lo = value(e, len - 1);
+        stack[top++] = e;
     };
     for (std::uint32_t t = 0; t < len; ++t) {
         // The top owns row t while it beats the entry below.
-        while (top > 1) {
+        std::uint32_t at_t = 0;
+        while (top) {
             Entry& e = stack[top - 1];
-            if (t < e.hi && (t <= e.lo || beats(e.column, stack[top - 2].column, t))) {
-                e.lo = std::max(e.lo, t);
+            at_t = value(e, t);
+            if (top == 1 || t <= e.lo) break;
+            if (t < e.hi && at_t <= value(stack[top - 2], t)) {
+                e.lo = t, e.at_lo = at_t;
                 break;
             }
             --top;
         }
-        if (t < enter_count) insert(enter_first + Step * t, t);
+        if (t < enter_count) {
+            insert(enter_first + Step * t, t, at_t);
+            at_t = value(stack[top - 1], t);
+        }
         const std::uint32_t x = first + Step * t;
-        c[x] = std::min(c[x], value(stack[top - 1].column, t));
+        c[x] = std::min(c[x], at_t);
     }
 }
 

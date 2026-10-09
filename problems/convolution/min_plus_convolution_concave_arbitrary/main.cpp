@@ -836,6 +836,19 @@ void sweep(const std::uint32_t* a, const std::uint32_t* b, std::uint32_t* c, std
         if (t < enter_count) insert(enter_first + Step * t, t);
         const std::uint32_t x = first + Step * t;
         c[x] = std::min(c[x], value(stack[top - 1].column, t));
+        // The next insertion first tests the top two entries at the ends of their brackets.
+        if (t + 1 < enter_count) {
+            const std::uint32_t k = enter_first + Step * (t + 1);
+            auto prefetch = [&](std::uint32_t j, std::uint32_t r) { __builtin_prefetch(a + (first + Step * r - j)); };
+            for (std::uint32_t i = top - std::min(top, 2u); i < top; ++i) {
+                const Entry& e = stack[i];
+                if (e.hi == len) continue;
+                prefetch(k, e.hi - 1);
+                prefetch(e.column, e.hi - 1);
+                prefetch(k, e.lo);
+                prefetch(e.column, e.lo);
+            }
+        }
     }
 }
 

@@ -72,5 +72,10 @@ read 2.4, basis change of a 2.1, of b 2.1, forward a 5.8, fused b forward + prod
   - Kept version vs round 1, `judge.py bench`, 15 rounds, 6 slowest cases: 45.62 vs 44.31 ms
     median, ratio 0.959. `judge.py test` 51/51, slowest 43.0 ms. Stress 400 rounds vs `brute.cpp`
     (judge flags, ASan/UBSan, x86-64-v3); ASan exact on gen_max, small_values, all_same, all_ones.
+  - CI bench vs main: ratio 0.958 (Xeon 6973P-C), 0.972 and 0.962 (EPYC 7763). Merged as #119.
+- 2026-10-09, claude: submitted #119's `main.cpp` twice: [409257](https://judge.yosupo.jp/submission/409257)
+  AC 53 ms (many_ones_00 53, next 44) and [409259](https://judge.yosupo.jp/submission/409259) AC 50 ms
+  (random_01 50, next 45). Each has one spiked case; the rest top out at 44-45 vs 46 in 409244.
+  Best judged stays 46 ms (2/5 for this version).
 - Next: the basis change (~8.5 ms, ~20 XORs per element at the store limit would be ~2 ms per
   change); `write()` (7.4 ms) and the transforms (~80% of the PCLMUL limit) are near their floors.

@@ -9,6 +9,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <array>
+#include <bit>
 #include <climits>
 
 // lib/io/io.hpp
@@ -1131,6 +1133,72 @@ void block(const u32* a, std::size_t n, const u32* b, std::size_t m, std::size_t
     }
 }
 
+// Separator bits of 8 tokens of length s - 1, each followed by one separator: bits s - 1, 2s - 1,
+// ..., 8s - 1 of a 96-bit mask, and the bits [0, 8s) they must match.
+struct Stride {
+    std::uint64_t low_mask, low_bits;
+    std::uint32_t high_mask, high_bits;
+};
+
+constexpr auto kStrides = [] {
+    std::array<Stride, 12> t{};
+    for (unsigned s = 2; s <= 11; ++s) {
+        unsigned __int128 mask = 0, bits = 0;
+        for (unsigned i = 0; i < 8 * s; ++i) mask |= (unsigned __int128)1 << i;
+        for (unsigned k = 1; k <= 8; ++k) bits |= (unsigned __int128)1 << (k * s - 1);
+        t[s] = {std::uint64_t(mask), std::uint64_t(bits), std::uint32_t(mask >> 64), std::uint32_t(bits >> 64)};
+    }
+    return t;
+}();
+
+// Digit groups (lib/io) of the tokens of length s - 1 at low and high, in the two lanes.
+__m256i two_tokens(const char* low, const char* high, __m256i row) {
+    const __m256i window = _mm256_loadu2_m128i(reinterpret_cast<const __m128i*>(high), reinterpret_cast<const __m128i*>(low));
+    return io::detail::digit_groups(_mm256_shuffle_epi8(_mm256_subs_epu8(window, _mm256_set1_epi8('0')), row));
+}
+
+// The token at or after p (after whitespace); p moves past its separator.
+u32 one_token(const char*& p) {
+    while (static_cast<unsigned char>(*p) <= ' ') ++p;
+    const __m128i window = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+    const unsigned length = unsigned(std::countr_zero(io::detail::separators(window) | 0x10000));
+    p += length + 1;
+    return u32(io::detail::parse16(window, length));
+}
+
+// count values from p into dst; p ends past the last one's separator. Tokens have at most 10
+// digits; the 64 bytes after the input read as zeros. Fast path: 8 tokens of one length, each
+// followed by one separator (most tests: 9 digits throughout, or long runs of one length).
+void read_values(const char*& p, u32* dst, std::size_t count) {
+    using io::detail::separators;
+    const auto load = [](const char* q) { return _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q)); };
+    std::size_t i = 0;
+    // 64 tokens left span >= 127 bytes, so the loads below (< 96 bytes from p) stay in the input.
+    while (i + 64 <= count) {
+        const std::uint64_t low = separators(load(p)) | std::uint64_t(separators(load(p + 32))) << 32;
+        const std::uint32_t high = separators(load(p + 64));
+        const unsigned s = unsigned(std::countr_zero(low)) + 1;  // token length + 1
+        if (s < 2 || s > 11 || (low & kStrides[s].low_mask) != kStrides[s].low_bits ||
+            (high & kStrides[s].high_mask) != kStrides[s].high_bits) {
+            dst[i++] = one_token(p);
+            continue;
+        }
+        // Group j holds tokens j and j + 4, so the values come out in order.
+        const __m256i row = _mm256_broadcastsi128_si256(io::detail::align_row(s));
+        const __m256i g0 = two_tokens(p, p + 4 * s, row), g1 = two_tokens(p + s, p + 5 * s, row);
+        const __m256i g2 = two_tokens(p + 2 * s, p + 6 * s, row), g3 = two_tokens(p + 3 * s, p + 7 * s, row);
+        const __m256i k = _mm256_set1_epi32(0x00012710);  // 8-digit halves: high group * 10^4 + low
+        const __m256 h01 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g0, g1), k));
+        const __m256 h23 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g2, g3), k));
+        const __m256i upper = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0x88));
+        const __m256i lower = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0xDD));
+        const __m256i v = _mm256_add_epi32(_mm256_mullo_epi32(upper, _mm256_set1_epi32(100000000)), lower);
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), v);
+        p += 8 * s, i += 8;
+    }
+    for (; i < count; ++i) dst[i] = one_token(p);
+}
+
 // words u32 words, 2 MiB aligned, in huge pages where the kernel allows.
 u32* allocate(std::size_t words) {
     constexpr std::size_t kHuge = std::size_t(1) << 21;
@@ -1154,8 +1222,9 @@ void solve() {
     u32* const c = memory + text_words;
     u32* const a = c + kValues;
     u32* const b = a + n + kPad;
-    in.read(a, n);
-    in.read(b, m);
+    const char* p = in.scan().cur;
+    read_values(p, a, n);
+    read_values(p, b, m);
     extend(a, n);
     extend(b, m);
 

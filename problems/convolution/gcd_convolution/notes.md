@@ -4,7 +4,8 @@ N <= 10^6, a_i, b_i < 998244353; print c_k = sum over gcd(i, j) = k of a_i b_j f
 Large tests: N = 10^6, 999982..999984, 994008..994010 (997^2 - 1 + {0, 1, 2}), random values;
 19.8 MB of input, 10 MB of output.
 
-Record when opened: 37 ms. Best judged: none yet.
+Record when opened: 37 ms (407011). Best judged: ours, [409190](https://judge.yosupo.jp/submission/409190),
+17 ms.
 
 ## Design
 
@@ -55,6 +56,13 @@ Record when opened: 37 ms. Best judged: none yet.
   2 MiB in 4 KiB pages.
 - Harness: `judge.py bench` reruns write the same output file; truncating 10 MB of tmpfs adds
   ~1-2 ms per run compared with `judge.py test`. Same for every source.
+- `lc-intel`: the first `judge.py test` run took 194 ms on one case, later runs 14-17 ms. A guess:
+  THP compaction on fault (defrag = madvise, 13.7 GB of page cache, 0.45 GB free).
+- 2026-10-09, claude: submitted the PR #43 `main.cpp` (v5).
+  - [409189](https://judge.yosupo.jp/submission/409189): AC, 24 ms (1/5). Large cases 15-16 ms,
+    except near_prime_squared_00 at 24 ms.
+  - [409190](https://judge.yosupo.jp/submission/409190), same file: AC, 17 ms (2/5). Large cases
+    15-17 ms. First; next is 37 ms (407011).
 
 ## Next
 

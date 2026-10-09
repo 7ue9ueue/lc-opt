@@ -2,7 +2,8 @@
 
 Prime p <= 10^9, K <= 18 axes, n_i >= 2, n_i | p - 1, N = prod n_i <= 2^18. Print f g mod
 (x_i^n_i - 1) mod p. 10 s.
-Record when opened (issue #37): 117 ms. Best judged: none yet.
+Record when opened (issue #37): 117 ms. Best judged: ours, 15 ms:
+[409314](https://judge.yosupo.jp/submission/409314) (current `main.cpp`, #146).
 I/O floor (`lib/io/notes.md`): 4.18 ms, 3.88 with fixed-width output.
 
 Official tests: dim1 (one axis, n about 2^18, often with a large prime factor), dim2 (two axes,
@@ -48,6 +49,8 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   - Checks: 24/24 official tests; `stress.py` 400 rounds against `brute.cpp` plus 40 larger
     rounds comparing `-DSHORT_LIMIT=1` (all long) and `-DSHORT_LIMIT=100000` (all short);
     ASan/UBSan: stress 60 rounds and 9 official cases, file and pipe input.
+  - Submitted the merged `main.cpp` (#146): [409314](https://judge.yosupo.jp/submission/409314)
+    AC 15 ms; [409315](https://judge.yosupo.jp/submission/409315) AC 21 ms (jitter; `lc-amd` 11.9).
 - Next: the transforms are 70% of the dim cases (7 ms of 3 x 2^19). Short path: fuse adjacent
   axes into one pass, split short axes into coprime factors (10 = 2 x 5: 7 terms instead of 10).
 

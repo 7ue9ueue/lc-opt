@@ -4,7 +4,9 @@ N <= 500000 coefficients of f mod 998244353 and 0 <= M <= 10^18; print the first
 of f^M. 10 s. Largest tests: max_random, binary_exp_max, lower_deg_zero2_00 (f[0] != 0 or few
 leading zeros, so u^M has close to 500000 coefficients; transforms up to 2^19).
 
-Best judged: ours, 29 ms: [409299](https://judge.yosupo.jp/submission/409299) (`main.cpp` of #137).
+Best judged: ours, 29 ms: [409299](https://judge.yosupo.jp/submission/409299) (`main.cpp` of #137);
+#140 also 29 ms ([409311](https://judge.yosupo.jp/submission/409311),
+[409312](https://judge.yosupo.jp/submission/409312)).
 Record when opened (issue #65): 52 ms.
 
 ## Design
@@ -59,5 +61,9 @@ unreliable; same-run ratios (`judge.py bench`) still hold.
     1.0000, 0.9988 (lib/poly/notes.md).
   - Checks: 37/37 official tests (slowest 28.5 ms); `stress.py` 400 rounds; lib/poly tests at
     -O2 (x86-64-v3, native) and ASan/UBSan (`lc-intel`); exp 26/26, log 25/25 official tests.
+  - Merged as #140 (CI: pow 0.9872, exp 1.0026, log 0.9995; all 0.9964). Submitted its
+    `main.cpp`: [409311](https://judge.yosupo.jp/submission/409311) AC 29 ms, 19.5 MiB;
+    [409312](https://judge.yosupo.jp/submission/409312) AC 29 ms, 19.3 MiB. The ~0.4 ms gain
+    is below the judge's 1 ms resolution.
 - Next: the leaf-product kernel (#95, shared). Smaller: exp's T_m(x q) at the last two steps
   from the log's stored T(q_0), T(q_1) (~0.4 ms, lib/poly/notes.md).

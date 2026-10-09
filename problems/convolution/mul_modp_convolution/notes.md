@@ -3,7 +3,8 @@
 c_k = sum over i j = k (mod P) of a_i b_j mod 998244353, P prime, 2 <= P <= 524288 (so at most
 524287 = 2^19 - 1). 5 s.
 
-Best judged: none yet. Record when opened (issue #35): 45 ms.
+Best judged: ours, 12 ms: [409289](https://judge.yosupo.jp/submission/409289) (current `main.cpp`, #135).
+Record when opened (issue #35): 45 ms.
 
 ## Design
 
@@ -47,6 +48,9 @@ Best judged: none yet. Record when opened (issue #35): 45 ms.
   - Checks: 40/40 official tests (slowest 12.0 ms); `stress.py` 300 rounds (all primes < 300,
     then random primes < 3000, both product paths) plus 24 known cases at P = 524287, 65537,
     262147 and a random prime; ASan/UBSan on all 40 official cases, file and pipe input.
+  - Submitted the merged `main.cpp` (#135): [409288](https://judge.yosupo.jp/submission/409288)
+    AC 22 ms (judge jitter), resubmitted: [409289](https://judge.yosupo.jp/submission/409289)
+    AC 12 ms, 15.5 MiB.
 - Next: the product is 4.45 of about 10 ms in-process (`lib/ntt` at 2^20; 2n - 1 = 2^20 - 3 at
   P = 524287, so no smaller length). Scatter 0.66 ms (random stores into 2 MiB): bucket the
   outputs by text block and format each block from L2 (guess: -0.3 ms). Fold the last inverse

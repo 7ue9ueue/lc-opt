@@ -142,35 +142,52 @@ u32 one_token(const char*& p) {
     return u32(io::detail::parse16(window, length));
 }
 
+// Separator bits of the 96 bytes at p.
+struct Separators {
+    std::uint64_t low;
+    std::uint32_t high;
+};
+
+Separators separators96(const char* p) {
+    const auto at = [p](int i) { return io::detail::separators(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i))); };
+    return {at(0) | std::uint64_t(at(32)) << 32, at(64)};
+}
+
+bool matches(Separators x, const Stride& t) {
+    return (x.low & t.low_mask) == t.low_bits && (x.high & t.high_mask) == t.high_bits;
+}
+
+// Values of the 8 tokens at p, of length s - 1 each, one separator apart.
+__m256i eight_tokens(const char* p, std::size_t s, __m256i row) {
+    // Group j holds tokens j and j + 4, so the values come out in order.
+    const __m256i g0 = two_tokens(p, p + 4 * s, row), g1 = two_tokens(p + s, p + 5 * s, row);
+    const __m256i g2 = two_tokens(p + 2 * s, p + 6 * s, row), g3 = two_tokens(p + 3 * s, p + 7 * s, row);
+    const __m256i k = _mm256_set1_epi32(0x00012710);  // 8-digit halves: high group * 10^4 + low
+    const __m256 h01 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g0, g1), k));
+    const __m256 h23 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g2, g3), k));
+    const __m256i upper = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0x88));
+    const __m256i lower = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0xDD));
+    return _mm256_add_epi32(_mm256_mullo_epi32(upper, _mm256_set1_epi32(100000000)), lower);
+}
+
 // count values from p into dst; p ends past the last one's separator. Tokens have at most 10
-// digits; the 64 bytes after the input read as zeros. Fast path: 8 tokens of one length, each
-// followed by one separator (most tests: 9 digits throughout, or long runs of one length).
+// digits; the 64 bytes after the input read as zeros. Fast path: runs of tokens of one length,
+// each followed by one separator (most tests: 9 digits throughout, or long runs of one length),
+// 8 at a time. Within a run p advances by a constant, so steps do not wait on each other.
 void read_values(const char*& p, u32* dst, std::size_t count) {
-    using io::detail::separators;
-    const auto load = [](const char* q) { return _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q)); };
     std::size_t i = 0;
-    // 64 tokens left span >= 127 bytes, so the loads below (< 96 bytes from p) stay in the input.
+    // 64 tokens left span >= 127 bytes, so loads (< 96 bytes from p) stay in the input.
     while (i + 64 <= count) {
-        const std::uint64_t low = separators(load(p)) | std::uint64_t(separators(load(p + 32))) << 32;
-        const std::uint32_t high = separators(load(p + 64));
-        const unsigned s = unsigned(std::countr_zero(low)) + 1;  // token length + 1
-        if (s < 2 || s > 11 || (low & kStrides[s].low_mask) != kStrides[s].low_bits ||
-            (high & kStrides[s].high_mask) != kStrides[s].high_bits) {
-            dst[i++] = one_token(p);
-            continue;
+        const Separators first = separators96(p);
+        const std::size_t s = std::size_t(std::countr_zero(first.low)) + 1;  // token length + 1
+        if (s >= 2 && s <= 11 && matches(first, kStrides[s])) {
+            const __m256i row = _mm256_broadcastsi128_si256(io::detail::align_row(s));
+            do {
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), eight_tokens(p, s, row));
+                p += 8 * s, i += 8;
+            } while (i + 64 <= count && matches(separators96(p), kStrides[s]));
         }
-        // Group j holds tokens j and j + 4, so the values come out in order.
-        const __m256i row = _mm256_broadcastsi128_si256(io::detail::align_row(s));
-        const __m256i g0 = two_tokens(p, p + 4 * s, row), g1 = two_tokens(p + s, p + 5 * s, row);
-        const __m256i g2 = two_tokens(p + 2 * s, p + 6 * s, row), g3 = two_tokens(p + 3 * s, p + 7 * s, row);
-        const __m256i k = _mm256_set1_epi32(0x00012710);  // 8-digit halves: high group * 10^4 + low
-        const __m256 h01 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g0, g1), k));
-        const __m256 h23 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g2, g3), k));
-        const __m256i upper = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0x88));
-        const __m256i lower = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0xDD));
-        const __m256i v = _mm256_add_epi32(_mm256_mullo_epi32(upper, _mm256_set1_epi32(100000000)), lower);
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), v);
-        p += 8 * s, i += 8;
+        if (i + 64 <= count) dst[i++] = one_token(p);
     }
     for (; i < count; ++i) dst[i] = one_token(p);
 }

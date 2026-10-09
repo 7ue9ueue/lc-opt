@@ -49,7 +49,10 @@ def docker(work: Path, script: str, problem: Problem | None = None) -> str:
            '--user', f'{os.getuid()}:{os.getgid()}',
            '-v', f'{work}:/w', '-w', '/w']
     if problem:
-        cmd += ['-v', f'{problem.dir / "in"}:/in:ro']
+        cases = work / 'in'  # on tmpfs, as the judge's case files are
+        if not cases.exists():
+            shutil.copytree(problem.dir / 'in', cases)
+        cmd += ['-v', f'{cases}:/in:ro']
     result = subprocess.run(cmd + [IMAGE, 'sh', '-ec', script], capture_output=True, text=True)
     if result.returncode != 0:
         sys.exit(f'docker failed:\n{result.stdout}{result.stderr}')

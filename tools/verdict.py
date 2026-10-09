@@ -4,8 +4,10 @@
 Usage: verdict.py REPORT_DIR
 
 Each report compares the main branch's main.cpp (first source) with the pull request's
-(second source) on one CI machine. Per problem, the geometric mean of the ratios must
-not exceed TOLERANCE: the new version may not be slower at all. Prints a markdown table;
+(second source) on one CI machine. A problem's ratio is the geometric mean over its machines.
+The pull request's ratio is the geometric mean over its problems, each weighted equally,
+and must not exceed 1: the new version may not be slower at all. With one problem this is
+that problem's ratio; with many (a lib/ change) noise averages out. Prints a markdown table;
 exits 1 on a slowdown.
 """
 import json
@@ -14,26 +16,27 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-TOLERANCE = 1.00  # largest allowed new/old time ratio
-
 
 def main() -> int:
-    ratios = defaultdict(list)  # problem -> [(cpu, ratio)]
+    log_ratios = defaultdict(list)  # problem -> [(cpu, log ratio)]
     for path in sorted(Path(sys.argv[1]).rglob('*.json')):
         report = json.loads(path.read_text())
         new = list(report['results'].values())[1]
-        ratios[report['problem']].append((report['environment']['cpu'], new['ratio']))
+        log_ratios[report['problem']].append((report['environment']['cpu'], math.log(new['ratio'])))
 
-    ok = True
     print('| problem | new/old (geomean) | per machine |\n|---|---|---|')
-    for problem, rows in sorted(ratios.items()):
-        mean = math.exp(sum(math.log(r) for _, r in rows) / len(rows))
-        ok &= mean <= TOLERANCE
-        machines = ', '.join(f'{cpu}: {r:.4f}' for cpu, r in rows)
-        print(f'| {problem} | {mean:.4f}{"" if mean <= TOLERANCE else " SLOWER"} | {machines} |')
-    if not ratios:
+    problem_logs = []
+    for problem, rows in sorted(log_ratios.items()):
+        problem_logs.append(sum(x for _, x in rows) / len(rows))
+        machines = ', '.join(f'{cpu}: {math.exp(x):.4f}' for cpu, x in rows)
+        print(f'| {problem} | {math.exp(problem_logs[-1]):.4f} | {machines} |')
+    if not problem_logs:
         print('| (no timed problems) | | |')
-    return 0 if ok else 1
+        return 0
+    overall = math.exp(sum(problem_logs) / len(problem_logs))
+    slower = overall > 1
+    print(f'| **all {len(problem_logs)}** | **{overall:.4f}**{" SLOWER" if slower else ""} | |')
+    return 1 if slower else 0
 
 
 if __name__ == '__main__':

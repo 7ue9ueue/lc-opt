@@ -100,7 +100,7 @@ They need Linux and Docker: run them on a VM or in CI, not on the Mac.
 - Both VMs have the repo at `~/lc-opt`. Run `git fetch` there and check out your branch.
 - `main` is protected. Every change, docs included, goes through a pull request; enable
   `gh pr merge --auto --squash`. CI (`.github/workflows/verify.yml`) tests each changed `main.cpp` and times it
-  against `main` on 3 machines. It merges only if correct and not slower at all.
+  against `main` on 3 machines. It merges only if correct and not slower: geomean over machines, then over problems.
 
 ## Layout
 

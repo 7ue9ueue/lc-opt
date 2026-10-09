@@ -1,6 +1,6 @@
 # Checks every pull request: lib/ tests pass, every bundled main.cpp matches its solution.cpp,
-# and each changed main.cpp passes all official tests and is not slower than main's version,
-# averaged over several CI machines. The "verdict" job is the required check for auto-merge.
+# and each changed main.cpp passes all official tests. Changed main.cpp files, timed against main
+# on several CI machines, must not be slower on average. The "verdict" job is the required check.
 name: verify
 on:
   pull_request:

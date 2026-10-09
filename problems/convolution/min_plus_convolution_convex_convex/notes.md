@@ -18,14 +18,19 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.31 ms on `lc-amd` (with `lib/io
   from its own binary search) run interleaved, then the block is formatted and written. No array
   for c; the block buffer stays in L2.
 - Merge: classic SIMD merge (Inoue et al. 2007, AA-sort; Chhugani et al. 2008): keep the 8
-  largest slopes seen, sorted; load 8 slopes from the input with the smaller head, reverse them,
-  min/max with the held vector, sort both bitonic halves (3 levels each). The 8 minima are the next
-  slopes; an in-vector prefix sum plus a carry gives c. Head choice by masks (GCC emitted a branch
+  largest slopes seen, sorted descending; load 8 slopes (ascending) from the input with the
+  smaller head, min/max with the held vector, sort both bitonic halves (3 levels each). The 8
+  minima are the next slopes; an in-vector prefix sum plus a carry gives c. Head choice by masks (GCC emitted a branch
   for `?:`). Slopes are read on the fly as `a[i + 1] - a[i]`; a and b are extended with 96
   elements of slope INT32_MAX (wrapping u32 arithmetic), so exhausted inputs never win.
 - Output: `../min_plus_convolution_convex_arbitrary/columns.hpp` (10- or 11-byte fields per block;
   judge-specific). Each block ends with '\n' instead of ' ' (the checker compares tokens).
-- `lib/io` input, `.preinit_array` start and `_exit`, huge-page arrays.
+- Input: own fixed-stride parser. A run of tokens of one length L, each followed by one separator,
+  is checked 8 tokens at a time against a 96-bit separator pattern for stride L + 1 and parsed with
+  lib/io's digit groups, two tokens per ymm. Inside a run p advances by the constant 8(L + 1), so
+  steps do not wait on each other's separator scan. Anything else goes one token at a time.
+  Tests: inputs are all 9 digits, except monotone (lengths 5-9 in long runs).
+- `lib/io` mapping, `.preinit_array` start and `_exit`, huge-page arrays.
 
 ## Log
 
@@ -48,3 +53,20 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.31 ms on `lc-amd` (with `lib/io
   - Submitted the merged `main.cpp` (#98): [409238](https://judge.yosupo.jp/submission/409238), AC 19 ms,
     17.8 MiB. Twice the local 9.5 ms; the sibling convex_arbitrary got 13 ms from a similar local time.
     Judge noise or a judge-side cost not seen locally (guess); not resubmitted.
+- 2026-10-09, claude (round 2). Judge vs local: 409238's per-case times (API
+  `/submissions/409238`) are 8-9 ms on the max cases; 19 ms on small_slopes_01 and 17 ms on
+  monotone_00/02, but also 9 ms on small_03 and med_random_01 (tiny inputs, 0-1 ms elsewhere).
+  Same +8-10 ms spikes on other submissions (aplusb 409083: random_00 10 ms, others 1 ms;
+  concave_arbitrary 409228: 31 ms vs 13). So the judge is not slower; the score is a noise spike.
+  - Phases on small_slopes_01, `lc-amd` (TSC, ms): page touch of input 0.6, parse 1.7 (of which
+    huge-page faults on a, b about 0.4; warm re-parse 1.29), merge 0.92, format 1.40, write() 5.0.
+    Output is already at its minimum length on this case (all values have 10 digits).
+  - Fixed-stride parser, stride re-detected each 8 tokens: warm parse 1.29 -> 1.29, bench 0.985.
+    The stride (tzcnt of the separator mask) sat on the address chain. Runs with a constant
+    stride: warm parse 0.63; `judge.py bench` (5 slowest cases, 21 rounds) 10.75 -> 10.16 ms
+    (0.942).
+  - Held vector sorted descending (no reverse permute per step): 41 rounds against the line
+    above, 10.25 -> 10.17 (0.987). Kept.
+  - This `main.cpp`: 34/34, slowest 8.7 ms. Bench against round 1, 21 rounds: 10.17 -> 9.50
+    (0.940). Stress 1500 rounds; ASan/UBSan on all 34 cases, file and piped input.
+  - Next: write() of 11.5 MB (5 ms) is the floor's bulk; format 1.4 ms (W = 11), merge 0.9.

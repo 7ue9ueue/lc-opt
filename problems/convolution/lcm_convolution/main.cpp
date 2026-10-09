@@ -1103,50 +1103,10 @@ inline Range large_multipliers(std::uint32_t i, std::uint32_t start, std::uint32
     return {std::max(kSmall, kRough.index(divide(start - 1, r) + 1)), kRough.index(divide(last, r) + 1)};
 }
 
-// Zeta passes of the primes 3..13 fused into the interleave: kFused of them (a prefix of
-// kOddPrimes). The full transform F of the fused primes satisfies F_k = x_k + sum over the
-// squarefree products d > 1 of fused primes dividing k of -mu(d) F_k/d. d = 3 goes by vectors,
-// the other terms by source.
-#ifndef FUSED
-#define FUSED 3
-#endif
-#ifndef FUSED_M
-#define FUSED_M 3
-#endif
-constexpr std::uint32_t kOddPrimes[] = {3, 5, 7, 11, 13};
-constexpr int kFusedZeta = FUSED, kFusedMoebius = FUSED_M;
-
-struct Term {
-    std::uint32_t d;
-    bool odd;  // d has an odd number of prime factors: mu(d) = -1
-};
-
-// The squarefree products of the first Fused odd primes, except 1 and 3.
-template <int Fused>
-constexpr auto terms() {
-    std::array<Term, (1 << Fused) - 2> terms{};
-    for (int set = 2; set < (1 << Fused); ++set) {
-        std::uint32_t d = 1;
-        int primes = 0;
-        for (int i = 0; i < Fused; ++i)
-            if (set >> i & 1) d *= kOddPrimes[i], ++primes;
-        terms[set - 2] = {d, primes % 2 == 1};
-    }
-    return terms;
-}
-
-constexpr auto kZetaTerms = terms<kFusedZeta>();
-constexpr auto kMoebiusTerms = terms<kFusedMoebius>();
-
-void sub_pair(std::uint64_t* dst, const std::uint64_t* src) {
-    const Half d = _mm_sub_epi32(load_pair(dst), load_pair(src));
-    store_pair(dst, _mm_min_epu32(d, _mm_add_epi32(d, _mm_set1_epi32(int(kP)))));
-}
-
-// pairs[k] = (a_k, b_k R mod P) for 1 <= k <= n, with the fused zeta passes, ascending. a lies in
-// the second half of pairs: pair k overwrites only a values below k, which are read already.
-// Blocks [k0, k1) with k1 <= 3 k0 take all sources from below k0, which are final.
-void interleave_zeta(const AliasWord* a, const std::uint32_t* b, std::uint64_t* pairs, std::uint32_t n) {
+// pairs[k] = (a_k, b_k R mod P) for 1 <= k <= n, with the zeta pass of p = 3 (pairs[k] +=
+// pairs[k / 3] for k = 0 mod 3, ascending). a lies in the second half of pairs, at word offset
+// a - pairs: pair k overwrites only a values below k, which are read already.
+void interleave_zeta3(const AliasWord* a, const std::uint32_t* b, std::uint64_t* pairs, std::uint32_t n) {
     const Vec r2 = broadcast(kR2);
     // b_k R as Montgomery products of b_k and R^2: dwords [b R] in the high halves.
     auto scaled_pairs = [&](std::uint32_t k, Vec& low, Vec& high) {
@@ -1160,48 +1120,28 @@ void interleave_zeta(const AliasWord* a, const std::uint32_t* b, std::uint64_t* 
         low = _mm256_permute2x128_si256(lo, hi, 0x20);
         high = _mm256_permute2x128_si256(lo, hi, 0x31);
     };
-    // Target k with the term d = 3.
     auto one = [&](std::uint32_t k) {
         const std::uint32_t br = std::uint32_t((std::uint64_t(b[k]) << 32) % kP);
         const std::uint64_t pair = a[k] | std::uint64_t(br) << 32;
         std::memcpy(pairs + k, &pair, sizeof pair);
         if (k % 3 == 0) add_pair(pairs + k, pairs + k / 3);
     };
-    constexpr std::uint32_t kFirst = 24, kBlock = 1536;  // multiples of 24
     std::uint32_t k = 1;
-    for (; k < kFirst && k <= n; ++k) {
-        one(k);
-        for (const Term& t : kZetaTerms)
-            if (k % t.d == 0) (t.odd ? add_pair : sub_pair)(pairs + k, pairs + k / t.d);
-    }
-    std::uint32_t next[kZetaTerms.size()];  // per term: the next source
-    for (std::size_t t = 0; t < kZetaTerms.size(); ++t) next[t] = (kFirst + kZetaTerms[t].d - 1) / kZetaTerms[t].d;
-    while (k <= n) {
-        const std::uint32_t end = std::min({k + kBlock, 3 * k, n + 1});
-        // 24 targets from 8 sources below them: multiples of 3 at offsets 0, 3 | 6 | 9 of each 12.
-        for (; k + 24 <= end; k += 24) {
-            Vec v[6];
-            scaled_pairs(k, v[0], v[1]);
-            scaled_pairs(k + 8, v[2], v[3]);
-            scaled_pairs(k + 16, v[4], v[5]);
-            for (int h = 0; h < 2; ++h) {
-                const Vec s = load(pairs + k / 3 + 4 * h);
-                store(pairs + k + 12 * h, add(v[3 * h], spread<0x40, 0xC3>(s)));
-                store(pairs + k + 12 * h + 4, add(v[3 * h + 1], spread<0x20, 0x30>(s)));
-                store(pairs + k + 12 * h + 8, add(v[3 * h + 2], spread<0x0C, 0x0C>(s)));
-            }
-        }
-        for (; k < end; ++k) one(k);
-        for (std::size_t t = 0; t < kZetaTerms.size(); ++t) {
-            const std::uint32_t d = kZetaTerms[t].d;
-            std::uint32_t j = next[t];
-            if (kZetaTerms[t].odd)
-                for (; j * d < end; ++j) add_pair(pairs + j * d, pairs + j);
-            else
-                for (; j * d < end; ++j) sub_pair(pairs + j * d, pairs + j);
-            next[t] = j;
+    for (; k < 24 && k <= n; ++k) one(k);
+    // 24 targets from 8 sources below them: multiples of 3 at offsets 0, 3 | 6 | 9 of each 12.
+    for (; k + 23 <= n; k += 24) {
+        Vec v[6];
+        scaled_pairs(k, v[0], v[1]);
+        scaled_pairs(k + 8, v[2], v[3]);
+        scaled_pairs(k + 16, v[4], v[5]);
+        for (int h = 0; h < 2; ++h) {
+            const Vec s = load(pairs + k / 3 + 4 * h);
+            store(pairs + k + 12 * h, add(v[3 * h], spread<0x40, 0xC3>(s)));
+            store(pairs + k + 12 * h + 4, add(v[3 * h + 1], spread<0x20, 0x30>(s)));
+            store(pairs + k + 12 * h + 8, add(v[3 * h + 2], spread<0x0C, 0x0C>(s)));
         }
     }
+    for (; k <= n; ++k) one(k);
 }
 
 // Zeta pass of p >= 5 on the pairs: pairs[i p] += pairs[i], i ascending.
@@ -1239,73 +1179,34 @@ void zeta_rough(std::uint64_t* pairs, std::uint32_t n) {
     }
 }
 
-// Zeta pass of p = 2 fused with the product and the Moebius passes of 2 and of the first
-// kFusedMoebius odd primes, ascending. A_k += A_k/2, then C_k = A_k B_k - A_k/2 B_k/2 (the second
-// term for even k) into products, dwords over the pairs: C_k overwrites pair k / 2, which is
-// used for the last time at target k. c_k = C_k + sum over the squarefree products d > 1 of the
-// fused odd primes dividing k of mu(d) C_k/d: d = 3 by vectors, the rest by source per block.
-void zeta2_product_moebius(std::uint64_t* pairs, std::uint32_t* c, std::uint32_t n) {
-    AliasWord* const products = reinterpret_cast<AliasWord*>(pairs);
+// Zeta pass of p = 2 fused with the product and the Moebius pass of 2, ascending:
+// A_k += A_k/2, then c_k = A_k B_k - A_k/2 B_k/2 (the second term for even k).
+void zeta2_product_moebius2(std::uint64_t* pairs, std::uint32_t* c, std::uint32_t n) {
     auto one = [&](std::uint32_t k) {
         std::uint32_t ai = std::uint32_t(pairs[k]), bi = std::uint32_t(pairs[k] >> 32);
-        std::uint32_t ck;
         if (k % 2) {
-            ck = product(ai, bi);
-        } else {
-            const std::uint64_t s = pairs[k / 2];
-            ai = add(ai, std::uint32_t(s));
-            bi = add(bi, std::uint32_t(s >> 32));
-            pairs[k] = ai | std::uint64_t(bi) << 32;
-            ck = sub(product(ai, bi), product(std::uint32_t(s), std::uint32_t(s >> 32)));
+            c[k] = product(ai, bi);
+            return;
         }
-        products[k] = ck;
-        c[k] = k % 3 ? ck : sub(ck, products[k / 3]);
+        const std::uint64_t s = pairs[k / 2];
+        ai = add(ai, std::uint32_t(s));
+        bi = add(bi, std::uint32_t(s >> 32));
+        pairs[k] = ai | std::uint64_t(bi) << 32;
+        c[k] = sub(product(ai, bi), product(std::uint32_t(s), std::uint32_t(s >> 32)));
     };
-    constexpr std::uint32_t kFirst = 24, kBlock = 1536;  // multiples of 24
     std::uint32_t k = 1;
-    for (; k < kFirst && k <= n; ++k) {
-        one(k);
-        for (const Term& t : kMoebiusTerms)
-            if (k % t.d == 0) c[k] = t.odd ? sub(c[k], products[k / t.d]) : add(c[k], products[k / t.d]);
-    }
-    std::uint32_t next[kMoebiusTerms.size()];  // per term: the next source
-    for (std::size_t t = 0; t < kMoebiusTerms.size(); ++t)
-        next[t] = (kFirst + kMoebiusTerms[t].d - 1) / kMoebiusTerms[t].d;
+    for (; k < 8 && k <= n; ++k) one(k);
     const Vec even_lanes = _mm256_setr_epi32(0, 4, 1, 4, 2, 4, 3, 4);  // dword 4 is zero
-    // Multiples of 3 among 24 targets: per group of 8, the source lanes (8 = none).
-    const Vec thirds[3] = {_mm256_setr_epi32(0, 8, 8, 1, 8, 8, 2, 8), _mm256_setr_epi32(8, 3, 8, 8, 4, 8, 8, 5),
-                           _mm256_setr_epi32(8, 8, 6, 8, 8, 7, 8, 8)};
-    while (k <= n) {
-        const std::uint32_t end = std::min(k + kBlock, n + 1);
-        for (; k + 24 <= end; k += 24) {
-            const Vec third = load(products + k / 3);
-            for (int g = 0; g < 3; ++g) {
-                const std::uint32_t i = k + 8 * g;  // 8 targets, 4 sources i / 2 below them
-                const Vec s = load(pairs + i / 2);
-                const Vec t0 = add(load(pairs + i), spread<0x10, 0x33>(s));
-                const Vec t1 = add(load(pairs + i + 4), spread<0x32, 0x33>(s));
-                store(pairs + i, t0);
-                store(pairs + i + 4, t1);
-                const Vec halves = _mm256_permutevar8x32_epi32(high_dwords(product4(s), _mm256_setzero_si256()), even_lanes);
-                const Vec ci = sub(high_dwords(product4(t0), product4(t1)), halves);
-                store(products + i, ci);
-                // vpermd uses the low 3 bits of each index: lanes with index 8 read lane 0, then cleared.
-                const Vec from = _mm256_permutevar8x32_epi32(third, thirds[g]);
-                const Vec mask = _mm256_cmpgt_epi32(broadcast(8), thirds[g]);
-                store(c + i, sub(ci, _mm256_and_si256(from, mask)));
-            }
-        }
-        for (; k < end; ++k) one(k);
-        for (std::size_t t = 0; t < kMoebiusTerms.size(); ++t) {
-            const std::uint32_t d = kMoebiusTerms[t].d;
-            std::uint32_t j = next[t];
-            if (kMoebiusTerms[t].odd)
-                for (; j * d < end; ++j) c[j * d] = sub(c[j * d], products[j]);
-            else
-                for (; j * d < end; ++j) c[j * d] = add(c[j * d], products[j]);
-            next[t] = j;
-        }
+    for (; k + 7 <= n; k += 8) {  // 8 targets, 4 sources k / 2 below them
+        const Vec s = load(pairs + k / 2);
+        const Vec t0 = add(load(pairs + k), spread<0x10, 0x33>(s));
+        const Vec t1 = add(load(pairs + k + 4), spread<0x32, 0x33>(s));
+        store(pairs + k, t0);
+        store(pairs + k + 4, t1);
+        const Vec halves = _mm256_permutevar8x32_epi32(high_dwords(product4(s), _mm256_setzero_si256()), even_lanes);
+        store(c + k, sub(high_dwords(product4(t0), product4(t1)), halves));
     }
+    for (; k <= n; ++k) one(k);
 }
 
 // Moebius pass of p on c: c[i p] -= c[i], i descending.
@@ -1358,12 +1259,12 @@ void solve() {
     in.read(a + 1, n);
     in.read(b + 1, n);
 
-    interleave_zeta(a, b, pairs, n);
-    for (int i = kFusedZeta; i < 5; ++i) zeta_pass(pairs, n, kOddPrimes[i]);
+    interleave_zeta3(a, b, pairs, n);
+    for (const std::uint32_t p : {5, 7, 11, 13}) zeta_pass(pairs, n, p);
     zeta_rough(pairs, n);
     std::uint32_t* const c = b;
-    zeta2_product_moebius(pairs, c, n);
-    for (int i = kFusedMoebius; i < 5; ++i) moebius_pass(c, n, kOddPrimes[i]);
+    zeta2_product_moebius2(pairs, c, n);
+    for (const std::uint32_t p : {3, 5, 7, 11, 13}) moebius_pass(c, n, p);
     moebius_rough(c, n);
 
     io::Writer out;

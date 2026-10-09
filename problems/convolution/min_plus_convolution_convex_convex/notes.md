@@ -3,7 +3,7 @@
 N, M <= 2^19; a and b convex, 0 <= a_i, b_i <= 10^9; print c_k = min_{i+j=k} a_i + b_j
 (N + M - 1 values, each < 2^31). 5 s.
 
-Best judged: none yet.
+Best judged: ours, 19 ms: [409238](https://judge.yosupo.jp/submission/409238) (current `main.cpp`).
 Record when opened: 20 ms (issue #29).
 I/O floor (`../floor.py`, `lib/io/notes.md`): 11.31 ms on `lc-amd` (with `lib/io` output).
 
@@ -45,3 +45,6 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.31 ms on `lc-amd` (with `lib/io
     N <= 8, M up to 80000: several blocks); ASan/UBSan on all 34 cases, file and piped input.
   - Next: parse (`lib/io`, about 2 ms) and output (about 1.3 ms) dominate; the merge is about
     0.7 ms, bound by instruction count (about 58 per chain step of 8 values).
+  - Submitted the merged `main.cpp` (#98): [409238](https://judge.yosupo.jp/submission/409238), AC 19 ms,
+    17.8 MiB. Twice the local 9.5 ms; the sibling convex_arbitrary got 13 ms from a similar local time.
+    Judge noise or a judge-side cost not seen locally (guess); not resubmitted.

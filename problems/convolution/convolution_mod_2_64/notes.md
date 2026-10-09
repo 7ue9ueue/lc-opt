@@ -1,7 +1,8 @@
 # convolution_mod_2_64
 
 N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the product mod 2^64.
-10 s. Record when opened: 76 ms (another user). Best judged: none yet.
+10 s. Record when opened: 76 ms (another user). Best judged: ours, 45 ms:
+[409250](https://judge.yosupo.jp/submission/409250) (current `main.cpp`).
 
 ## Design
 
@@ -46,6 +47,9 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
     coefficients); `test_fields64.cpp` 4.0M values against printf; ASan/UBSan stress 60 rounds and
     9 official cases (file and pipe input). UBSan caught `_mm_storeh_pd` to a misaligned double;
     replaced by `_mm_storel_epi64` of the high half.
+  - Submitted the merged `main.cpp` (#114): [409249](https://judge.yosupo.jp/submission/409249)
+    AC 54 ms from one outlier (gen_524288_00 54, the other large cases 43-44);
+    [409250](https://judge.yosupo.jp/submission/409250) AC 45 ms. Matches `lc-amd` (42.8).
 - Next: the transforms are 25 of 43 ms (kernel-bound, as convolution_mod); `write()` 6 ms is fixed.
   Ideas: CRT fused into the last prime's final pass (its residues are hot); fewer page faults
   (residues 5 x 4 MiB fresh); parse into the reduced form directly.

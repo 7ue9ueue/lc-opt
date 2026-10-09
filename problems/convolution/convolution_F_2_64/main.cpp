@@ -1129,22 +1129,28 @@ namespace wide {
 
 constexpr std::size_t kHalo = 16, kBlock = 128, kWidth = kHalo + kBlock;
 
-// buf[r][j] ^= sum over the shift, for columns j >= kHalo exact.
-inline void shift(u64 (*buf)[kWidth], std::size_t rows) {
-    for (std::size_t d = rows / 2; d >= 1; d /= 2) {
-        for (std::size_t s = 0; s < rows; s += 2 * d) {
-            for (std::size_t r = s; r < s + d; ++r) {
-                for (std::size_t j = d; j < kWidth; ++j) buf[r][j] ^= buf[r + d][j - d];
+// The shift on buf's rows; exact for columns j >= kHalo. A level with distance d needs columns
+// >= kHalo - (d - 1) of the previous one, so columns below 4 are never needed after d = 4.
+template <std::size_t Rows>
+void shift(u64 (*buf)[kWidth]) {
+#pragma GCC unroll 4
+    for (std::size_t d = Rows / 2; d >= 1; d /= 2) {
+#pragma GCC unroll 16
+        for (std::size_t r = 0; r < Rows; ++r) {
+            if (r & d) continue;  // r in the lower half of its block of 2d rows
+            for (std::size_t j = std::max<std::size_t>(d, 4); j < kWidth; j += 4) {
+                const Vec moved = _mm256_loadu_si256(reinterpret_cast<const Vec*>(buf[r + d] + j - d));
+                store(buf[r] + j, _mm256_xor_si256(load(buf[r] + j), moved));
             }
         }
     }
 }
 
 // H for columns [c, c + width) of f's rows (each Tau words), zero past Tau, into buf[r][kHalo, ...).
-template <std::size_t Tau>
-void block(const u64* f, std::size_t rows, std::size_t c, std::size_t width, u64 (*buf)[kWidth]) {
+template <std::size_t Tau, std::size_t Rows>
+void block(const u64* f, std::size_t c, std::size_t width, u64 (*buf)[kWidth]) {
     const bool inside = c >= kHalo && width == kBlock;  // c + kBlock <= Tau
-    for (std::size_t r = 0; r < rows; ++r) {
+    for (std::size_t r = 0; r < Rows; ++r) {
         if (inside) {
             std::memcpy(buf[r], f + r * Tau + c - kHalo, kWidth * sizeof(u64));
             continue;
@@ -1154,28 +1160,38 @@ void block(const u64* f, std::size_t rows, std::size_t c, std::size_t width, u64
             buf[r][j] = c + j >= kHalo && col < Tau && j < kHalo + width ? f[r * Tau + col] : 0;
         }
     }
-    shift(buf, rows);
+    shift<Rows>(buf);
+}
+
+template <std::size_t Tau, std::size_t Rows, bool Inverse>
+void taylor(u64* f) {
+    static_assert(Tau % kBlock == 0);
+    alignas(32) static u64 buf[Rows][kWidth];
+    alignas(32) static u64 high[Rows][kHalo];
+    block<Tau, Rows>(f, Tau, 0, buf);
+    for (std::size_t r = 0; r < Rows; ++r) std::memcpy(high[r], buf[r] + kHalo, sizeof(high[r]));
+    for (std::size_t c = Tau; c > 0;) {
+        c -= kBlock;
+        block<Tau, Rows>(f, c, kBlock, buf);
+        for (std::size_t r = 0; r < Rows; ++r) std::memcpy(f + r * Tau + c, buf[r] + kHalo, kBlock * sizeof(u64));
+    }
+    for (std::size_t r = 1; r < Rows; ++r) {
+        for (std::size_t e = 0; e < kHalo; ++e) f[r * Tau + e] ^= high[r - 1][e];
+    }
+    if constexpr (!Inverse) {
+        for (std::size_t r = 0; r < Rows; ++r) {
+            for (std::size_t e = 0; e + 1 < kHalo; ++e) f[r * Tau + e + 1] ^= high[r][e];
+        }
+    }
 }
 
 template <std::size_t Tau, bool Inverse>
 void taylor(u64* f, std::size_t rows) {
-    static_assert(Tau % kBlock == 0);
-    alignas(32) static u64 buf[16][kWidth];
-    alignas(32) static u64 high[16][kHalo];
-    block<Tau>(f, rows, Tau, 0, buf);
-    for (std::size_t r = 0; r < rows; ++r) std::memcpy(high[r], buf[r] + kHalo, sizeof(high[r]));
-    for (std::size_t c = Tau; c > 0;) {
-        c -= kBlock;
-        block<Tau>(f, rows, c, kBlock, buf);
-        for (std::size_t r = 0; r < rows; ++r) std::memcpy(f + r * Tau + c, buf[r] + kHalo, kBlock * sizeof(u64));
-    }
-    for (std::size_t r = 1; r < rows; ++r) {
-        for (std::size_t e = 0; e < kHalo; ++e) f[r * Tau + e] ^= high[r - 1][e];
-    }
-    if constexpr (!Inverse) {
-        for (std::size_t r = 0; r < rows; ++r) {
-            for (std::size_t e = 0; e + 1 < kHalo; ++e) f[r * Tau + e + 1] ^= high[r][e];
-        }
+    switch (rows) {
+    case 2: return taylor<Tau, 2, Inverse>(f);
+    case 4: return taylor<Tau, 4, Inverse>(f);
+    case 8: return taylor<Tau, 8, Inverse>(f);
+    case 16: return taylor<Tau, 16, Inverse>(f);
     }
 }
 

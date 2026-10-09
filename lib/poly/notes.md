@@ -5,7 +5,7 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
 - `transform.hpp`: transforms of length 2^6 .. 2^25 and products in the transform domain.
 - `calculus.hpp`: coefficient-wise operations: `derivative`, `divide_by_index` (integration).
 - One header per operation on top: `inverse.hpp`, `exp.hpp` (Newton iterations), `log.hpp`
-  (division f'/f), `pow.hpp` (c (f / f[0])^e as exp(e log)).
+  (division f'/f), `pow.hpp` (c (f / f[0])^e as exp(e log)), `sqrt.hpp` (Newton iteration).
 
 APIs and usage: the header of each file. Tests: `test.cpp` (O(n^2) references; sizes 1..64,
 powers of two and their neighbours up to 2^20, random sizes; also run under ASan/UBSan in CI).
@@ -137,6 +137,50 @@ root is power(f, 1/2, sqrt(f[0])).
   - exp's T_m(x q) at m = 2^17, 2^18 from the log's stored T(q_0), T(q_1) by leaf-wise shifts
     (x^k is a scalar per leaf): saves ~0.4 ms of forwards, keeps 2 MB more live.
 
+## Sqrt
+
+g = sqrt(f) mod x^n with g[0] = c, c^2 = f[0] != 0. Newton from m to 2m keeps h = -1 / g mod
+x^(m/2) and H = T_m(h) (the previous step's transform of length 2m' = m). The sign of h saves
+negations: the inverse update and the root step both come out with the right sign.
+- G = T_m(g). e = (g h)[m/2, m) by `inverse_product` of G and H, upper half; h[m/2, m) =
+  (x^(m/2) e h mod (x^m - 1))[m/2, m) by `cyclic_product` with H. Now h = -1 / g mod x^m.
+- r = (g^2 - f)[m, 2m) / 2: g^2 mod (x^m - 1) by `inverse_product` of G with itself equals
+  f[0, m) + (g^2)[m, 2m), since g^2 = f mod x^m and deg g^2 < 2m - 1. One pass subtracts f[0, m)
+  and f[m, 2m) and halves.
+- g[m, 2m) = h r mod x^m: T_2m(h) by `forward` (also the next step's H), `cyclic_product` of r,
+  lower half. (g + x^m d)^2 = f mod x^2m needs 2 g d = (f - g^2)[m, 2m) mod x^m, so d = h r.
+- Per step 11 transforms of length m (G 1, e 1, h 2, g^2 1, T_2m(h) 2, d 4) and 5 leaf products
+  of that length.
+- Last step, m < n <= 2m, transforms of length m only. With rest = n - m: if rest <= m/2,
+  d = h r mod x^rest by one `cyclic_product` with H (h is known to m/2): 4 transforms. Else
+  Karp and Markstein's split: d0 = h r0 mod x^(m/2) (r0 = r mod x^(m/2)); g d = -r gives
+  g d1 = -(r + g d0)[m/2, rest) mod x^(rest - m/2), so d1 = h (r + g d0)[m/2, rest), with
+  (g d0)[m/2, m) exact in the upper half of the cyclic product of g (degree < m) and d0
+  (degree < m/2). 8 transforms of length m (G 1, g^2 1, three cyclic products 6), 4 leaf
+  products. Against a full step (11 transforms, h to precision m, d at length 2m) this keeps
+  the largest transform at m: 2^18 for n = 500000.
+- In all, for n = 500000 (m = 2^18 last): ~9.5 T(2^19) and 4.5 LP(2^19); the inverse of
+  `inverse.hpp` takes 10 T(2^19) and 4 LP(2^19).
+- Below 64 coefficients: 2 c g_i = f_i - sum_(0<j<i) g_j g_(i-j); h mod x^32 by `inverse_direct`
+  of g, negated.
+- Scratch: G, T(h) and work (length m_last each), h (m_last / 2); in the last step h holds
+  r[m/2, rest) (H keeps h's transform). f and g must not overlap: every step reads f[0, 2m).
+- Alternatives considered, not done:
+  - power(f, 1/2, c) (exp of log / 2): 2.25 times slower whole process (see Log).
+  - h at full precision m (the update after g[m, 2m)): 17 transforms per step.
+  - The root step at length m with h at m/2 (the last step's split) in every step: 6
+    transforms for d, but h still needs its update (3) and T_2m(h) (2): 13 per step.
+  - Blocks of s coefficients with transforms of length 2s for the last stage (as log's
+    division: windows of g against stored T(d_i)): for n = 500000 and s = 2^16, about 21
+    transforms of length 2^17 and 10 leaf products, against the split's 8 of length 2^18
+    (~16 of 2^17) and 4 (8 of 2^17). Newton to 2^17, then blocks of 2^16: 23 transforms of
+    2^17 and 33 leaf products against 27 and 13; a leaf product at 2^17 costs ~0.87 of a
+    transform (0.12 vs 0.138 ms, `lc-amd`).
+  - The inverse square root f^(-1/2) is 1/g = -h already; its own Newton step, u + u (1 -
+    f u^2) / 2, needs f u^2 mod x^2m, a longer product than g h.
+  - Harvey's 4/3 M(n) square root (Harvey 2011 below; 8 T(n) with M(n) = 6 T(n)): blocked,
+    more leaf products per transform; not tried (as the 13/9 reciprocal, issue #62 below).
+
 ## Measurements
 
 AMD EPYC 7B13 (`lc-amd`, 3.48 GHz), GCC 15.2, judge flags, 2026-10-09. ns per coefficient,
@@ -249,6 +293,19 @@ products 1.77 and 1.69).
   2435 -> 2387 instructions. Tests unchanged (power, log, exp pass, also ASan/UBSan).
 - `judge.py bench` (ratios new/old): pow 0.9827 (`lc-amd`, 21 rounds), 0.9885 (`lc-intel`, 21);
   exp 0.9994, 0.9954 (21); log 1.0000, 0.9988 (41).
+
+2026-10-09, claude (issue #66, sqrt_of_formal_power_series):
+- Added `sqrt.hpp` (`sqrt`, `sqrt_log`, `sqrt_scratch`); no other header changed (inv, exp,
+  log and pow bundles unchanged). Tests: sqrt against the O(n^2) recurrence (n <= 160, three
+  kinds of f, c = either root), longer outputs by a prefix and g^2 = f at random coefficients;
+  edge cases f = c^2, f = (1 - x)^2, f shorter and longer than n; sizes 2^k - 1 .. 2^k + 1,
+  3 2^(k-2) and 3 2^(k-2) + 1 (the last step with one product or the split) to 2^20. A
+  mutation (the split's residual without g d0) fails them. Fixture arena: 22 buffers of 2^20.
+- In process at N = 500000 (`lc-amd`, scratch probe): 7.72 ms warm, 7.9 ms first use.
+  Primitives (ms, min of 20): forward of a half-zero input at 2^17 / 2^18 0.138 / 0.303;
+  `inverse_product` 0.260 / 0.531; `cyclic_product` (half-zero input, lower half) 0.387 / 0.821.
+- Whole process (`judge.py bench`, `lc-amd`, 15 rounds, slowest 4): 12.87 ms against 28.91 ms
+  for the same program with `power(u, 1/2, c)`.
 
 ## Sources
 

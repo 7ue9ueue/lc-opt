@@ -55,7 +55,11 @@ void sweep(const std::uint32_t* a, const std::uint32_t* b, std::uint32_t* c, std
                         base = 1;
                         --len;
                         while (len > 1) {
-                            const std::uint32_t half = len / 2;
+                            const std::uint32_t half = len / 2, next = (len - half) / 2;
+                            for (const std::uint32_t t : {base + next, base + half + next}) {
+                                __builtin_prefetch(a + (from + Step * t - j));
+                                __builtin_prefetch(a + (from + Step * t - o));
+                            }
                             base = wins(base + half) ? base + half : base;
                             len -= half;
                         }

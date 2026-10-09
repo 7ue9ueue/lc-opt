@@ -3,8 +3,8 @@
 N <= 20; 2^N values a_i, b_i < 998244353; print c_k = sum over i & j = k of a_i b_j, mod 998244353.
 5 s. Inputs are ~20.7 MB, outputs ~10.5 MB (fixed width) at N = 20.
 
-Best judged: ours, [409181](https://judge.yosupo.jp/submission/409181), 23 ms (first). Its cases:
-max_random_00 and _02 12 ms, max_random_01 23 ms (same size as the others: judge noise, a guess).
+Best judged: ours, [409186](https://judge.yosupo.jp/submission/409186), 13 ms (first). Same file as
+409181 (23 ms), whose 23 ms max_random_01 was judge noise.
 Next other user: 26 ms (adamant, 400554).
 
 ## Design
@@ -66,6 +66,8 @@ more outside `main` (start, exit). `perf` on `lc-intel` (static build): 40% of c
 - 2026-10-09, claude: submitted the round-1 `main.cpp` (PR #38),
   [409181](https://judge.yosupo.jp/submission/409181): AC, 23 ms (1/5). Cases at N = 20: 12, 23,
   12 ms; `lc-amd` measures 13.7 ms for the slowest of the three. Not resubmitted for the outlier.
+- 2026-10-09, claude: resubmitted the same `main.cpp` at the user's request,
+  [409186](https://judge.yosupo.jp/submission/409186): AC, 13 ms, 21.2 MiB (2/5).
 - Next: the transforms cost 1.7 ms above the floor (3.9 M vector butterflies and 2^17 vector
   products at ~3.2 ops per cycle); hand-scheduled kernels might save ~0.3 ms (guess). The rest is
   I/O: parse (lib/io, #21) and the kernel's page work for the output file and input mapping.

@@ -107,6 +107,12 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
 - Exit: `std::_Exit(0)` after `flush()` instead of returning from `main` skips the exit handlers,
   0.03 ms per run (aplusb 1.15 → 1.12 ms). Solutions do this; the library cannot.
 - `Reader::scan()`/`resume()`: the separator state for custom token loops (many_aplusb's assembly).
+- Writer buffer as a separate allocation (stores through it cannot alias the Writer, so GCC keeps
+  the cursor in a register): in memory, one `write()` per value 3-8% faster. Whole process, 1M ints
+  or int64 written one by one: 1.005 and 1.007. Not kept.
+- `write_array` for other integers checking the buffer once per 1024 values: in memory 10-30%
+  faster; whole process (1M ints and 1M int64): 1.006. Not kept. In-memory gains in formatting
+  do not reach the whole process here; check end to end before keeping a Writer change.
 - Judge harness (`tools/judge.py`): inputs now on tmpfs, as on the judge, instead of the VM's disk
   cache. Same timings for these programs.
 

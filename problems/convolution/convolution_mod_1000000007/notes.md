@@ -3,7 +3,7 @@
 N, M <= 2^19 coefficients mod 10^9 + 7; print the N + M - 1 coefficients of the product. 10 s.
 Record when opened: 29 ms (another user). Best judged: ours, 31 ms:
 [409262](https://judge.yosupo.jp/submission/409262) (current `main.cpp`); its large cases take
-22-23 ms, the maximum is one outlier.
+22-23 ms, the maximum is a judge spike (clean score 23 ms, `tools/spikes.md`).
 
 ## Design
 
@@ -62,6 +62,10 @@ Record when opened: 29 ms (another user). Best judged: ours, 31 ms:
   - Not tried, estimated small: CRT with (y2 + (2 - t) p2) M2 instead of the t M term saves 2 of
     12 `vpmuludq` per 8 values (~0.05 ms, guess); a 4 MiB array fewer (in-place last prime for a
     needs a's buffer at 2^lg words, but primes 0-1 still need a 4 MiB scratch): no saving.
+- 2026-10-09, claude (spike check). The 31 and 32 ms maxima of 409262 and 409263 are judge launch
+  spikes, not our code: +9 ms on 5.2% of all cases, any size (`tools/spikes.md`).
+  `tools/spikes.py 409262 409263`: clean score 23 ms for both (2 and 5 spiked cases). 23 cases sit
+  within 9 ms of the slowest, so a submission is judged clean with P = 0.948^23 = 0.29.
 - Next: everything left is in the transforms (14.2 of ~23 ms, lib/ntt's kernels) and fixed I/O.
   No problem-local idea left that is worth more than noise.
 

@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "lib/io/io.hpp"
+#include "columns.hpp"
 
 namespace {
 
@@ -127,8 +128,10 @@ void solve() {
     const std::size_t n = in.read<u32>(), m = in.read<u32>(), count = n + m - 1;
     const std::size_t groups = (count + kGroup - 1) / kGroup;
     const std::size_t a_words = n + 2 * kAPad, b_words = m, c_words = groups * kGroup;
-    u32* const memory = allocate(a_words + b_words + c_words + std::bit_ceil(groups) + 1);
-    u32* const a = memory;
+    const std::size_t text_words = columns::kTextBytes / sizeof(u32);
+    u32* const memory = allocate(text_words + a_words + b_words + c_words + std::bit_ceil(groups) + 1);
+    char* const text = reinterpret_cast<char*>(memory);
+    u32* const a = memory + text_words;
     u32* const b = a + a_words;
     u32* const c = b + b_words;
     u32* const opt = c + c_words;
@@ -141,9 +144,9 @@ void solve() {
     sample_levels(p, groups);
     for (std::size_t t = 0; t < groups; ++t) group(p, t);
 
+    std::fill(c + count, c + c_words, 0);
     io::Writer out;
-    out.write_array(c, count, ' ');
-    out.write('\n');
+    columns::write(out, c, count, text);
 }
 
 #ifdef __ELF__

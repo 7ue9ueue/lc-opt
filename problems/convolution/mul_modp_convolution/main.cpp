@@ -3196,19 +3196,27 @@ struct Sums {
     std::uint32_t a, b;  // sums of a_i and b_i over i != 0, mod P
 };
 
-// The input: pairs[i - 1] = a_i + 2^32 b_i for 0 < i < p.
+// Storage of the input pairs a_i + 2^32 b_i, 0 < i < p, in two pieces: pair i at
+// base[i - 1] for i <= split, else at base[i - 1 + offset]. split is a multiple of 8.
+struct Pairs {
+    std::uint64_t* base;
+    std::uint32_t split, offset;  // split < 2^31
+
+    std::uint64_t* at(std::uint32_t i) const { return base + i - 1 + (i > split ? offset : 0); }
+};
+
 struct Input {
-    const std::uint64_t* pairs;
+    Pairs pairs;
     std::uint32_t p, g;
 };
 
 // Reads a_1.., b_0, b_1.. (n each but b_0) into pairs; returns b_0. a, b: scratch for n + 8 words.
-std::uint32_t read_pairs(io::Reader& in, std::uint32_t n, std::uint32_t* a, std::uint32_t* b, std::uint64_t* pairs) {
+std::uint32_t read_pairs(io::Reader& in, std::uint32_t n, std::uint32_t* a, std::uint32_t* b, const Pairs& pairs) {
     in.read(a, n);
     const std::uint32_t b0 = in.read<std::uint32_t>();
     in.read(b, n);
-    auto* out = reinterpret_cast<Vec*>(pairs);
-    for (std::uint32_t i = 0; i < n; i += 8, out += 2) {
+    for (std::uint32_t i = 0; i < n; i += 8) {
+        auto* out = reinterpret_cast<Vec*>(pairs.at(i + 1));
         const Vec x = _mm256_permute4x64_epi64(load(a + i), 0xD8), y = _mm256_permute4x64_epi64(load(b + i), 0xD8);
         _mm256_storeu_si256(out, _mm256_unpacklo_epi32(x, y));
         _mm256_storeu_si256(out + 1, _mm256_unpackhi_epi32(x, y));
@@ -3222,91 +3230,68 @@ Vec times(Vec x, const Factor& f) { return ntt::detail::multiply(x, f); }
 // x - y + P for y < P.
 Vec diff_canonical(Vec x, Vec y) { return _mm256_sub_epi32(_mm256_add_epi32(x, broadcast(kP)), y); }
 
-// First level of a factor of length 8q vectors whose upper half is zero: from the lower half's
-// vectors f0..f3 at j, j + q, j + 2q, j + 3q it writes the first radix-4 group of both halves of
-// the transform: group 0 to f[0, 4q), group 1 to f[4q, 8q). Inputs canonical; outputs < 4P.
-class Radix8 {
-public:
-    explicit Radix8(const std::uint32_t* roots) : i_(roots[1], roots[9]), y_(roots[2], roots[10]), z_(roots[3], roots[11]) {}
-
-    void operator()(Vec* f, std::size_t j, std::size_t q, Vec f0, Vec f1, Vec f2, Vec f3) const {
+// First level of a factor f[0, 4q) whose upper half f[4q, 8q) is zero (and not read): one pass
+// reads the lower half once and writes the first radix-4 group of both halves of the transform:
+// group 0 to f[0, 4q), group 1 to f[4q, 8q). Inputs canonical; outputs < 4P.
+void forward_radix8(Vec* f, std::size_t q, const std::uint32_t* roots) {
+    const Factor i(roots[1], roots[9]), y(roots[2], roots[10]), z(roots[3], roots[11]);
+    for (std::size_t j = 0; j < q; ++j) {
+        const Vec f0 = f[j], f1 = f[j + q], f2 = f[j + 2 * q], f3 = f[j + 3 * q];
         // Group 0 (twiddles 1, 1, i): every term < 2P.
         const Vec g0 = add(f0, f2), g1 = add(f1, f3);
-        const Vec h0 = diff_canonical(f0, f2), ih1 = times(diff_canonical(f1, f3), i_);
+        const Vec h0 = diff_canonical(f0, f2), ih1 = times(diff_canonical(f1, f3), i);
         f[j] = add(g0, g1), f[j + q] = diff(g0, g1);
         f[j + 2 * q] = add(h0, ih1), f[j + 3 * q] = diff(h0, ih1);
         // Group 1 (twiddles i, y, z).
-        const Vec if2 = times(f2, i_), if3 = times(f3, i_);
+        const Vec if2 = times(f2, i), if3 = times(f3, i);
         const Vec u0 = reduce(add(f0, if2), 2 * kP), v0 = reduce(diff(f0, if2), 2 * kP);
-        const Vec yu1 = times(add(f1, if3), y_), zv1 = times(diff(f1, if3), z_);
+        const Vec yu1 = times(add(f1, if3), y), zv1 = times(diff(f1, if3), z);
         f[j + 4 * q] = add(u0, yu1), f[j + 5 * q] = diff(u0, yu1);
         f[j + 6 * q] = add(v0, zv1), f[j + 7 * q] = diff(v0, zv1);
     }
+}
+
+// Pairs i for the lanes i of index (in Powers lane order) as a and b in natural order: one load
+// serves both factors.
+class Fetch {
+public:
+    explicit Fetch(const Pairs& pairs)
+        : base_(reinterpret_cast<const long long*>(pairs.base - 1)), split_(broadcast(pairs.split)),
+          offset_(broadcast(pairs.offset)) {}
+
+    void operator()(Vec index, Vec& a, Vec& b) const {
+        index = _mm256_add_epi32(index, _mm256_and_si256(_mm256_cmpgt_epi32(index, split_), offset_));
+        const __m256 lo = _mm256_castsi256_ps(_mm256_i32gather_epi64(base_, _mm256_castsi256_si128(index), 8));
+        const __m256 hi = _mm256_castsi256_ps(_mm256_i32gather_epi64(base_, _mm256_extracti128_si256(index, 1), 8));
+        a = _mm256_castps_si256(_mm256_shuffle_ps(lo, hi, 0x88));
+        b = _mm256_castps_si256(_mm256_shuffle_ps(lo, hi, 0xDD));
+    }
 
 private:
-    Factor i_, y_, z_;
+    const long long* base_;
+    Vec split_, offset_;
 };
-
-// The pairs at index - 1, index in Powers lane order: a and b in natural order. One load serves
-// both factors.
-void fetch(const std::uint64_t* pairs, Vec index, Vec& a, Vec& b) {
-    const auto* base = reinterpret_cast<const long long*>(pairs - 1);
-    const __m256 lo = _mm256_castsi256_ps(_mm256_i32gather_epi64(base, _mm256_castsi256_si128(index), 8));
-    const __m256 hi = _mm256_castsi256_ps(_mm256_i32gather_epi64(base, _mm256_extracti128_si256(index, 1), 8));
-    a = _mm256_castps_si256(_mm256_shuffle_ps(lo, hi, 0x88));
-    b = _mm256_castps_si256(_mm256_shuffle_ps(lo, hi, 0xDD));
-}
-
-// The first transform level (Radix8) of A[x] = a_(g^x) and B[x] = b_(g^x), zero for x >= p - 1,
-// straight from the input: the permuted factors are never stored. Vector j + t q holds
-// x = 8 (j + t q) + lane.
-Sums gather_forward(Vec* a, Vec* b, std::size_t q, const std::uint32_t* roots, const Input& in) {
-    const Radix8 radix8(roots);
-    const Powers powers(in.g, in.p);
-    const Powers::Step step(powers, 8);
-    const Vec lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
-    Vec y[4], limit[4];  // x < p - 1 iff 8j < limit
-    for (std::uint32_t t = 0; t < 4; ++t) {
-        const std::uint32_t x = std::uint32_t(8 * t * q);
-        y[t] = powers.at(x);
-        limit[t] = _mm256_sub_epi32(broadcast(in.p - 1 - x), lane);  // signed; above -2^21
-    }
-    Vec sum_a = _mm256_setzero_si256(), sum_b = sum_a;
-    for (std::size_t j = 0; j < q; ++j) {
-        const Vec at = broadcast(std::uint32_t(8 * j));
-        Vec fa[4], fb[4];
-        for (int t = 0; t < 4; ++t) {
-            const Vec valid = _mm256_cmpgt_epi32(limit[t], at);
-            fetch(in.pairs, y[t], fa[t], fb[t]);
-            fa[t] = _mm256_and_si256(fa[t], valid), fb[t] = _mm256_and_si256(fb[t], valid);
-            sum_a = add_mod(sum_a, fa[t]);
-            sum_b = add_mod(sum_b, fb[t]);
-            y[t] = step(y[t]);
-        }
-        radix8(a, j, q, fa[0], fa[1], fa[2], fa[3]);
-        radix8(b, j, q, fb[0], fb[1], fb[2], fb[3]);
-    }
-    return {lane_sum(sum_a), lane_sum(sum_b)};
-}
 
 // A[x] = a_(g^x), B[x] = b_(g^x) for x < n = p - 1; A and B beyond n stay zero.
 Sums gather(std::uint32_t* a, std::uint32_t* b, const Input& in) {
     const std::uint32_t n = in.p - 1;
     const Powers powers(in.g, in.p);
     const Powers::Step step(powers, 16);
+    const Fetch fetch(in.pairs);
     Vec lo = powers.at(0), hi = powers.at(8), sum_a = _mm256_setzero_si256(), sum_b = sum_a;
     std::uint32_t x = 0;
     for (; x + 16 <= n; x += 16, lo = step(lo), hi = step(hi)) {
         Vec a0, a1, b0, b1;
-        fetch(in.pairs, lo, a0, b0);
-        fetch(in.pairs, hi, a1, b1);
+        fetch(lo, a0, b0);
+        fetch(hi, a1, b1);
         store(a + x, a0), store(a + x + 8, a1), store(b + x, b0), store(b + x + 8, b1);
         sum_a = add_mod(add_mod(sum_a, a0), a1);
         sum_b = add_mod(add_mod(sum_b, b0), b1);
     }
     std::uint64_t ra = lane_sum(sum_a), rb = lane_sum(sum_b);
     for (std::uint32_t y = std::uint32_t(_mm256_cvtsi256_si32(lo)); x < n; ++x, y = powers.next(y)) {
-        a[x] = std::uint32_t(in.pairs[y - 1]), b[x] = std::uint32_t(in.pairs[y - 1] >> 32);
+        const std::uint64_t pair = *in.pairs.at(y);
+        a[x] = std::uint32_t(pair), b[x] = std::uint32_t(pair >> 32);
         ra += a[x], rb += b[x];
     }
     return {std::uint32_t(ra % kP), std::uint32_t(rb % kP)};
@@ -3336,7 +3321,7 @@ void scatter(std::uint32_t* c, const std::uint32_t* d, std::uint32_t p, std::uin
 int log_length(std::size_t n) { return std::max(6, int(std::bit_width(2 * n - 2))); }
 
 // A * B for factors of n coefficients when the transform length 2^lg is 2 * 4^j >= 256: the top
-// level is gather_forward, the rest is lib/ntt. Same layout as ntt::Convolution; single use.
+// level is forward_radix8, the rest is lib/ntt. Same layout as ntt::Convolution; single use.
 class Product {
 public:
     static bool fits(std::size_t n) {
@@ -3347,7 +3332,7 @@ public:
     explicit Product(std::size_t n) : lg_(log_length(n)) {
         const std::size_t len = length(), words = 2 * (len + kPadding) + 2 * ntt::detail::table_words(lg_);
         constexpr std::size_t kHuge = std::size_t(1) << 21;
-        bytes_ = ((words + len) * sizeof(std::uint32_t) + fields::kTextBytes + kHuge - 1) / kHuge * kHuge + kHuge;
+        bytes_ = (words * sizeof(std::uint32_t) + fields::kTextBytes + kHuge - 1) / kHuge * kHuge + kHuge;
         region_ = ::mmap(nullptr, bytes_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (region_ == MAP_FAILED) std::abort();
         const std::uintptr_t aligned = (reinterpret_cast<std::uintptr_t>(region_) + kHuge - 1) & ~(kHuge - 1);
@@ -3359,7 +3344,6 @@ public:
         roots_ = b_ + len + kPadding;
         inverse_roots_ = roots_ + ntt::detail::table_words(lg_);
         text_ = reinterpret_cast<char*>(inverse_roots_ + ntt::detail::table_words(lg_));
-        input_ = reinterpret_cast<std::uint32_t*>(text_ + fields::kTextBytes);
     }
 
     ~Product() { ::munmap(region_, bytes_); }
@@ -3367,27 +3351,31 @@ public:
     Product(const Product&) = delete;
     Product& operator=(const Product&) = delete;
 
-    // Room for the input: 2^lg / 2 pairs, and the factors as scratch until load().
-    std::uint64_t* pairs() { return reinterpret_cast<std::uint64_t*>(input_); }
+    // Room for the input until load(): the pairs in the factors' upper halves (2^lg / 4 each),
+    // a_i and b_i in their lower halves.
+    Pairs pairs() {
+        const std::size_t quarter = length() / 4;
+        return {reinterpret_cast<std::uint64_t*>(a_ + 2 * quarter), std::uint32_t(quarter),
+                std::uint32_t((b_ - a_) / 2 - quarter)};
+    }
     std::uint32_t* scratch_a() { return a_; }
     std::uint32_t* scratch_b() { return b_; }
     std::uint32_t* b() { return b_; }
     // fields::kTextBytes bytes for the output, 16-byte aligned, after the tables (in their huge page).
     char* text() { return text_; }
 
-    // Permutes the input into the factors (gather_forward) and transforms them.
-    Sums load(const Input& in) {
-        ntt::detail::build_table(roots_, length() / 16, ntt::detail::kRoots[0]);
-        return gather_forward(reinterpret_cast<Vec*>(a_), reinterpret_cast<Vec*>(b_), length() / 64, roots_, in);
-    }
+    Sums load(const Input& in) { return gather(a_, b_, in); }
 
     // The coefficients of A * B, canonical, in a(); b() is destroyed.
     const std::uint32_t* multiply() {
         using namespace ntt::detail;
         const std::size_t len = length(), nv = len / 8, h = nv / 2, q = nv / 8;
+        build_table(roots_, len / 16, kRoots[0]);
         build_table(inverse_roots_, len / 16, kRoots[1]);
         auto* a = reinterpret_cast<Vec*>(a_);
         auto* b = reinterpret_cast<Vec*>(b_);
+        forward_radix8(a, q, roots_);
+        forward_radix8(b, q, roots_);
         const Recursion recursion(roots_, inverse_roots_);
         for (std::size_t c = 0; c < 4; ++c) recursion.visit(a + c * q, b + c * q, q, c);
         ntt::kernels::inverse_identity(a, q, inverse_roots_);
@@ -3411,7 +3399,6 @@ private:
     std::size_t bytes_;
     std::uint32_t *a_, *b_, *roots_, *inverse_roots_;
     char* text_;
-    std::uint32_t* input_;
 };
 
 // Other lengths: gather, then ntt::Convolution.
@@ -3419,7 +3406,7 @@ class SmallProduct {
 public:
     explicit SmallProduct(std::size_t n) : convolution_(n, n), pairs_(new std::uint64_t[n + 8]) {}
 
-    std::uint64_t* pairs() { return pairs_.get(); }
+    Pairs pairs() { return {pairs_.get(), 1u << 30, 0}; }
     std::uint32_t* scratch_a() { return convolution_.a(); }
     std::uint32_t* scratch_b() { return convolution_.b(); }
     std::uint32_t* b() { return convolution_.b(); }

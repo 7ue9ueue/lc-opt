@@ -3,6 +3,9 @@
 // length n = P - 1 of A[x] = a[g^x] and B[x] = b[g^x]: one linear product (lib/ntt, length
 // 2^20 at the maximum) folded mod x^n - 1. c_0 = a_0 sum(b) + b_0 sum(a) - a_0 b_0.
 #include <unistd.h>
+#include <time.h>
+#include <cstdio>
+static double T0[16]; static int TN; static void stamp(){timespec t; clock_gettime(CLOCK_MONOTONIC,&t); T0[TN++]=t.tv_sec*1e3+t.tv_nsec*1e-6;}
 
 #include <memory>
 
@@ -342,19 +345,19 @@ void convolve(io::Reader& in, std::uint32_t p) {
     Multiplier product(n);
     const std::uint32_t a0 = in.read<std::uint32_t>();
     const std::uint32_t b0 = read_pairs(in, n, product.scratch_a(), product.scratch_b(), product.pairs());
-    const std::uint32_t g = primitive_root(p);
+    stamp(); const std::uint32_t g = primitive_root(p);
     const Sums sums = product.load({product.pairs(), p, g});
-    const std::uint32_t* d = product.multiply();
+    stamp(); const std::uint32_t* d = product.multiply(); stamp();
     std::uint32_t* c = product.b();
     scatter(c, d, p, g);
     // c_0 = a_0 (b_0 + sum b) + b_0 sum a.
     c[0] = std::uint32_t((std::uint64_t(a0) * ((b0 + sums.b) % kP) + std::uint64_t(b0) * sums.a) % kP);
-    io::Writer out;
-    fields::write(out, c, p, product.text());
+    stamp(); {io::Writer out;
+    fields::write(out, c, p, product.text());} stamp(); for(int i=1;i<TN;++i) fprintf(stderr,"%.3f ",T0[i]-T0[i-1]); fprintf(stderr,"\n");
 }
 
 void solve() {
-    io::Reader in;
+    stamp(); io::Reader in;
     const std::uint32_t p = in.read<std::uint32_t>();
     if (Product::fits(p - 1)) return convolve<Product>(in, p);
     convolve<SmallProduct>(in, p);

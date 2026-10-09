@@ -24,8 +24,9 @@ powers of two and their neighbours up to 2^20, random sizes; also run under ASan
 - Separate calls instead of lib/ntt's fused convolution: `forward`, `inverse` (in place or out
   of place), `multiply`, `multiply_add`, and fused depth-first passes: `cyclic_product` (forward
   of a, leaf products with a stored transform b, inverse), `inverse_product` (leaf products of
-  two stored transforms, inverse), `forward_product` (forward of a, leaf products with b, kept
-  as a transform).
+  two stored transforms, inverse), `inverse_product_sum` (the same for a sum of up to 3
+  products; each leaf product reduced, then added), `forward_product` (forward of a, leaf
+  products with b, kept as a transform).
 - Sources: the forward top level reads x^shift in[0, size) from any span (in place or not);
   coefficients outside are zero and not read. Outputs: `Half` computes one half only.
 - Leaf product: a window [w a, a] (canonical) gives x^i a mod (x^8 - w) as words [8 - i, 16 - i);
@@ -80,16 +81,26 @@ step's transform of length 2m' = m), d = f', q = d mod x^(m-1):
 
 ## Log
 
-log f = integral of q, q = f'/f mod x^(n-1), d = f'. Karp and Markstein: with transforms of
-length 2m >= n - 1 and h = 1 / f mod x^m (`inverse`), H = T_2m(h):
-- q0 = q mod x^m = d h mod x^m: `cyclic_product` of d[0, m) with H, lower half.
-- e = (f q0 - d)[m, 2m): `cyclic_product` of q0 with T_2m(f), upper half (exact there: the
-  product has degree < 3m - 1), then d subtracted.
-- q[m, 2m) = -(h e mod x^m): `cyclic_product` of x^m e with H, upper half.
-- 8 transforms of length 2m and 3 leaf products, after the inverse to m (10 transforms of
-  length m and 4 leaf products): about 13 T(2m) + 5 LP(2m) in all. The integral divides by
-  index with `divide_by_index`, whose loader reads q.
-- d is kept in g[1, n) until q replaces it there; scratch: H, T_2m(f), work (length 2m each).
+log f = integral of q, q = f'/f mod x^(n-1), d = f'. Blocked division: B blocks q_j of k
+coefficients (k the least power of two >= (n - 1) / 4, at least 32; so B is 2 to 4), from
+h = 1 / f mod x^k (`inverse`), with transforms of length 2k. With Q = q mod x^(jk), d - f Q is
+divisible by x^(jk), and
+- q_j = h (d - f Q)[jk, (j+1)k) mod x^k: `cyclic_product` of the residual r_j with H = T(h),
+  lower half.
+- (f Q)[jk, (j+1)k) = sum_(i<j) (W_(j-i) q_i)[k, 2k), W_t = f[(t-1)k, (t+1)k): a middle product,
+  exact in the upper half of the cyclic product (degree < 3k - 1). One `inverse_product_sum`
+  of the stored T(W_t) and T(q_i), upper half; d subtracted (computed on the fly from f).
+- Cost with U = a transform of length 2k and V = a leaf product of that length: inverse to k
+  5 U + 2 V, T(h) U, T(W_t) (B - 1) U, per block 2 U + V (q_j), U (T(q_j), not for the last)
+  and U + j V (residual): (3 + 5 B) U + (2 + B + B (B - 1) / 2) V. B = 2 is Karp and
+  Markstein's division (h to n/2, 13 U + 5 V). For n - 1 = 499999: B = 4 at k = 2^17 gives
+  23 U + 12 V, i.e. 11.5 T(2^19) + 6 LP(2^19), against 13 T + 5 LP for B = 2 at k = 2^18;
+  B = 8 at 2^16 would be 10.75 T + 9.5 LP (worse with LP ~0.7 T).
+- In place: g may be f. f is read by the inverse and the forwards of W_t first; block j reads
+  f[jk + 1, (j+1)k + 1) (d on the fly) before it writes g[jk + 1, (j+1)k + 1).
+- Scratch: 2 B buffers of length 2k (H, W_1 .. W_(B-1), q_0 .. q_(B-2), work); the inverse's
+  scratch overlaps them. The integral divides by index with `divide_by_index`, whose loader
+  reads q_j.
 - exp's step computes log g [m, 2m) for its own g (degree < m, with h = 1/g kept from the
   previous step), not log of a given f, so the two share only calculus.hpp.
 
@@ -171,6 +182,13 @@ products 1.77 and 1.69).
 - log at N = 500000 on `lc-amd`: 10.81 ms in process (phases in
   problems/polynomial/log_of_formal_power_series/notes.md): inverse to 2^18 3.89, three
   `cyclic_product`s 5.09, two forwards 1.28, calculus 0.55.
+- Blocked division (4 blocks, h to 2^17; see Log above) with a new `inverse_product_sum`:
+  10.24 vs 10.81 ms in process. `InverseProductBottom` now takes K pairs; `inverse_product` is
+  K = 1. inv's `.text` is byte-identical; exp's code moved (same size), `judge.py bench` 21
+  rounds 0.9994. Tests: `inverse_product_sum` of 1, 2, 3 pairs against cyclic products, output
+  halves, into an operand; log in place; sizes at the block boundaries (n - 1 = 3k, 3k + 1).
+  The extra leaf products of a sum cost 0.27-0.29 ms each at 2^18 (the first, with the
+  inverse, 0.51 ms in all).
 
 ## Sources
 
@@ -187,4 +205,5 @@ products 1.77 and 1.69).
   factorization", Math. Comp. 48 (1987).
 - Division with the inverse's last Newton step merged: A. Karp, P. Markstein, "High-precision
   division and square root", ACM TOMS 23 (1997) (the idea, as described by Hanrot and
-  Zimmermann above). Derived and written here; no code read.
+  Zimmermann above). The blocked form (residuals by middle products of stored transforms) is
+  the usual blockwise division; derived and written here, no code read.

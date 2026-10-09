@@ -4,7 +4,7 @@
 //   const std::size_t n = ...;
 //   poly::Arena arena(poly::Transform::words(poly::log_log(n)) + poly::log_scratch(n) + ...);
 //   poly::Transform t(arena, poly::log_log(n));
-//   poly::log(t, f, g, arena.take(poly::log_scratch(n)));  // g.size() == n; f and g do not overlap
+//   poly::log(t, f, g, arena.take(poly::log_scratch(n)));  // g.size() == n; g may be f
 #pragma once
 
 #include <immintrin.h>
@@ -26,18 +26,44 @@ namespace detail {
 // Up to this many coefficients the logarithm is computed directly.
 inline constexpr std::size_t kLogBase = 64;
 
+// q = f'/f is computed in at most this many blocks.
+inline constexpr std::size_t kLogBlocks = 4;
+
 // g = log(f) mod x^n, n = g.size() <= kLogBase, by i g_i = i f_i - sum_(0<k<i) k g_k f_(i-k).
 inline void log_direct(std::span<const std::uint32_t> f, std::span<std::uint32_t> g) {
     using ntt::detail::multiply_mod;
-    const auto coefficient = [f](std::size_t i) { return i < f.size() ? f[i] : 0; };
-    std::uint32_t inv[kLogBase] = {0, 1}, kg[kLogBase] = {};  // inv[i] = 1 / i, kg[k] = k g_k
+    std::uint32_t a[kLogBase] = {}, inv[kLogBase] = {0, 1}, kg[kLogBase] = {};  // a = f, inv[i] = 1 / i, kg[k] = k g_k
+    std::copy_n(f.begin(), std::min(f.size(), g.size()), a);
     for (std::size_t i = 2; i < g.size(); ++i) inv[i] = multiply_mod(kP - kP / std::uint32_t(i), inv[kP % i]);
     g[0] = 0;
     for (std::size_t i = 1; i < g.size(); ++i) {
-        std::uint64_t sum = multiply_mod(std::uint32_t(i), coefficient(i));  // fewer than kLogBase terms < P
-        for (std::size_t k = 1; k < i; ++k) sum += kP - std::uint64_t(kg[k]) * coefficient(i - k) % kP;
+        std::uint64_t sum = multiply_mod(std::uint32_t(i), a[i]);  // fewer than kLogBase terms <= P
+        for (std::size_t k = 1; k < i; ++k) sum += kP - std::uint64_t(kg[k]) * a[i - k] % kP;
         kg[i] = std::uint32_t(sum % kP);
         g[i] = multiply_mod(kg[i], inv[i]);
+    }
+}
+
+// Coefficients per block of q = f'/f (n - 1 of them), a power of two >= 32.
+inline std::size_t log_block(std::size_t n) {
+    return std::max<std::size_t>(32, std::bit_ceil((n - 1 + kLogBlocks - 1) / kLogBlocks));
+}
+
+inline std::size_t log_blocks(std::size_t n) { return (n - 1 + log_block(n) - 1) / log_block(n); }
+
+// out[c] = d[first + c] - out[size + c] for c < count, d = f' (coefficients of f past f.size()
+// are zero). out must not overlap f.
+inline void subtract_from_derivative(std::span<const std::uint32_t> f, std::size_t first, std::size_t count,
+                                     std::uint32_t* out, std::size_t size) {
+    const std::size_t inside = f.size() > first + 1 ? std::min(count, f.size() - first - 1) : 0, full = inside / 8 * 8;
+    Indices index(first + 1);
+    for (std::size_t c = 0; c < full; c += 8, index.next()) {
+        const Vec d = canonical(montgomery(load_unaligned(f.data() + first + 1 + c), index.value()));
+        store_unaligned(out + c, reduce(_mm256_sub_epi32(add(d, broadcast(kP)), load_unaligned(out + size + c)), kP));
+    }
+    for (std::size_t c = full; c < count; ++c) {
+        const std::uint32_t d = c < inside ? ntt::detail::multiply_mod(std::uint32_t(first + 1 + c), f[first + 1 + c]) : 0;
+        out[c] = (d + kP - out[size + c]) % kP;
     }
 }
 
@@ -45,48 +71,58 @@ inline void log_direct(std::span<const std::uint32_t> f, std::span<std::uint32_t
 
 // Transform length log uses for n coefficients: the Transform needs lg_max >= this.
 inline int log_log(std::size_t n) {
-    return std::max(Transform::kMinLog, int(std::bit_width(std::max<std::size_t>(n, 3) - 2)));
+    return n <= detail::kLogBase ? Transform::kMinLog : std::countr_zero(2 * detail::log_block(n));
 }
 
 // Scratch words for log() of n coefficients.
-inline std::size_t log_scratch(std::size_t n) { return 3 * Arena::footprint(std::size_t(1) << log_log(n)); }
+inline std::size_t log_scratch(std::size_t n) {
+    return n <= detail::kLogBase ? 0 : 2 * detail::log_blocks(n) * Arena::footprint(2 * detail::log_block(n));
+}
 
 // g = log(f) mod x^n for n = g.size() >= 1. f[0] = 1; coefficients of f past f.size() are zero.
-// f and g must not overlap. scratch: log_scratch(n) words, 32-byte aligned (from an Arena).
-// t: lg_max >= log_log(n).
+// g may be f; otherwise the two must not overlap. scratch: log_scratch(n) words, 32-byte aligned
+// (from an Arena). t: lg_max >= log_log(n).
 //
-// log f is the integral of q = f'/f mod x^(n-1). With transforms of length 2m >= n - 1, d = f'
-// and h = 1 / f mod x^m (Karp and Markstein: the division replaces the inverse's last step):
-//   q0 = d h mod x^m                    = q mod x^m
-//   e = (f q0 - d)[m, 2m)               f q0 = d mod x^m
-//   q[m, 2m) = -(h e mod x^m)
-// 8 transforms of length 2m and 3 leaf products, after the inverse to m (5 and 2 more).
+// log f is the integral of q = f'/f mod x^(n-1). q is computed in B <= 4 blocks q_j of k
+// coefficients from h = 1 / f mod x^k, with transforms of length 2k: for d = f' and
+// Q = q mod x^(jk), (d - f Q) is divisible by x^(jk), and
+//   q_j = h (d - f Q)[jk, (j+1)k) mod x^k,
+//   (f Q)[jk, (j+1)k) = sum_(i<j) (W_(j-i) q_i)[k, 2k),  W_t = f[(t-1)k, (t+1)k).
+// The sum is one inverse transform of the products of the stored transforms of W_t and q_i.
+// Cost for B = 4: the inverse to k, then 23 transforms of length 2k and 12 leaf products.
 inline void log(const Transform& t, std::span<const std::uint32_t> f, std::span<std::uint32_t> g,
                 std::span<std::uint32_t> scratch) {
     using namespace detail;
     const std::size_t n = g.size();
     if (n <= kLogBase) return log_direct(f, g);
-    const std::size_t len = std::size_t(1) << log_log(n), m = len / 2, rest = n - 1 - m;  // 0 < rest <= m
-    const std::span<std::uint32_t> ht = scratch.first(len), ft = scratch.subspan(Arena::footprint(len), len),
-                                   w = scratch.subspan(2 * Arena::footprint(len), len);
-    // d = f' at g[1, n) until q replaces it; g[1 + i] = q[i] / (1 + i).
-    const std::span<std::uint32_t> d = g.subspan(1);
-    derivative(f.first(std::min(f.size(), n)), d);
-    inverse(t, f, ht.first(m), scratch.subspan(Arena::footprint(len), inverse_scratch(m)));  // ft and w
-    t.forward(ht.first(m), 0, ht);
-    t.cyclic_product(d.first(m), 0, w, ht, Half::kLower);
-    detail::divide_by_index(1, g.subspan(1, m), [&w](std::size_t i) { return load(w.data() + i); });
-    t.forward(f.first(std::min(f.size(), len)), 0, ft);
-    t.cyclic_product(w.first(m), 0, w, ft, Half::kUpper);
-    // e at w[m, m + rest), from d[m, n - 1) = g[m + 1, n)
-    const std::size_t full = rest / 8 * 8;
-    for (std::size_t i = 0; i < full; i += 8)
-        store(w.data() + m + i, reduce(_mm256_sub_epi32(add(load(w.data() + m + i), broadcast(kP)),
-                                                        load_unaligned(g.data() + m + 1 + i)), kP));
-    for (std::size_t i = full; i < rest; ++i) w[m + i] = (w[m + i] + kP - g[m + 1 + i]) % kP;
-    t.cyclic_product(w.subspan(m, rest), m, w, ht, Half::kUpper);
-    detail::divide_by_index(m + 1, g.subspan(m + 1, rest),
-                            [&w, m](std::size_t i) { return _mm256_sub_epi32(broadcast(kP), load(w.data() + m + i)); });
+    const std::size_t k = log_block(n), len = 2 * k, blocks = log_blocks(n);
+    // Buffers: the transforms of h, W_1 .. W_(B-1), q_0 .. q_(B-2), and work space.
+    const auto buffer = [&scratch, len](std::size_t i) { return scratch.subspan(i * Arena::footprint(len), len); };
+    const std::span<std::uint32_t> ht = buffer(0), work = buffer(2 * blocks - 1);
+    const auto window = [&buffer](std::size_t t) { return buffer(t); };
+    const auto q_transform = [&buffer, blocks](std::size_t i) { return buffer(blocks + i); };
+
+    inverse(t, f, ht.first(k), scratch.subspan(Arena::footprint(len), inverse_scratch(k)));
+    t.forward(ht.first(k), 0, ht);
+    for (std::size_t s = 1; s < blocks; ++s) {
+        const std::size_t from = std::min(f.size(), (s - 1) * k);
+        t.forward(f.subspan(from, std::min(f.size() - from, len)), 0, window(s));
+    }
+    // f is read below only at indices >= jk + 1, after g[1, jk + 1) is written.
+    for (std::size_t j = 0; j < blocks; ++j) {
+        const std::size_t first = j * k, count = std::min(k, n - 1 - first);
+        if (j == 0) {
+            derivative(f.first(std::min(f.size(), count + 1)), work.first(count));
+        } else {
+            Transform::Pair pairs[kLogBlocks - 1];
+            for (std::size_t i = 0; i < j; ++i) pairs[i] = {window(j - i), q_transform(i)};
+            t.inverse_product_sum(std::span(pairs, j), work, Half::kUpper);
+            subtract_from_derivative(f, first, count, work.data(), k);
+        }
+        t.cyclic_product(work.first(count), 0, work, ht, Half::kLower);
+        if (j + 1 < blocks) t.forward(work.first(k), 0, q_transform(j));
+        detail::divide_by_index(first + 1, g.subspan(first + 1, count), [&work](std::size_t i) { return load(work.data() + i); });
+    }
     g[0] = 0;
 }
 

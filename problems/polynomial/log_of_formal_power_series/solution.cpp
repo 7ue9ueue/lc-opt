@@ -1,5 +1,5 @@
-// log(f) mod x^N, N <= 500000: Karp-Markstein division f'/f of lib/poly, output in fixed-width
-// fields (problems/convolution/convolution_mod/fields.hpp). One arena holds every array.
+// log(f) mod x^N, N <= 500000: blocked division f'/f of lib/poly, output in fixed-width fields
+// (problems/convolution/convolution_mod/fields.hpp). One arena holds every array.
 #include <unistd.h>
 
 #include "lib/io/io.hpp"
@@ -13,12 +13,12 @@ void solve() {
     const std::size_t n = in.read<std::uint32_t>();
     const int lg = poly::log_log(n);
     constexpr std::size_t kTextWords = fields::kTextBytes / sizeof(std::uint32_t);
-    poly::Arena arena(poly::Transform::words(lg) + 2 * poly::Arena::footprint(n) + poly::log_scratch(n) +
+    poly::Arena arena(poly::Transform::words(lg) + poly::Arena::footprint(n) + poly::log_scratch(n) +
                       poly::Arena::footprint(kTextWords));
     const poly::Transform transform(arena, lg);
-    const std::span<std::uint32_t> f = arena.take(n), g = arena.take(n);
-    in.read(f.data(), n);
-    poly::log(transform, f, g, arena.take(poly::log_scratch(n)));
+    const std::span<std::uint32_t> g = arena.take(n);
+    in.read(g.data(), n);
+    poly::log(transform, g, g, arena.take(poly::log_scratch(n)));  // in place
     io::Writer out;
     fields::write(out, g.data(), n, reinterpret_cast<char*>(arena.take(kTextWords).data()));
 }

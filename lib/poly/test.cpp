@@ -1,11 +1,12 @@
 // Tests for lib/poly against O(n^2) references: transforms leaf by leaf against their definition,
-// products against schoolbook multiplication, the inverse, exp, log and power against their recurrences,
+// products against schoolbook multiplication, the inverse, exp, log, power and sqrt against their recurrences,
 // coefficient-wise operations against scalar code. Long results are checked at random
 // coefficients (each an O(n) sum).
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include "lib/poly/calculus.hpp"
@@ -13,6 +14,7 @@
 #include "lib/poly/inverse.hpp"
 #include "lib/poly/log.hpp"
 #include "lib/poly/pow.hpp"
+#include "lib/poly/sqrt.hpp"
 #include "lib/poly/transform.hpp"
 
 namespace {
@@ -83,7 +85,7 @@ std::array<u32, 8> leaf(const std::vector<u32>& a, std::size_t p, const u32* roo
 }
 
 struct Fixture {
-    poly::Arena arena{2 * poly::Transform::words(kLgMax) + 20 * poly::Arena::footprint(std::size_t(1) << kLgMax)};
+    poly::Arena arena{2 * poly::Transform::words(kLgMax) + 22 * poly::Arena::footprint(std::size_t(1) << kLgMax)};
     poly::Transform t{arena, kLgMax};
     std::span<u32> buffer[4] = {arena.take(1 << kLgMax), arena.take(1 << kLgMax), arena.take(1 << kLgMax),
                                 arena.take(1 << kLgMax)};
@@ -91,6 +93,7 @@ struct Fixture {
     std::span<u32> exp_scratch = arena.take(poly::exp_scratch(std::size_t(1) << kLgMax));
     std::span<u32> log_scratch = arena.take(poly::log_scratch((std::size_t(1) << kLgMax) + 1));
     std::span<u32> power_scratch = arena.take(poly::power_scratch(std::size_t(1) << kLgMax));
+    std::span<u32> sqrt_scratch = arena.take(poly::sqrt_scratch(std::size_t(1) << kLgMax));
     std::span<u32> roots = arena.take(ntt::detail::table_words(kLgMax));  // for the leaf definition
 
     Fixture() { ntt::detail::build_table(roots.data(), (std::size_t(1) << kLgMax) / 16, ntt::detail::kRoots[0]); }
@@ -568,6 +571,67 @@ void test_power(Fixture& fx) {
     }
 }
 
+// g = sqrt(f) mod x^n with g[0] = c by the recurrence 2 c g_i = f_i - sum_(0<j<i) g_j g_(i-j).
+std::vector<u32> sqrt_reference(const std::vector<u32>& f, u32 c, std::size_t n) {
+    std::vector<u32> g(n);
+    g[0] = c;
+    const u32 inverse = power(mul(2, c), P - 2);
+    for (std::size_t i = 1; i < n; ++i) {
+        u64 s = i < f.size() ? f[i] : 0;
+        for (std::size_t j = 1; j < i; ++j) s = (s + P - u64(g[j]) * g[i - j] % P) % P;
+        g[i] = mul(u32(s), inverse);
+    }
+    return g;
+}
+
+void check_sqrt(Fixture& fx, const std::vector<u32>& f, u32 c, std::size_t n) {
+    std::vector<u32> g(n, 0xFFFFFFFF);
+    poly::sqrt(fx.t, f, c, g, fx.sqrt_scratch);
+    if (n <= 3000) {
+        expect(g == sqrt_reference(f, c, n), "sqrt", n, f.size());
+        return;
+    }
+    const std::size_t prefix = 1000;  // g mod x^m is sqrt(f) mod x^m
+    expect(std::equal(g.begin(), g.begin() + prefix, sqrt_reference(f, c, prefix).begin()), "sqrt prefix", n);
+    std::vector<std::size_t> at = {n - 1, n - 2, n / 2, n / 2 - 1, n / 2 + n / 4, n / 2 + n / 4 + 1};
+    for (int i = 0; i < 24; ++i) at.push_back(1 + pick(n - 1));
+    for (std::size_t i : at) expect(product_coefficient(g, g, i) == (i < f.size() ? f[i] : 0), "g^2 = f at coefficient", n, i);
+}
+
+// f with f[0] = c^2 for a random c != 0, and c or -c.
+std::pair<std::vector<u32>, u32> random_square(std::size_t size, int kind) {
+    auto f = random_poly(size, kind);
+    const u32 c = 1 + u32(pick(P - 1));
+    f[0] = mul(c, c);
+    return {f, pick(2) ? c : P - c};
+}
+
+void test_sqrt(Fixture& fx) {
+    for (std::size_t n = 1; n <= 160; ++n)
+        for (int kind = 0; kind < 3; ++kind) {
+            const auto [f, c] = random_square(n, kind);
+            check_sqrt(fx, f, c, n);
+        }
+    // Edge cases: f = c^2 (g = c), f = (1 - x)^2 (g = 1 - x), f shorter and longer than n; sizes
+    // where the last step needs one or two products (n - m = m/2, m/2 + 1 for m < n <= 2m).
+    for (std::size_t n : {65, 96, 97, 1000, 3000, 3072, 3073, 4096, 4097, 70000}) {
+        check_sqrt(fx, {9}, P - 3, n);
+        check_sqrt(fx, {1, P - 2, 1}, 1, n);
+        for (std::size_t size : {n / 3 + 1, 2 * n}) {
+            const auto [f, c] = random_square(size, 0);
+            check_sqrt(fx, f, c, n);
+        }
+    }
+    for (int lg = 7; lg <= kLgMax; ++lg) {
+        const std::size_t n = std::size_t(1) << lg;
+        for (std::size_t m : {n - 1, n, n + 1, 3 * n / 4, 3 * n / 4 + 1, n / 2 + pick(n / 2) + 1}) {
+            if (m > (std::size_t(1) << kLgMax)) continue;
+            const auto [f, c] = random_square(m, int(pick(3)));
+            check_sqrt(fx, f, c, m);
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -579,6 +643,7 @@ int main() {
     test_exp(fx);
     test_log(fx);
     test_power(fx);
+    test_sqrt(fx);
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

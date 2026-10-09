@@ -183,8 +183,10 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
   byte-identical `.text` and `.rodata` (judge flags, `-march=znver3`), yet CI's strict gate called
   five of them slower: aplusb 1.0104 (Xeon 6973P-C 1.026), gcd_convolution 1.0062, many_aplusb
   1.0046, convolution_mod_large 1.0006, bitwise_and_convolution 1.0001. If each passes on noise half
-  the time (a guess), all six pass 1 time in 64. Moved to `lib/io/bulk64.hpp` (`io::read_bulk`), without the input end: io.hpp
-  is unchanged and no problem is re-timed.
+  the time (a guess), all six pass 1 time in 64. Moved to `lib/io/bulk64.hpp` (`io::read_bulk`),
+  without the input end: io.hpp is unchanged and no problem is re-timed. Floors in one run,
+  `io::read_bulk` vs `Reader::read` (21 rounds): convolution_mod_2_64 0.904, convolution_F_2_64
+  0.917. Kept.
 - Bulk `uint64_t` write (pass 1 scalar: three 8-digit limbs and the digit count; pass 2 AVX2:
   20 digits for eight values, one 32-byte store per value ending at its last digit, separators
   blended in, stores right to left so each overwrites the previous one's leading bytes). In memory

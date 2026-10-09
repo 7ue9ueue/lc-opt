@@ -1,5 +1,6 @@
 // Tests for lib/io. Build: g++ -O2 -std=c++23 -march=x86-64-v3 -I. lib/io/test.cpp
 #include "lib/io/io.hpp"
+#include "lib/io/bulk64.hpp"
 
 #include <sys/wait.h>
 
@@ -205,23 +206,37 @@ void test_words() {
     ::close(fd);
 }
 
+// Value i of count for bulk tests: shape 0 typical (residues or full 64-bit), then short, random
+// length, short then long (unbalanced streams), random bit length.
+template <class T>
+T bulk_value(int shape, std::size_t i, std::size_t count) {
+    constexpr bool wide = sizeof(T) == 8;
+    switch (shape) {
+        case 0: return wide ? T(rng()) : T(rng() % 998244353);
+        case 1: return T(rng() % 10);
+        case 2: return random_value<T>();
+        case 3: return i < count / 3 ? T(rng() % 10) : T(rng());
+        default: return T(rng() >> (rng() % (wide ? 64 : 33)));
+    }
+}
+
+// The bulk read for T: Reader::read, or io::read_bulk for uint64.
+template <class T>
+void read_array(io::Reader& in, T* dst, std::size_t count) {
+    if constexpr (std::same_as<T, std::uint64_t>) io::read_bulk(in, dst, count);
+    else in.read(dst, count);
+}
+
 // Bulk reads: sizes around the chunk threshold, uneven token lengths across a chunk (unbalanced
 // streams), irregular whitespace (fallback path), and scalar reads before and after.
+template <class T>
 void test_bulk() {
     const std::size_t threshold = (std::size_t(1) << 16) + 64;
     for (const std::size_t count : {std::size_t(0), std::size_t(1), std::size_t(1000), threshold,
                                     threshold + 1, std::size_t(200000), std::size_t(1) << 20})
         for (int shape = 0; shape < 6; ++shape) {
-            std::vector<std::uint32_t> v(count);
-            for (std::size_t i = 0; i < count; ++i) {
-                switch (shape) {
-                    case 0: v[i] = std::uint32_t(rng() % 998244353); break;
-                    case 1: v[i] = std::uint32_t(rng() % 10); break;
-                    case 2: v[i] = random_value<std::uint32_t>(); break;
-                    case 3: v[i] = i < count / 3 ? std::uint32_t(rng() % 10) : std::uint32_t(rng()); break;
-                    default: v[i] = std::uint32_t(rng() >> (rng() % 33)); break;
-                }
-            }
+            std::vector<T> v(count);
+            for (std::size_t i = 0; i < count; ++i) v[i] = bulk_value<T>(shape, i, count);
             std::string text = "7 ";
             for (std::size_t i = 0; i < count; ++i) {
                 text += text_of(v[i]);
@@ -233,14 +248,14 @@ void test_bulk() {
                 const int fd = pipe ? pipe_with(text) : file_with(text);
                 io::Reader in(fd);
                 CHECK(in.read<int>() == 7);
-                std::vector<std::uint32_t> got(count + 1, 0xDEADBEEF);
-                in.read(got.data(), count);
+                std::vector<T> got(count + 1, T(0xDEADBEEF));
+                read_array(in, got.data(), count);
                 for (std::size_t i = 0; i < count; ++i)
                     if (got[i] != v[i]) {
                         CHECK(got[i] == v[i]);
                         break;
                     }
-                CHECK(got[count] == 0xDEADBEEF);
+                CHECK(got[count] == T(0xDEADBEEF));
                 CHECK(in.read<long long>() == -5);
                 ::close(fd);
             }
@@ -249,21 +264,44 @@ void test_bulk() {
 }
 
 // Consecutive bulk reads must hand over the cursor exactly.
+template <class T>
 void test_bulk_split() {
-    std::vector<std::uint32_t> v(300000);
-    for (auto& x : v) x = std::uint32_t(rng() % 1000000000);
+    std::vector<T> v(300000);
+    for (auto& x : v) x = bulk_value<T>(0, 0, 0);
     const std::string text = join(v, false);
     const int fd = file_with(text);
     io::Reader in(fd);
-    std::vector<std::uint32_t> got(v.size());
+    std::vector<T> got(v.size());
     std::size_t done = 0;
     for (const std::size_t part : {std::size_t(70000), std::size_t(5), std::size_t(100000), std::size_t(1)}) {
-        in.read(got.data() + done, part);
+        read_array(in, got.data() + done, part);
         done += part;
     }
-    in.read(got.data() + done, v.size() - done);
+    read_array(in, got.data() + done, v.size() - done);
     CHECK(got == v);
     ::close(fd);
+}
+
+// A uint64 array that ends the input, without a final separator. With one-digit tokens it is as
+// short as count tokens can be, which bounds the parser's loads.
+void test_bulk64_at_end() {
+    for (const std::size_t count : {std::size_t(1024), std::size_t(1025), std::size_t(70001), std::size_t(1) << 20})
+        for (const bool wide : {false, true}) {
+            std::vector<std::uint64_t> v(count);
+            for (auto& x : v) x = wide ? rng() | std::uint64_t(1) << 63 : rng() % 10;
+            std::string text = std::to_string(count) + "\n";
+            for (std::size_t i = 0; i < count; ++i) text += text_of(v[i]) + (i + 1 < count ? " " : "");
+            for (const bool pipe : {false, true}) {
+                const int fd = pipe ? pipe_with(text) : file_with(text);
+                io::Reader in(fd);
+                CHECK(in.read<std::size_t>() == count);
+                std::vector<std::uint64_t> got(count);
+                io::read_bulk(in, got.data(), count);
+                CHECK(got == v);
+                ::close(fd);
+            }
+        }
+    reap();
 }
 
 std::string read_all(int fd) {
@@ -367,27 +405,37 @@ void test_vector_arithmetic() {
     }
 }
 
+// Writes v with write_array between brackets and appends the expected text.
+template <class T>
+void write_array_of(io::Writer& out, const std::vector<T>& v, char separator, std::string& expected) {
+    out.write('[');
+    out.write_array(v.data(), v.size(), separator);
+    out.write(']');
+    expected += '[';
+    for (std::size_t i = 0; i < v.size(); ++i) expected += text_of(v[i]) + (i + 1 < v.size() ? std::string(1, separator) : "");
+    expected += ']';
+}
+
 void test_write_array() {
     const int fd = file_with("");
     std::string expected;
     {
         io::Writer out(fd);
         for (std::size_t count : {0, 1, 7, 8, 9, 16, 17, 100, 300000}) {
+            const char separator = count % 2 ? ' ' : '\n';
             std::vector<std::uint32_t> v(count);
             for (auto& x : v) x = rng() % 3 ? random_value<std::uint32_t>() : std::uint32_t(rng() % 10);
             if (count == 300000)
                 for (std::size_t i = 0; i < 4000; ++i) v[i] = i % 2 ? 4294967295u : 0;
-            const char separator = count % 2 ? ' ' : '\n';
-            out.write('[');
-            out.write_array(v.data(), v.size(), separator);
-            out.write(']');
-            expected += '[';
-            for (std::size_t i = 0; i < count; ++i) expected += text_of(v[i]) + (i + 1 < count ? std::string(1, separator) : "");
-            expected += ']';
+            write_array_of(out, v, separator, expected);
+            std::vector<std::uint64_t> u(count);
+            for (auto& x : u) x = rng() % 3 ? random_value<std::uint64_t>() : rng() % 2 ? rng() : rng() % 10;
+            if (count == 300000)
+                for (std::size_t i = 0; i < 4000; ++i) u[i] = i % 2 ? 18446744073709551615u : i % 3;
+            write_array_of(out, u, separator, expected);
             std::vector<long long> w(count);
             for (auto& x : w) x = random_value<long long>();
-            out.write_array(w.data(), w.size(), ',');
-            for (std::size_t i = 0; i < count; ++i) expected += text_of(w[i]) + (i + 1 < count ? "," : "");
+            write_array_of(out, w, ',', expected);
         }
     }
     CHECK(read_all(fd) == expected);
@@ -407,8 +455,11 @@ int main() {
     test_padding();
     test_scan();
     test_words();
-    test_bulk();
-    test_bulk_split();
+    test_bulk<std::uint32_t>();
+    test_bulk<std::uint64_t>();
+    test_bulk_split<std::uint32_t>();
+    test_bulk_split<std::uint64_t>();
+    test_bulk64_at_end();
     test_max_digits();
     test_writer();
     test_vector_arithmetic();

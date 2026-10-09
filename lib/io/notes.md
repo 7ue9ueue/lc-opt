@@ -1,7 +1,8 @@
 # lib/io
 
 Input and output for every submission. API and usage: the header of `io.hpp`.
-Tests: `lib/io/test.cpp`. In-memory timing: `lib/io/bench.cpp`.
+Tests: `lib/io/test.cpp`. In-memory timing: `lib/io/bench.cpp`. Whole-process floors of the
+convolution problems: `problems/convolution/floor.py`.
 
 ## Design
 
@@ -17,6 +18,13 @@ Tests: `lib/io/test.cpp`. In-memory timing: `lib/io/bench.cpp`.
 - Bulk `uint32_t` read: 128 KiB chunks cut into four streams at token boundaries, parsed in lockstep
   two tokens per step. Chunks shrink near the end of the array; the last < 1024 tokens use the
   scalar path. Irregular whitespace in a chunk falls back to one token at a time.
+- Bulk `uint64_t` read (`bulk64.hpp`, `io::read_bulk(in, dst, n)`): the same chunks and streams.
+  A step finds two tokens in the separator mask of the 64 bytes at a stream's position; each
+  token's digits are the 32 bytes that end at it, minus a row of `kDigitMask` (0xFF before the
+  token, '0' in it) with unsigned saturation. Values are 8-digit limbs joined in vectors:
+  top * 10^16 + mid * 10^8 + low. It needs no input end: n tokens span at least 2n - 1 bytes,
+  which bounds chunks and loads. It works through `Reader::scan()`/`resume()` and has its own
+  header so that io.hpp, and the code of every problem bundled from it, stays unchanged.
 - Output: 64 KiB buffer, `write(2)`. Integers: 4-digit table (10000 entries), groups placed in a
   vector, `pshufb` drops the leading zeros, one 16-byte store. Digit count from a 32-entry table
   (32-bit) or two 65-entry tables (64-bit). No branches on value size. `write<MaxDigits>()` with
@@ -32,14 +40,15 @@ In memory, ns per token, median of 15 rounds of 2^20 tokens (`bench.cpp`):
 
 | Input | read | bulk read | write | bulk write |
 |---|---|---|---|---|
-| uint32 < 998244353 | 2.06 | 2.26 | 3.83 | 2.53 |
+| uint32 < 998244353 | 2.07 | 2.27 | 3.80 | 2.53 |
 | uint32 0..9 | 1.59 | 2.11 | 3.69 | 2.47 |
-| uint32, random bit length | 2.19 | 2.27 | 3.88 | 2.54 |
-| uint64 <= 10^18 | 2.97 | | 5.28 | |
-| uint64 < 10^16 | 2.95 | | 5.26 | |
-| uint64 < 10^16, MaxDigits 16 | 2.27 | | 4.03 | |
-| int64, random | 3.29 | | 6.04 | |
-| int, random sign | 2.19 | | 4.60 | |
+| uint32, random bit length | 2.18 | 2.27 | 3.81 | 2.53 |
+| uint64, full range | 2.98 | 3.91 | 5.31 | |
+| uint64 <= 10^18 | 2.97 | 3.90 | 5.33 | |
+| uint64 < 10^16 | 2.95 | 3.88 | 5.30 | |
+| uint64 < 10^16, MaxDigits 16 | 2.26 | 3.87 | 4.05 | |
+| int64, random | 3.28 | | 5.95 | |
+| int, random sign | 2.18 | | 4.60 | |
 
 Whole process, judge-like runner, ms, median of 21 rounds, max over the 3 largest cases:
 
@@ -54,6 +63,37 @@ Whole process, judge-like runner, ms, median of 21 rounds, max over the 3 larges
 | many_aplusb: lib/io, one value at a time | 31.90 |
 | many_aplusb: decimal addition in vectors (its `main.cpp`; record 23 ms) | 21.12 |
 | aplusb: `scanf`/`printf` vs lib/io, ratio | 0.99 |
+
+Floors (`problems/convolution/floor.py`, 11 rounds): read the slowest test's input, write an
+answer of the same length, nothing else. Arrays in huge pages; "fixed" prints 9-character fields
+(`problems/convolution/fixed_width.hpp`, judge-specific) where every value is below 10^9. Record:
+the fastest judged time when the problem's issue was opened. 2_64 rows: 21 rounds.
+
+| Problem | in / out MB | floor ms | fixed ms | record ms | best floor / record |
+|---|---|---|---|---|---|
+| convolution_mod | 10.5 / 10.4 | 11.00 | 9.61 | 14 | 69% |
+| convolution_mod_1000000007 | 10.5 / 10.4 | 10.97 | | 29 | 38% |
+| convolution_mod_large | 335.5 / 331.8 | 284.0 | 230.1 | 452 | 51% |
+| convolution_mod_2_64 | 22.0 / 21.4 | 18.67 | | 76 | 25% |
+| convolution_F_2_64 | 22.0 / 21.4 | 18.94 | | 409 | 5% |
+| min_plus_convolution_convex_convex | 10.5 / 11.5 | 11.31 | | 20 | 57% |
+| min_plus_convolution_convex_arbitrary | 10.5 / 11.0 | 11.36 | | 38 | 30% |
+| min_plus_convolution_concave_arbitrary | 10.4 / 11.0 | 11.58 | | 117 | 10% |
+| bitwise_and_convolution | 20.7 / 10.4 | 13.53 | 11.88 | 26 | 46% |
+| bitwise_xor_convolution | 20.7 / 10.4 | 13.39 | 11.76 | 25 | 47% |
+| mul_mod2n_convolution | 20.7 / 10.4 | 13.15 | 11.87 | 81 | 15% |
+| gcd_convolution | 19.8 / 9.9 | 12.71 | 11.19 | 37 | 30% |
+| lcm_convolution | 19.8 / 9.9 | 12.66 | 11.57 | 37 | 31% |
+| mul_modp_convolution | 10.4 / 5.2 | 7.29 | 6.46 | 45 | 14% |
+| multivariate_convolution | 5.2 / 2.6 | 4.19 | 3.89 | 117 | 3% |
+| multivariate_convolution_cyclic | 5.2 / 2.6 | 4.18 | 3.88 | 117 | 3% |
+
+The 2_64 rows use the bulk uint64 read (main: 19.87 and 20.52). bitwise_and_convolution's own
+floor (its notes) is 11.91 ms, against 11.88 here.
+
+The 64-bit bulk read loses in `bench.cpp` (21 MB of text streamed from memory) but wins on warm
+input (`BulkParser64::parse` 1.6 ns per token for 2^14..2^20 tokens, a scalar chain of separator
+and `parse_ending24` 5.0) and in the whole process (below).
 
 The old code prints every value in 10 columns (the checker allows it), about 1.1 ns per value.
 That is a judge-specific trick: it belongs in a problem's `main.cpp`, not here.
@@ -129,6 +169,35 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
   to `write(std::string_view)`, which sends strings longer than the buffer straight to `write(2)`:
   output 144.3 ms. Large outputs need no Writer change.
 
+2026-10-09, claude, issue #21 round 1 (`lc-amd`, judge flags; floors with `floor.py`, ratio to main):
+- I/O floor harness (`problems/convolution/floor.cpp`, `floor.py`): reads a problem's input and
+  writes an answer of the same length and value range; times it on the 3 largest tests, several
+  io.hpp versions in one run. Table under Floors. Its first version kept a and b in `new[]` arrays:
+  floors 1.9 to 63 ms higher (convolution_mod 12.93, bitwise_and 16.95, convolution_mod_large 347
+  ms), page faults on 4 KiB pages. Now one 2 MiB-aligned `MADV_HUGEPAGE` mapping, as the solutions do.
+- Bulk `uint64_t` read (`BulkParser64`) as a branch of `Reader::read`, floor ratios to main (21
+  rounds): convolution_mod_2_64 0.941 (19.87 → 18.67 ms), convolution_F_2_64 0.913 (20.52 →
+  18.94); a control without it 1.002 and 1.011. With the first harness: 0.927 and 0.930. All 95
+  official inputs of both problems parse the same as one token at a time.
+- In io.hpp (PR #46) it changed every bundled `main.cpp`. The six problems on lib/io compiled to
+  byte-identical `.text` and `.rodata` (judge flags, `-march=znver3`), yet CI's strict gate called
+  five of them slower: aplusb 1.0104 (Xeon 6973P-C 1.026), gcd_convolution 1.0062, many_aplusb
+  1.0046, convolution_mod_large 1.0006, bitwise_and_convolution 1.0001. If each passes on noise half
+  the time (a guess), all six pass 1 time in 64. Moved to `lib/io/bulk64.hpp` (`io::read_bulk`),
+  without the input end: io.hpp is unchanged and no problem is re-timed. Floors in one run,
+  `io::read_bulk` vs `Reader::read` (21 rounds): convolution_mod_2_64 0.904, convolution_F_2_64
+  0.917. Kept.
+- Bulk `uint64_t` write (pass 1 scalar: three 8-digit limbs and the digit count; pass 2 AVX2:
+  20 digits for eight values, one 32-byte store per value ending at its last digit, separators
+  blended in, stores right to left so each overwrites the previous one's leading bytes). In memory
+  5.16 vs 5.31 ns per value; floor of convolution_mod_2_64 with it 0.953, without it 0.903, scalar
+  read with it 1.040. Removed: `write_array` writes uint64 one value at a time.
+- Chunk size of the 64-bit parser, floor ratios on 2_64 and F_2_64: 2^17 0.927 and 0.930, 2^16
+  0.934 and 0.951, 2^15 0.928 and 0.938, 2^14 0.952 and 0.949, 2^13 0.990 and 0.999. Kept 2^17.
+- Chunk size of the 32-bit parser (convolution_mod, bitwise_xor_convolution, min_plus convex_convex;
+  41 rounds, control: a copy of main): 2^15 1.013, 1.014, 0.999; 2^16 1.011, 1.007, 1.008;
+  control 1.005, 1.009, 0.992. A first run of 21 rounds had shown 0.95 for 2^15: noise. Kept 2^17.
+
 ## Sources
 
 - Our own QPoly explorations 007 and 011 (`../SymPoly/work/ntt/io_yosupo`, `io_large`): the
@@ -144,4 +213,10 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
 
 - Bulk write is 1.3 ns per value slower than fixed-width output; the vector work, not the stores,
   is the limit (in-memory: compute 1.4, with movemask 1.7, full 2.4 ns per value).
-- Bulk reads for 64-bit and signed values.
+- Bulk reads for signed values.
+- Fold `io::read_bulk` into `Reader::read` when io.hpp changes anyway, with gains that outweigh
+  the noise of re-timing every problem.
+- A faster uint64 write: only if a problem's floor becomes a large share of its time
+  (convolution_mod_2_64 and convolution_F_2_64 are at 25% and 5% now).
+- Huge-page arrays (2 MiB-aligned mapping, `MADV_HUGEPAGE`) are copied in three solutions and cut
+  floors by 15-20%: a shared helper may belong in `lib/`.

@@ -3192,17 +3192,38 @@ public:
         ntt::detail::build_table(inverse_roots_, (std::size_t(1) << lg) / 16, ntt::detail::kRoots[1]);
     }
 
-    // Canonical f -> its leaves, canonical; with ext, leaf v goes to ext[2v + 1] and w times it to
-    // ext[2v] instead. ext may be f - nv: leaves are written in order, behind the unread input.
-    void forward(Vec* f, std::size_t nv, Vec* ext) const {
+    // Canonical f -> its leaves, canonical. top_done: f is canonical after the top layer
+    // (radix 2 if nv is 2 4^j, else radix 4; see top_layer).
+    void forward(Vec* f, std::size_t nv, bool top_done) const {
         if (std::countr_zero(nv) % 2) {
             const std::size_t h = nv / 2;
-            ntt::detail::forward_radix2(f, h, false);
-            visit(f, h, 0, ext);
-            visit(f + h, h, 1, ext);
+            if (!top_done) ntt::detail::forward_radix2(f, h, false);
+            visit(f, h, 0);
+            visit(f + h, h, 1);
+        } else if (top_done) {
+            const std::size_t h = nv / 4;
+            for (std::size_t t = 0; t < 4; ++t) visit(f + t * h, h, t);
         } else {
-            visit(f, nv, 0, ext);
+            visit(f, nv, 0);
         }
+    }
+
+    // sqrt(-1) of the radix-4 top layer.
+    Factor top_root() const { return Factor(roots_[1], roots_[9]); }
+
+    // Canonical leaves of a transform of nv >= 4 vectors -> its input folded to 32 words,
+    // canonical: the first four leaves are the transform of the fold.
+    void fold(const Vec* leaves, u32* out) const {
+        Vec f[4] = {leaves[0], leaves[1], leaves[2], leaves[3]};
+        last_inverse(f, 0);  // 4 times the fold
+        const Factor quarter(ntt::detail::power(4, kP - 2));
+        for (int t = 0; t < 4; ++t) _mm256_storeu_si256(reinterpret_cast<Vec*>(out + 8 * t), reduce(multiply(f[t], quarter), kP));
+    }
+
+    // w of leaf v as a factor.
+    Factor leaf_weight(std::size_t v) const {
+        const u32* y = roots_ + slot(v / 4 * 2) + v / 2 % 2;
+        return v % 2 ? Factor(kP - y[0], ~y[8]) : Factor(y[0], y[8]);  // q(P - w) = ~q(w)
     }
 
     // Leaves < 2P -> scale times the inverse transform, canonical. The inverse alone multiplies
@@ -3225,14 +3246,14 @@ public:
 
 private:
     // Group k at stride h = nv / 4, then its children 4k + t.
-    void visit(Vec* f, std::size_t nv, std::size_t k, Vec* ext) const {
-        if (nv == 4) return last_forward(f, k, ext);
+    void visit(Vec* f, std::size_t nv, std::size_t k) const {
+        if (nv == 4) return last_forward(f, k);
         const std::size_t h = nv / 4;
         if (k == 0)
             ntt::kernels::forward_identity(f, h, roots_);
         else
             ntt::kernels::forward(f, h, roots_ + slot(k), roots_ + slot(2 * k));
-        for (std::size_t t = 0; t < 4; ++t) visit(f + t * h, h, 4 * k + t, ext);
+        for (std::size_t t = 0; t < 4; ++t) visit(f + t * h, h, 4 * k + t);
     }
 
     void inverse_visit(Vec* f, std::size_t nv, std::size_t k) const {
@@ -3246,24 +3267,17 @@ private:
     }
 
     // Group k with h = 1 (vectors 4k..4k + 3), inputs < 4P: the kernels need h even.
-    void last_forward(Vec* f, std::size_t k, Vec* ext) const {
+    void last_forward(Vec* f, std::size_t k) const {
         const u32 *x = roots_ + slot(k), *y = roots_ + slot(2 * k);
         const Factor fx(x[0], x[8]), fy(y[0], y[8]), fz(y[1], y[9]);
         const Vec f0 = reduce(f[0], 2 * kP), f1 = reduce(f[1], 2 * kP);
         const Vec xf2 = multiply(f[2], fx), xf3 = multiply(f[3], fx);  // < 2P
         const Vec a = reduce(add(f0, xf2), 2 * kP), c = reduce(diff(f0, xf2), 2 * kP);
         const Vec yb = multiply(add(f1, xf3), fy), zd = multiply(diff(f1, xf3), fz);
-        const Vec leaf[4] = {canonical(add(a, yb)), canonical(diff(a, yb)), canonical(add(c, zd)),
-                             canonical(diff(c, zd))};
-        if (!ext) {
-            for (int t = 0; t < 4; ++t) f[t] = leaf[t];
-            return;
-        }
-        const Factor w[4] = {fy, Factor(kP - y[0], ~y[8]), fz, Factor(kP - y[1], ~y[9])};  // q(P - w) = ~q(w)
-        for (int t = 0; t < 4; ++t) {
-            ext[8 * k + 2 * t] = reduce(multiply(leaf[t], w[t]), kP);
-            ext[8 * k + 2 * t + 1] = leaf[t];
-        }
+        f[0] = canonical(add(a, yb));
+        f[1] = canonical(diff(a, yb));
+        f[2] = canonical(add(c, zd));
+        f[3] = canonical(diff(c, zd));
     }
 
     // Inverse of group k with h = 1, inputs and outputs < 2P.
@@ -3287,17 +3301,29 @@ Vec montgomery(Vec t) {
     return _mm256_add_epi64(t, _mm256_mul_epu32(m, broadcast(kP)));
 }
 
-// x y 2^-32 mod (z^8 - w), < 2P. ext = [w x, x], y: canonical leaves.
-Vec leaf_product(const Vec* ext, const Vec* y) {
-    const auto* window = reinterpret_cast<const u32*>(ext);  // z^j x = window [8 - j, 16 - j)
-    const auto* yw = reinterpret_cast<const u32*>(y);
-    Vec even = _mm256_setzero_si256(), odd = even;  // sums of 8 products < 8 P^2
+// 64-bit lanes t < 4P 2^32 -> t mod 2P 2^32 in [0, 2P 2^32), by the high dword alone.
+Vec reduce_high(Vec t) {
+    const Vec high_2p = _mm256_set1_epi64x(static_cast<long long>(2 * kP) << 32);
+    return _mm256_min_epu32(t, _mm256_sub_epi32(t, high_2p));
+}
+
+// Sums of 64-bit products of x y mod (z^8 - w): coefficients 2i in even, 2i + 1 in odd. Both
+// below 2P 2^32 on entry and exit: a product adds under 8 P^2 < 2P 2^32.
+// window = [w x, x], y: canonical leaves.
+void multiply_add(const u32* window, const u32* y, Vec& even, Vec& odd) {  // z^j x = window [8 - j, 16 - j)
+#pragma GCC unroll 8
     for (int j = 0; j < 8; ++j) {
-        const Vec yj = broadcast(yw[j]);
+        const Vec yj = broadcast(y[j]);
         even = _mm256_add_epi64(even, _mm256_mul_epu32(_mm256_loadu_si256(reinterpret_cast<const Vec*>(window + 8 - j)), yj));
         odd = _mm256_add_epi64(odd, _mm256_mul_epu32(_mm256_loadu_si256(reinterpret_cast<const Vec*>(window + 9 - j)), yj));
     }
-    const Vec r = _mm256_blend_epi32(_mm256_srli_epi64(montgomery(even), 32), montgomery(odd), 0xAA);  // < 2.9P
+    even = reduce_high(even);
+    odd = reduce_high(odd);
+}
+
+// Sums of multiply_add -> their value times 2^-32 mod P, < 2P.
+Vec finish(Vec even, Vec odd) {
+    const Vec r = _mm256_blend_epi32(_mm256_srli_epi64(montgomery(even), 32), montgomery(odd), 0xAA);  // < 3P
     return reduce(r, 2 * kP);
 }
 
@@ -3306,19 +3332,21 @@ struct Level {
     std::size_t length = 0;     // L, 0 for M < 2
     u32 sum = 0;                // sum of the level's values mod P
     u32 fold[2][kFold] = {};    // [+], [-] folded to min(L, kFold) words
-    u32* part[2] = {};          // L > kFold: [+], [-], then their leaves (factor b)
-    Vec* ext[2] = {};           // factor a, L > kFold: leaves as [w x, x]; part is its upper half
+    u32* part[2] = {};          // L > kFold: [+], [-], then their leaves; for b, then c's leaves
 };
 
 bool transformed(const Level& level) { return level.length > kFold; }
 
 // Level s of x (2^n values) by sign and discrete log.
-// Levels with M >= kBlockedLog are permuted through rows: the odd values of x[0, 2^M) as
-// rows[t][h] = x[2t + 1 + 2^b h], t < 2^(b-1), h < 2^kRowLog, b = M - kRowLog. With
-// k = k_lo + 2^(b-2) k_hi, 5^k = 5^k_lo G^k_hi, G = 5^(2^(b-2)) = 1 mod 2^b: the row of +-5^k
-// depends on k_lo alone, so eight consecutive k_lo use 16 rows (16 KiB) for all k_hi.
+// For n >= kBlockedLog, x is held transposed: grid[c][h] = x[c + 2^B h], c < 2^B, h < kHeight,
+// B = n - kRowLog, rows kPitch words apart. Level s (M = n - s >= kBlockedLog, b = M - kRowLog)
+// has y[u] = x[2^s u] in row 2^s (u mod 2^b), column u >> b. With k = k_lo + 2^(b-2) k_hi,
+// 5^k = 5^k_lo G^k_hi, G = 5^(2^(b-2)) = 1 mod 2^b: the row of +-5^k depends on k_lo alone, so
+// eight consecutive k_lo use 16 rows (17 KiB) for all k_hi.
 constexpr int kBlockedLog = 13;
 constexpr int kRowLog = 8;
+constexpr std::size_t kHeight = std::size_t(1) << kRowLog;
+constexpr std::size_t kPitch = kHeight + 16;  // rows 2^s apart start in different L1 sets
 
 Vec load(const u32* p) { return _mm256_loadu_si256(reinterpret_cast<const Vec*>(p)); }
 void store(u32* p, Vec x) { _mm256_storeu_si256(reinterpret_cast<Vec*>(p), x); }
@@ -3350,56 +3378,34 @@ void transpose(Vec (&r)[8]) {
     }
 }
 
-// Words 1, 3, ..., 15 (odd) or 0, 2, ..., 14 of [lo, hi].
-template <int Control>
-Vec alternate_words(Vec lo, Vec hi) {
-    const __m256 w = _mm256_shuffle_ps(_mm256_castsi256_ps(lo), _mm256_castsi256_ps(hi), Control);
-    return _mm256_permute4x64_epi64(_mm256_castps_si256(w), 0xD8);
-}
+constexpr std::size_t kBand = 16;  // rows of x per pass: one cache line of each grid row
 
-constexpr std::size_t kBand = 16;  // rows of x per pass: whole cache lines of rows
-
-std::size_t row_width(int m) { return std::size_t(1) << (m - kRowLog); }
-
-// Rows [first, first + kBand) of x (band) -> their odd values into rows, x[2i] to evens[i].
-void to_rows(const u32* band, int m, std::size_t first, u32* rows, u32* evens) {
-    const std::size_t width = row_width(m), height = std::size_t(1) << kRowLog;
-    for (std::size_t c = 0; c < width; c += 16)
+// Rows [first, first + kBand) of x (band, width = 2^B words each) -> their grid columns.
+void to_grid(const u32* band, std::size_t width, std::size_t first, u32* grid) {
+    for (std::size_t c = 0; c < width; c += 8)
         for (std::size_t h = 0; h < kBand; h += 8) {
-            Vec odd[8];
-            for (std::size_t r = 0; r < 8; ++r) {
-                const u32* p = band + (h + r) * width + c;
-                const Vec lo = load(p), hi = load(p + 8);
-                odd[r] = alternate_words<0xDD>(lo, hi);
-                store(evens + (first + h + r) * width / 2 + c / 2, alternate_words<0x88>(lo, hi));
-            }
-            transpose(odd);
-            for (std::size_t i = 0; i < 8; ++i) store(rows + (c / 2 + i) * height + first + h, odd[i]);
+            Vec r[8];
+            for (std::size_t i = 0; i < 8; ++i) r[i] = load(band + (h + i) * width + c);
+            transpose(r);
+            for (std::size_t i = 0; i < 8; ++i) store(grid + (c + i) * kPitch + first + h, r[i]);
         }
 }
 
-// Inverse of to_rows.
-void from_rows(const u32* rows, const u32* evens, int m, std::size_t first, u32* band) {
-    const std::size_t width = row_width(m), height = std::size_t(1) << kRowLog;
-    for (std::size_t c = 0; c < width; c += 16)
+// Inverse of to_grid.
+void from_grid(const u32* grid, std::size_t width, std::size_t first, u32* band) {
+    for (std::size_t c = 0; c < width; c += 8)
         for (std::size_t h = 0; h < kBand; h += 8) {
-            Vec odd[8];
-            for (std::size_t i = 0; i < 8; ++i) odd[i] = load(rows + (c / 2 + i) * height + first + h);
-            transpose(odd);
-            for (std::size_t r = 0; r < 8; ++r) {
-                const Vec e = _mm256_permute4x64_epi64(load(evens + (first + h + r) * width / 2 + c / 2), 0xD8);
-                const Vec o = _mm256_permute4x64_epi64(odd[r], 0xD8);
-                u32* p = band + (h + r) * width + c;
-                store(p, _mm256_unpacklo_epi32(e, o));
-                store(p + 8, _mm256_unpackhi_epi32(e, o));
-            }
+            Vec r[8];
+            for (std::size_t i = 0; i < 8; ++i) r[i] = load(grid + (c + i) * kPitch + first + h);
+            transpose(r);
+            for (std::size_t i = 0; i < 8; ++i) store(band + (h + i) * width + c, r[i]);
         }
 }
 
-// Row and column offsets of +-5^k for eight consecutive k_lo, stepping k_hi.
+// Grid offsets of +-5^k (level s, M = m) for eight consecutive k_lo, stepping k_hi.
 class UnitWalk {
 public:
-    UnitWalk(int m, std::size_t k_lo) : b_(m - kRowLog), mask_(broadcast((u32(1) << m) - 1)) {
+    UnitWalk(int m, int s, std::size_t k_lo) : b_(m - kRowLog), mask_(broadcast((u32(1) << m) - 1)) {
         const u32 mask = (u32(1) << m) - 1;
         u32 g = 5, p = 1;
         for (int i = 0; i < b_ - 2; ++i) g = g * g & mask;
@@ -3408,117 +3414,159 @@ public:
         for (u32& lane : lanes) lane = p, p = p * 5 & mask;
         unit_ = _mm256_load_si256(reinterpret_cast<const Vec*>(lanes));
         step_ = broadcast(g);
-        const Vec t = _mm256_srli_epi32(_mm256_and_si256(unit_, broadcast((u32(1) << b_) - 1)), 1);
-        row_pos_ = _mm256_slli_epi32(t, kRowLog);
-        row_neg_ = _mm256_sub_epi32(broadcast(((u32(1) << (b_ - 1)) - 1) << kRowLog), row_pos_);
+        const Vec low = _mm256_and_si256(unit_, broadcast((u32(1) << b_) - 1));  // odd: -u has 2^b - low
+        row_pos_ = _mm256_mullo_epi32(_mm256_slli_epi32(low, s), broadcast(kPitch));
+        row_neg_ = _mm256_mullo_epi32(_mm256_slli_epi32(_mm256_sub_epi32(broadcast(u32(1) << b_), low), s), broadcast(kPitch));
+        row_neg_ = _mm256_add_epi32(row_neg_, broadcast(kHeight - 1));
     }
 
-    // Offsets in rows of 5^k and -5^k for the current k_hi; then the next k_hi.
-    Vec positive() const { return _mm256_add_epi32(row_pos_, _mm256_srli_epi32(unit_, b_)); }
-    Vec negative() const {
-        return _mm256_sub_epi32(_mm256_add_epi32(row_neg_, broadcast((u32(1) << kRowLog) - 1)), _mm256_srli_epi32(unit_, b_));
-    }
+    // 5^k for the current k_hi; c times it, for c = 1 mod 2^b; the next k_hi.
+    Vec unit() const { return unit_; }
+    Vec times(u32 c) const { return _mm256_and_si256(_mm256_mullo_epi32(unit_, broadcast(c)), mask_); }
     void next() { unit_ = _mm256_and_si256(_mm256_mullo_epi32(unit_, step_), mask_); }
+
+    // G^e mod 2^m, G = 5^(2^(b-2)) the step.
+    u32 step_power(std::size_t e) const {
+        const u32 mask = u32(_mm256_cvtsi256_si32(mask_)), g = u32(_mm256_cvtsi256_si32(step_));
+        u32 r = 1;
+        for (std::size_t i = 0; i < e; ++i) r = r * g & mask;
+        return r;
+    }
+
+    // Offsets of u and -u, for u = 5^k times a power of the step.
+    Vec positive(Vec u) const { return _mm256_add_epi32(row_pos_, _mm256_srli_epi32(u, b_)); }
+    Vec negative(Vec u) const { return _mm256_sub_epi32(row_neg_, _mm256_srli_epi32(u, b_)); }
 
 private:
     int b_;
     Vec mask_, unit_, step_, row_pos_, row_neg_;
 };
 
-// Rows of level m -> plus[k], minus[k] = x(5^k) +- x(-5^k), k < 2^(m-2).
-void gather_units(const u32* rows, int m, u32* plus, u32* minus) {
-    const std::size_t stride = std::size_t(1) << (m - kRowLog - 2), height = std::size_t(1) << kRowLog;
-    const auto* base = reinterpret_cast<const int*>(rows);
+// The top layer of Transform::forward on Ways canonical vectors at stride nv / Ways (Ways = 2:
+// x^(8 nv) - 1 = (x^(4 nv) - 1)(x^(4 nv) + 1); Ways = 4: group 0 of the radix-4 tree), canonical.
+template <int Ways>
+void top_layer(Vec (&f)[Ways], const Factor& z) {
+    if constexpr (Ways == 2) {
+        const Vec x = f[0], y = f[1];
+        f[0] = add_canonical(x, y);
+        f[1] = sub_canonical(x, y);
+    } else {
+        const Vec s02 = add_canonical(f[0], f[2]), d02 = sub_canonical(f[0], f[2]);
+        const Vec s13 = add_canonical(f[1], f[3]), zd13 = reduce(multiply(sub_canonical(f[1], f[3]), z), kP);
+        f[0] = add_canonical(s02, s13);
+        f[1] = sub_canonical(s02, s13);
+        f[2] = add_canonical(d02, zd13);
+        f[3] = sub_canonical(d02, zd13);
+    }
+}
+
+// Level s (M = m) of the grid -> plus[k], minus[k] = y(5^k) +- y(-5^k), k < 2^(m-2), after
+// top_layer<Ways>. k = k_lo + stride k_hi: the top layer's vectors are k_hi + i kHeight / Ways.
+template <int Ways>
+void gather_units(const u32* grid, int m, int s, const Factor& z, u32* plus, u32* minus) {
+    const std::size_t stride = std::size_t(1) << (m - kRowLog - 2), rounds = kHeight / Ways;
+    const auto* base = reinterpret_cast<const int*>(grid);
     for (std::size_t k = 0; k < stride; k += 8) {
-        UnitWalk walk(m, k);
-        for (std::size_t j = k; j < k + height * stride; j += stride, walk.next()) {
-            const Vec xp = _mm256_i32gather_epi32(base, walk.positive(), 4);
-            const Vec xn = _mm256_i32gather_epi32(base, walk.negative(), 4);
-            store(plus + j, add_canonical(xp, xn));
-            store(minus + j, sub_canonical(xp, xn));
+        UnitWalk walk(m, s, k);
+        u32 jump[Ways];
+        for (int i = 0; i < Ways; ++i) jump[i] = walk.step_power(i * rounds);
+        for (std::size_t j = k; j < k + rounds * stride; j += stride, walk.next()) {
+            Vec p[Ways], q[Ways];
+            for (int i = 0; i < Ways; ++i) {
+                const Vec u = i ? walk.times(jump[i]) : walk.unit();
+                const Vec xp = _mm256_i32gather_epi32(base, walk.positive(u), 4);
+                const Vec xn = _mm256_i32gather_epi32(base, walk.negative(u), 4);
+                p[i] = add_canonical(xp, xn);
+                q[i] = sub_canonical(xp, xn);
+            }
+            top_layer(p, z);
+            top_layer(q, z);
+            for (int i = 0; i < Ways; ++i) {
+                store(plus + j + i * rounds * stride, p[i]);
+                store(minus + j + i * rounds * stride, q[i]);
+            }
         }
     }
 }
 
-// Values at 5^k (pos) and -5^k (neg), k < 2^(m-2) -> rows of level m.
-void scatter_units(const u32* pos, const u32* neg, int m, u32* rows) {
-    const std::size_t stride = std::size_t(1) << (m - kRowLog - 2), height = std::size_t(1) << kRowLog;
+// Values plus[k] +- minus[k] at +-5^k, k < 2^(m-2) (canonical) -> level s (M = m) of the grid.
+void scatter_units(const u32* plus, const u32* minus, int m, int s, u32* grid) {
+    const std::size_t stride = std::size_t(1) << (m - kRowLog - 2);
     for (std::size_t k = 0; k < stride; k += 8) {
-        UnitWalk walk(m, k);
-        for (std::size_t j = k; j < k + height * stride; j += stride, walk.next()) {
-            alignas(32) u32 at_pos[8], at_neg[8];
-            _mm256_store_si256(reinterpret_cast<Vec*>(at_pos), walk.positive());
-            _mm256_store_si256(reinterpret_cast<Vec*>(at_neg), walk.negative());
-            for (std::size_t l = 0; l < 8; ++l) rows[at_pos[l]] = pos[j + l], rows[at_neg[l]] = neg[j + l];
+        UnitWalk walk(m, s, k);
+        for (std::size_t j = k; j < k + kHeight * stride; j += stride, walk.next()) {
+            alignas(32) u32 at_pos[8], at_neg[8], pos[8], neg[8];
+            _mm256_store_si256(reinterpret_cast<Vec*>(at_pos), walk.positive(walk.unit()));
+            _mm256_store_si256(reinterpret_cast<Vec*>(at_neg), walk.negative(walk.unit()));
+            const Vec p = load(plus + j), q = load(minus + j);
+            _mm256_store_si256(reinterpret_cast<Vec*>(pos), add_canonical(p, q));
+            _mm256_store_si256(reinterpret_cast<Vec*>(neg), sub_canonical(p, q));
+            for (std::size_t l = 0; l < 8; ++l) grid[at_pos[l]] = pos[l], grid[at_neg[l]] = neg[l];
         }
     }
 }
 
-// Canonical x[0, len) folded to kFold words: out[i] = sum of x[k], k = i mod kFold. len a multiple
-// of kFold.
-void fold(const u32* x, std::size_t len, u32* out) {
-    Vec sum[kFold / 8] = {};
-    for (std::size_t j = 0; j < len; j += kFold)
-        for (std::size_t i = 0; i < kFold / 8; ++i) sum[i] = add_canonical(sum[i], load(x + j + 8 * i));
-    for (std::size_t i = 0; i < kFold / 8; ++i) store(out + 8 * i, sum[i]);
-}
-
-// Work memory, in words. Below kBlockedLog every buffer holds 2^n words.
+// Work memory, in words.
 struct Buffers {
-    u32* band;      // kBand rows of x: 2^(n-4)
-    u32* level[2];  // c and the factors by level, 2^(n-1) each
-    u32* rows;      // 2^(n-1)
-    u32* acc;       // 2^(n-1) + 2 kPadding
+    u32* band;      // n >= kBlockedLog: kBand rows of x, 2^(n-4); else x, 2^n
+    u32* grid;      // n >= kBlockedLog: 2^(n-kRowLog) rows
+    u32* small[2];  // levels with M < kBlockedLog: 2^min(n, kBlockedLog - 1) each
     char* text;     // 10 words of band, at least fields::kTextBytes
 
     Buffers(Arena& arena, int n) {
-        const std::size_t size = std::size_t(1) << n, half = n >= kBlockedLog ? size / 2 : size;
-        band = arena.words(n >= kBlockedLog ? size / 16 : size);
-        for (u32*& p : level) p = arena.words(half);
-        rows = arena.words(half);
-        acc = arena.words(half + 2 * kPadding);
-        text = arena.bytes(std::max(fields::kTextBytes, n >= kBlockedLog ? 10 * size / 16 : 0));
+        const bool blocked = n >= kBlockedLog;
+        band = arena.words(std::size_t(1) << (blocked ? n - 4 : n));
+        grid = blocked ? arena.words((std::size_t(1) << (n - kRowLog)) * kPitch) : nullptr;
+        for (u32*& p : small) p = arena.words(std::size_t(1) << std::min(n, kBlockedLog - 1));
+        text = arena.bytes(std::max(fields::kTextBytes, blocked ? 10 * (std::size_t(1) << (n - 4)) : 0));
     }
 };
 
-// Sets up level (M = m >= 2); returns where its sign parts go. extended: parts in the upper halves
-// of ext (factor a).
-std::array<u32*, 2> open_level(Level& level, int m, Arena& arena, bool extended) {
+// Levels with m >= kBlockedLog.
+bool top_done(int m) { return m >= kBlockedLog; }
+
+void gather(const u32* grid, int m, int s, const Factor& z, std::array<u32*, 2> out) {
+    if ((m - 5) % 2)  // nv = 2^(m-5)
+        gather_units<2>(grid, m, s, z, out[0], out[1]);
+    else
+        gather_units<4>(grid, m, s, z, out[0], out[1]);
+}
+
+// Sets up level (M = m >= 2); returns where its sign parts go.
+std::array<u32*, 2> open_level(Level& level, int m, Arena& arena) {
     const std::size_t len = std::size_t(1) << (m - 2);
     level.length = len;
     if (!transformed(level)) return {level.fold[0], level.fold[1]};
-    for (int e = 0; e < 2; ++e) {
-        u32* block = arena.words(extended ? 2 * len : len);
-        if (extended) level.ext[e] = reinterpret_cast<Vec*>(block), block += len;
-        level.part[e] = block;
-    }
+    for (u32*& p : level.part) p = arena.words(len);
     return {level.part[0], level.part[1]};
 }
 
-// Folds and sum of a level whose parts are written.
+// Sum of a level whose folds are written.
 void close_level(Level& level) {
-    if (transformed(level))
-        for (int e = 0; e < 2; ++e) fold(level.part[e], level.length, level.fold[e]);
     u64 t = 0;
     for (std::size_t i = 0; i < std::min(level.length, kFold); ++i) t += level.fold[0][i];
     level.sum = u32(t % kP);
 }
 
 // Reads 2^n values and splits them into their levels.
-void split(io::Reader& in, int n, Level* levels, Arena& arena, const Buffers& buffers, bool extended) {
+// Parts of levels with m >= kBlockedLog are after the top layer; folds and sums of transformed
+// levels are left to the caller.
+void split(io::Reader& in, int n, Level* levels, Arena& arena, const Buffers& buffers, const Factor& z) {
     u32* cur = buffers.band;  // cur[i] = x[i 2^s], i < 2^m
     int s = 0;
-    if (n >= kBlockedLog) {  // level 0 straight from the input, kBand rows at a time
-        const std::size_t width = row_width(n);
-        for (std::size_t first = 0; first < std::size_t(1) << kRowLog; first += kBand) {
+    if (n >= kBlockedLog) {
+        const int rows_log = n - kRowLog;
+        const std::size_t width = std::size_t(1) << rows_log;
+        for (std::size_t first = 0; first < kHeight; first += kBand) {
             in.read(buffers.band, kBand * width);
-            to_rows(buffers.band, n, first, buffers.rows, buffers.level[0]);
+            to_grid(buffers.band, width, first, buffers.grid);
         }
-        const auto out = open_level(levels[0], n, arena, extended);
-        gather_units(buffers.rows, n, out[0], out[1]);
-        close_level(levels[0]);
-        cur = buffers.level[0];
-        s = 1;
+        for (; n - s >= kBlockedLog; ++s) gather(buffers.grid, n - s, s, z, open_level(levels[s], n - s, arena));
+        cur = buffers.small[0];
+        for (std::size_t i = 0; i < std::size_t(1) << (n - s); ++i) {
+            const std::size_t x = i << s;
+            cur[i] = buffers.grid[(x & (width - 1)) * kPitch + (x >> rows_log)];
+        }
     } else {
         in.read(cur, std::size_t(1) << n);
     }
@@ -3529,32 +3577,27 @@ void split(io::Reader& in, int n, Level* levels, Arena& arena, const Buffers& bu
             level.sum = cur[m];
             continue;  // level s + 1 is cur[0]
         }
-        u32* other = cur == buffers.level[0] ? buffers.level[1] : buffers.level[0];
-        const auto out = open_level(level, m, arena, extended);
-        if (m >= kBlockedLog) {
-            for (std::size_t first = 0; first < std::size_t(1) << kRowLog; first += kBand)
-                to_rows(cur + first * row_width(m), m, first, buffers.rows, other);
-            gather_units(buffers.rows, m, out[0], out[1]);
-        } else {
-            const u32 mask = (u32(1) << m) - 1;
-            u32 u = 1;
-            for (std::size_t k = 0; k < level.length; ++k, u = u * 5 & mask) {
-                out[0][k] = add_mod(cur[u], cur[mask + 1 - u]);
-                out[1][k] = sub_mod(cur[u], cur[mask + 1 - u]);
-            }
-            for (std::size_t i = 0; i < std::size_t(1) << (m - 1); ++i) other[i] = cur[2 * i];
+        u32* other = cur == buffers.small[0] ? buffers.small[1] : buffers.small[0];
+        const auto out = open_level(level, m, arena);
+        const u32 mask = (u32(1) << m) - 1;
+        u32 u = 1;
+        for (std::size_t k = 0; k < level.length; ++k, u = u * 5 & mask) {
+            out[0][k] = add_mod(cur[u], cur[mask + 1 - u]);
+            out[1][k] = sub_mod(cur[u], cur[mask + 1 - u]);
         }
-        close_level(level);
+        for (std::size_t i = 0; i < std::size_t(1) << (m - 1); ++i) other[i] = cur[2 * i];
+        if (!transformed(level)) close_level(level);
         cur = other;
     }
 }
 
 // Writes c from its levels, top down: after the level of the units mod 2^m, c[i 2^(n-m)] for
-// i < 2^m are known. The last level (m = n) goes to the output kBand rows at a time.
+// i < 2^m are known. Levels with m >= kBlockedLog go to the grid, which goes to the output
+// kBand rows at a time.
 class Assembly {
 public:
     Assembly(int n, const Buffers& buffers, io::Writer& out, u32 zero)
-        : n_(n), buffers_(buffers), out_(out), cur_(buffers.level[0]), other_(buffers.level[1]) {
+        : n_(n), buffers_(buffers), out_(out), cur_(buffers.small[0]), other_(buffers.small[1]) {
         cur_[0] = zero;
         if (n == 0) fields::write(out_, cur_, 1, buffers_.text);
     }
@@ -3565,27 +3608,33 @@ public:
         if (n_ == 1) fields::write(out_, cur_, 2, buffers_.text);
     }
 
-    // m >= 2: the value at 5^k is pos[k], at -5^k neg[k], k < 2^(m-2).
-    void push(int m, const u32* pos, const u32* neg) {
+    // m >= 2: the values at +-5^k are plus[k] +- minus[k], k < 2^(m-2); canonical.
+    void push(int m, const u32* plus, const u32* minus) {
         if (m >= kBlockedLog) {
-            scatter_units(pos, neg, m, buffers_.rows);
-            const std::size_t width = row_width(m), height = std::size_t(1) << kRowLog;
-            for (std::size_t first = 0; first < height; first += kBand) {
-                if (m < n_) {
-                    from_rows(buffers_.rows, cur_, m, first, other_ + first * width);
-                } else {
-                    from_rows(buffers_.rows, cur_, m, first, buffers_.band);
-                    write_band(kBand * width, first + kBand == height);
+            const int s = n_ - m, rows_log = n_ - kRowLog;
+            const std::size_t width = std::size_t(1) << rows_log;
+            if (m == kBlockedLog)  // c[x], x = i 2^(s+1): the smaller levels
+                for (std::size_t i = 0; i < std::size_t(1) << (m - 1); ++i) {
+                    const std::size_t x = i << (s + 1);
+                    buffers_.grid[(x & (width - 1)) * kPitch + (x >> rows_log)] = cur_[i];
                 }
-            }
-        } else {
-            const std::size_t len = std::size_t(1) << (m - 2);
-            for (std::size_t i = 0; i < 2 * len; ++i) other_[2 * i] = cur_[i];
-            const u32 mask = (u32(1) << m) - 1;
-            u32 u = 1;
-            for (std::size_t k = 0; k < len; ++k, u = u * 5 & mask) other_[u] = pos[k], other_[mask + 1 - u] = neg[k];
-            if (m == n_) fields::write(out_, other_, std::size_t(1) << m, buffers_.text);
+            scatter_units(plus, minus, m, s, buffers_.grid);
+            if (m == n_)
+                for (std::size_t first = 0; first < kHeight; first += kBand) {
+                    from_grid(buffers_.grid, width, first, buffers_.band);
+                    write_band(kBand * width, first + kBand == kHeight);
+                }
+            return;
         }
+        const std::size_t len = std::size_t(1) << (m - 2);
+        for (std::size_t i = 0; i < 2 * len; ++i) other_[2 * i] = cur_[i];
+        const u32 mask = (u32(1) << m) - 1;
+        u32 u = 1;
+        for (std::size_t k = 0; k < len; ++k, u = u * 5 & mask) {
+            other_[u] = add_mod(plus[k], minus[k]);
+            other_[mask + 1 - u] = sub_mod(plus[k], minus[k]);
+        }
+        if (m == n_) fields::write(out_, other_, std::size_t(1) << m, buffers_.text);
         std::swap(cur_, other_);
     }
 
@@ -3619,36 +3668,45 @@ void direct_level(Assembly& c, int n, int m, const Level* a, const Level* b) {
         }
         for (std::size_t k = 0; k < len; ++k) result[e][k] = u32(acc[k]);
     }
-    u32 pos[kFold], neg[kFold];
-    for (std::size_t k = 0; k < len; ++k) {
-        pos[k] = mul_mod(add_mod(result[0][k], result[1][k]), kHalf);
-        neg[k] = mul_mod(sub_mod(result[0][k], result[1][k]), kHalf);
-    }
-    c.push(m, pos, neg);
+    for (auto& r : result)
+        for (std::size_t k = 0; k < len; ++k) r[k] = mul_mod(r[k], kHalf);
+    c.push(m, result[0], result[1]);
 }
 
-// Output level m > kDirectLog by transforms; acc: 2 L + 2 kPadding words.
-void transform_level(Assembly& c, int n, int m, const Level* a, const Level* b, const Transform& transform, u32* acc) {
+// [w x, x] for leaf v of the levels s <= k of a (sign e).
+using Windows = std::array<std::array<u32, 16>, kMaxLog + 1>;
+
+void make_windows(const Level* a, int e, int k, std::size_t v, const Factor& w, Windows& windows) {
+    for (int s = 0; s <= k; ++s) {
+        const Vec x = load(a[s].part[e] + 8 * v);
+        store(windows[s].data(), reduce(multiply(x, w), kP));
+        store(windows[s].data() + 8, x);
+    }
+}
+
+// Leaves [first, end) of the levels s <= k, sign e: level t of c gets the sum over s + t' = t of
+// a_s b_t', in place of b_t. The windows of leaf v + 1 are stored before the products of leaf v
+// load those of v: unaligned loads from recent stores stall.
+void band_products(const Level* a, Level* b, int e, int k, std::size_t first, std::size_t end, const Transform& transform) {
+    Windows windows[2];
+    make_windows(a, e, k, first, transform.leaf_weight(first), windows[0]);
+    for (std::size_t v = first; v < end; ++v) {
+        if (v + 1 < end) make_windows(a, e, k, v + 1, transform.leaf_weight(v + 1), windows[(v + 1 - first) % 2]);
+        const Windows& x = windows[(v - first) % 2];
+        for (int t = k; t >= 0; --t) {  // b_t is last read for level t
+            Vec even = _mm256_setzero_si256(), odd = even;
+            for (int s = 0; s <= t; ++s) multiply_add(x[s].data(), b[t - s].part[e] + 8 * v, even, odd);
+            store(b[t].part[e] + 8 * v, finish(even, odd));
+        }
+    }
+}
+
+// Output level m > kDirectLog from its leaves in b[n - m].
+void transform_level(Assembly& c, int n, int m, const Level* b, const Transform& transform) {
     const std::size_t len = std::size_t(1) << (m - 2), nv = len / 8;
     const u32 scale = mul_mod(mul_mod(ntt::detail::power(u32(nv), kP - 2), ntt::detail::kR), kHalf);
-    u32* out[2] = {acc, acc + len + kPadding};
-    for (int e = 0; e < 2; ++e) {
-        auto* f = reinterpret_cast<Vec*>(out[e]);
-        for (std::size_t v = 0; v < nv; ++v) {
-            Vec sum = _mm256_setzero_si256();
-            for (int s = 0; s <= n - m; ++s) {
-                const Vec p = leaf_product(a[s].ext[e] + 2 * v, reinterpret_cast<const Vec*>(b[n - m - s].part[e]) + v);
-                sum = reduce(add(sum, p), 2 * kP);
-            }
-            f[v] = sum;
-        }
-        transform.inverse(f, nv, scale);
-    }
-    for (std::size_t k = 0; k < len; k += 8) {
-        const Vec p = load(out[0] + k), q = load(out[1] + k);
-        store(out[0] + k, add_canonical(p, q));
-        store(out[1] + k, sub_canonical(p, q));
-    }
+    u32* const* out = b[n - m].part;
+    for (int e = 0; e < 2; ++e) transform.inverse(reinterpret_cast<Vec*>(out[e]), nv, scale);
     c.push(m, out[0], out[1]);
 }
 
@@ -3660,9 +3718,21 @@ void solve() {
     Arena arena(4 * 8 * size + 10 * size + fields::kTextBytes + (64 << 10));
     const Buffers buffers(arena, n);
 
+    const Transform transform(arena, std::max<std::size_t>(size / 32, 8));
+    const int levels = std::max(n - kDirectLog, 0);  // transformed: s < levels
     std::array<Level, kMaxLog + 1> a, b;
-    split(in, n, a.data(), arena, buffers, true);
-    split(in, n, b.data(), arena, buffers, false);
+    for (auto* x : {&a, &b}) {
+        split(in, n, x->data(), arena, buffers, transform.top_root());
+        for (int s = 0; s < levels; ++s) {
+            Level& level = (*x)[s];
+            for (int e = 0; e < 2; ++e) {
+                auto* f = reinterpret_cast<Vec*>(level.part[e]);
+                transform.forward(f, level.length / 8, top_done(n - s));
+                transform.fold(f, level.fold[e]);
+            }
+            close_level(level);
+        }
+    }
 
     io::Writer out;
     u32 zero = 0;
@@ -3677,16 +3747,10 @@ void solve() {
     for (int m = 2; m <= std::min(n, kDirectLog); ++m) direct_level(c, n, m, a.data(), b.data());
 
     if (n > kDirectLog) {
-        const Transform transform(arena, size / 32);
-        for (int s = 0; s <= n; ++s) {
-            if (!transformed(a[s])) break;
-            const std::size_t nv = a[s].length / 8;
-            for (int e = 0; e < 2; ++e) {
-                transform.forward(reinterpret_cast<Vec*>(a[s].part[e]), nv, a[s].ext[e]);
-                transform.forward(reinterpret_cast<Vec*>(b[s].part[e]), nv, nullptr);
-            }
-        }
-        for (int m = kDirectLog + 1; m <= n; ++m) transform_level(c, n, m, a.data(), b.data(), transform, buffers.acc);
+        for (int e = 0; e < 2; ++e)  // leaves [nv of level k + 1, nv of level k) are in levels 0..k
+            for (int k = levels - 1; k >= 0; --k)
+                band_products(a.data(), b.data(), e, k, k + 1 < levels ? a[k + 1].length / 8 : 0, a[k].length / 8, transform);
+        for (int m = kDirectLog + 1; m <= n; ++m) transform_level(c, n, m, b.data(), transform);
     }
 }
 

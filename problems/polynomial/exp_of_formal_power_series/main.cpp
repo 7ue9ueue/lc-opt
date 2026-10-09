@@ -804,6 +804,7 @@ private:
 //   t.multiply(b, c);                          // b = b c, both transforms
 //   t.inverse(b);                              // a transform back to coefficients
 //   t.inverse_product(b, c, a);                // a = b c mod (x^n - 1) from transforms b, c
+//   t.inverse_product_sum(pairs, a);           // a = the sum of the pairs' products, up to 3 pairs
 //   t.forward_product(a, 0, c, b);             // c = the transform of a b mod (x^n - 1)
 //   t.forward(f.first(m), 0, a);               // out of place: a = transform of f[0, m), m <= n
 //   t.cyclic_product(a.subspan(n / 2), n / 2, a, b, poly::Half::kUpper);
@@ -821,6 +822,7 @@ private:
 #include <immintrin.h>
 #include <sys/mman.h>
 
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -3197,23 +3199,33 @@ struct ProductBottom {
     }
 };
 
-// Inverse of a product of two transforms: leaf products of a and b (both read by index; either
-// may be the output), then inverse butterflies as in ProductBottom.
+// Inverse of a sum of K products of transforms: leaf products of a[k] and b[k] (all read by
+// index; any may be the output), summed, then inverse butterflies as in ProductBottom.
+template <std::size_t K>
 struct InverseProductBottom {
     static constexpr bool kForward = false, kInverse = true;
-    ProductBottom product;  // holds b
-    const std::uint32_t* a;
+    const std::uint32_t* roots;
+    const std::uint32_t* inverse_roots;
+    std::array<const std::uint32_t*, K> a, b;
 
-    void prepare(std::size_t g, Window (&window)[4]) const {
-        for (std::size_t p = 4 * g; p < 4 * g + 4; ++p) fill_window(window[p % 4], load(a + 8 * p), leaf_weight(product.roots, p));
+    void prepare(std::size_t g, Window (&window)[K][4]) const {
+        for (std::size_t k = 0; k < K; ++k)
+            for (std::size_t p = 4 * g; p < 4 * g + 4; ++p) fill_window(window[k][p % 4], load(a[k] + 8 * p), leaf_weight(roots, p));
     }
 
     void operator()(std::uint32_t* out, std::size_t count, std::size_t first) const {
-        Window window[2][4];
+        Window window[2][K][4];
         prepare(first, window[0]);
         for (std::size_t j = 0; j < count; ++j, out += 32) {
             if (j + 1 < count) prepare(first + j + 1, window[(j + 1) & 1]);
-            product.finish(out, first + j, window[j & 1]);
+            const std::size_t g = first + j;
+            Vec f[4];
+            for (std::size_t t = 0; t < 4; ++t) {
+                f[t] = leaf_product(window[j & 1][0][t], b[0] + 8 * (4 * g + t));
+                for (std::size_t k = 1; k < K; ++k) f[t] = low(add(f[t], leaf_product(window[j & 1][k][t], b[k] + 8 * (4 * g + t))));
+            }
+            inverse_h1(f, Group(inverse_roots, g));
+            for (std::size_t t = 0; t < 4; ++t) store(out + 8 * t, f[t]);
         }
     }
 };
@@ -3456,10 +3468,25 @@ public:
     // Only the output half of out is computed. out may be a or b; otherwise none may overlap.
     void inverse_product(std::span<const std::uint32_t> a, std::span<const std::uint32_t> b, std::span<std::uint32_t> out,
                          Half output = Half::kBoth) const {
-        using namespace ntt::detail;
-        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
-        const detail::ProductBottom product{roots_, inverse_roots_, b.data()};
-        run(out, detail::Source(nullptr, 0, 0), detail::InverseProductBottom{product, a.data()}, scale, output);
+        inverse_products<1>({a.data()}, {b.data()}, out, output);
+    }
+
+    // Two transforms of the same length.
+    struct Pair {
+        std::span<const std::uint32_t> a, b;
+    };
+
+    // out = the coefficients of the sum of a b mod (x^n - 1) over 1 to 3 pairs of transforms of
+    // length n = out.size(). Only the output half of out is computed. out may be an operand.
+    void inverse_product_sum(std::span<const Pair> pairs, std::span<std::uint32_t> out, Half output = Half::kBoth) const {
+        std::array<const std::uint32_t*, 3> a{}, b{};
+        for (std::size_t k = 0; k < pairs.size() && k < 3; ++k) a[k] = pairs[k].a.data(), b[k] = pairs[k].b.data();
+        switch (pairs.size()) {
+            case 1: return inverse_products<1>({a[0]}, {b[0]}, out, output);
+            case 2: return inverse_products<2>({a[0], a[1]}, {b[0], b[1]}, out, output);
+            case 3: return inverse_products<3>(a, b, out, output);
+            default: std::abort();
+        }
     }
 
     // out = the transform of (x^shift in) b mod (x^n - 1) for b a transform of length
@@ -3485,6 +3512,14 @@ private:
     void check_length(std::size_t n) const {
         const int lg = std::countr_zero(n);
         if (!std::has_single_bit(n) || lg < kMinLog || lg > lg_max_) std::abort();
+    }
+
+    template <std::size_t K>
+    void inverse_products(const std::array<const std::uint32_t*, K>& a, const std::array<const std::uint32_t*, K>& b,
+                          std::span<std::uint32_t> out, Half output) const {
+        using namespace ntt::detail;
+        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
+        run(out, detail::Source(nullptr, 0, 0), detail::InverseProductBottom<K>{roots_, inverse_roots_, a, b}, scale, output);
     }
 
     static detail::Source source(std::span<const std::uint32_t> in, std::size_t shift, std::size_t n) {

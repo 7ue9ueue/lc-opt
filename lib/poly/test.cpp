@@ -82,7 +82,7 @@ std::array<u32, 8> leaf(const std::vector<u32>& a, std::size_t p, const u32* roo
 }
 
 struct Fixture {
-    poly::Arena arena{2 * poly::Transform::words(kLgMax) + 14 * poly::Arena::footprint(std::size_t(1) << kLgMax)};
+    poly::Arena arena{2 * poly::Transform::words(kLgMax) + 15 * poly::Arena::footprint(std::size_t(1) << kLgMax)};
     poly::Transform t{arena, kLgMax};
     std::span<u32> buffer[4] = {arena.take(1 << kLgMax), arena.take(1 << kLgMax), arena.take(1 << kLgMax),
                                 arena.take(1 << kLgMax)};
@@ -232,6 +232,26 @@ void test_transforms(Fixture& fx) {
                 if (i >= lo && i < hi) expect(tb_copy[i] == cyclic_coefficient(a, b, i), "inverse_product into b", lg, i);
             fx.t.inverse_product(ta, tb, ta);  // into a
             for (std::size_t i : at) expect(ta[i] == cyclic_coefficient(a, b, i), "inverse_product into a", lg, i);
+
+            // inverse_product_sum of 1, 2, 3 pairs: a b, + b c, + c a; with output halves, and into c.
+            ta = fx.load(0, a), tb = fx.load(1, b);
+            tc = fx.load(2, c);
+            fx.t.forward(ta);
+            fx.t.forward(tb);
+            fx.t.forward(tc);
+            const poly::Transform::Pair pairs[3] = {{ta, tb}, {tb, tc}, {tc, ta}};
+            for (std::size_t count = 1; count <= 3; ++count) {
+                const bool into_c = count == 3 && kind == 2;
+                out = into_c ? tc : fx.load(3, a);  // garbage
+                fx.t.inverse_product_sum(std::span(pairs, count), out, half);
+                for (std::size_t i : at) {
+                    if (i < lo || i >= hi) continue;
+                    u32 want = cyclic_coefficient(a, b, i);
+                    if (count >= 2) want = add(want, cyclic_coefficient(b, c, i));
+                    if (count >= 3) want = add(want, cyclic_coefficient(c, a, i));
+                    expect(out[i] == want, into_c ? "inverse_product_sum into an operand" : "inverse_product_sum", lg, count);
+                }
+            }
 
             const std::size_t shift = kind == 0 ? 0 : pick(n), size = kind == 2 ? n - shift : pick(n - shift + 1);
             std::vector<u32> shifted(n, 0);
@@ -411,9 +431,15 @@ std::vector<u32> log_reference(const std::vector<u32>& f, std::size_t n) {
     return g;
 }
 
-void check_log(Fixture& fx, const std::vector<u32>& f, std::size_t n) {
+void check_log(Fixture& fx, const std::vector<u32>& f, std::size_t n, bool in_place = false) {
     std::vector<u32> g(n, 0xFFFFFFFF);
-    poly::log(fx.t, f, g, fx.log_scratch);
+    if (in_place) {
+        g = f;
+        g.resize(n);
+        poly::log(fx.t, g, g, fx.log_scratch);
+    } else {
+        poly::log(fx.t, f, g, fx.log_scratch);
+    }
     if (n <= 3000) {
         expect(g == log_reference(f, n), "log", n, f.size());
         return;
@@ -422,8 +448,10 @@ void check_log(Fixture& fx, const std::vector<u32>& f, std::size_t n) {
     expect(std::equal(g.begin(), g.begin() + prefix, log_reference(f, prefix).begin()), "log prefix", n);
     expect(g[0] == 0, "log: g[0] = 0", n);
     const auto coefficient = [&f](std::size_t i) { return i < f.size() ? f[i] : 0; };
-    const std::size_t m = (std::size_t(1) << poly::log_log(n)) / 2;  // where q = f'/f is split
-    std::vector<std::size_t> at = {n - 1, n - 2, m - 1, m, m + 1};
+    const std::size_t k = (std::size_t(1) << poly::log_log(n)) / 2;  // q = f'/f in blocks of k
+    std::vector<std::size_t> at = {n - 1, n - 2};
+    for (std::size_t j = k; j < n - 1; j += k)  // g[i] = q[i - 1] / i
+        for (std::size_t i = j; i < std::min(j + 3, n); ++i) at.push_back(i);
     for (int i = 0; i < 24; ++i) at.push_back(1 + pick(n - 1));
     for (std::size_t i : at) {  // i f_i = sum_k k g_k f_(i-k)
         u64 s = 0;
@@ -437,10 +465,11 @@ void test_log(Fixture& fx) {
         for (int kind = 0; kind < 3; ++kind) {
             auto f = random_poly(n, kind);
             f[0] = 1;
-            check_log(fx, f, n);
+            check_log(fx, f, n, kind == 1);
         }
-    // Edge cases: f = 1 (g = 0), f = 1 - x (g_i = -1 / i), f shorter and longer than n.
-    for (std::size_t n : {65, 66, 1000, 4096, 4097, 4098, 70000}) {
+    // Edge cases: f = 1 (g = 0), f = 1 - x (g_i = -1 / i), f shorter and longer than n; sizes
+    // around the block boundaries (n - 1 = 3k, 3k + 1, 4k).
+    for (std::size_t n : {65, 66, 1000, 3073, 3074, 4096, 4097, 4098, 70000}) {
         check_log(fx, {1}, n);
         check_log(fx, {1, P - 1}, n);
         auto f = random_poly(n / 3 + 1);
@@ -449,14 +478,17 @@ void test_log(Fixture& fx) {
         f = random_poly(2 * n);
         f[0] = 1;
         check_log(fx, f, n);
+        f = random_poly(n);
+        f[0] = 1;
+        check_log(fx, f, n, true);
     }
     for (int lg = 7; lg <= kLgMax; ++lg) {
         const std::size_t n = std::size_t(1) << lg;
-        for (std::size_t m : {n - 1, n, n + 1, n + 2, n / 2 + pick(n / 2) + 1}) {
+        for (std::size_t m : {n - 1, n, n + 1, n + 2, 3 * n / 4 + 1, 3 * n / 4 + 2, n / 2 + pick(n / 2) + 1}) {
             if (m > (std::size_t(1) << kLgMax) + 1) continue;
             auto f = random_poly(m, int(pick(3)));
             f[0] = 1;
-            check_log(fx, f, m);
+            check_log(fx, f, m, lg % 2 == 0);
         }
     }
 }

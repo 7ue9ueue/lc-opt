@@ -51,10 +51,19 @@ Record when opened (issue #35): 45 ms.
   - Submitted the merged `main.cpp` (#135): [409288](https://judge.yosupo.jp/submission/409288)
     AC 22 ms (judge jitter), resubmitted: [409289](https://judge.yosupo.jp/submission/409289)
     AC 12 ms, 15.5 MiB.
-- Next: the product is 4.45 of about 10 ms in-process (`lib/ntt` at 2^20; 2n - 1 = 2^20 - 3 at
-  P = 524287, so no smaller length). Scatter 0.66 ms (random stores into 2 MiB): bucket the
-  outputs by text block and format each block from L2 (guess: -0.3 ms). Fold the last inverse
-  level (`scale_radix2`) into the scatter.
+- 2026-10-09, claude (round 2). `lc-amd`, judge flags. In-process medians of 21 interleaved runs
+  on p_max_00, phases (ms): gather, product + scatter, output. Baseline (main): 0.78, 5.13, 2.07.
+  - Last inverse layer (`scale_radix2`) fused into the scatter: one Shoup multiply per output on
+    the folded brackets. 40/40 tests. 0.77, 5.18, 2.07; `judge.py bench` (41 rounds, 3 slowest)
+    12.30 vs 12.41 ms, ratio 1.013. The scatter is store-bound; the saved 8 MiB pass is in L3.
+    Dropped.
+  - Scatter partitioned by output block (2^14 values; entries value | index << 32 in b's buffer),
+    then per block: scatter in L1/L2, format, write(2). 40/40 tests. 0.78, 5.92, 2.34. Dropped.
+  - Same partition by slice of c (2^14, 2^16, 2^17 values) into a prefaulted 4 MiB, then a
+    sequential scatter, original output: product + scatter 6.32-6.34 against 5.14. The partition
+    pass (scalar bucket tails, 8-byte entries) alone costs more than the random scatter. Dropped.
+- Next: the product (4.46 ms) is `lib/ntt`'s. Gather and scatter (0.78 + 0.66) resisted
+  prefetch, fusion and partitioning. No idea left outside `lib/` worth a round (guess).
 
 ## Sources
 

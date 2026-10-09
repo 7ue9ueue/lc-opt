@@ -42,15 +42,18 @@ constexpr std::array<u32, kHighCount> kHigh = [] {
 }();
 
 // Each 64-bit lane n < 10^8 to its 8 digits as text, most significant at the lowest address.
+// Each step splits a part x into [x % d, x / d] in place as x + (x / d) * (2^k - d); the digits
+// come out least significant first and one byte shuffle reverses them.
 inline __m256i digits8(__m256i n) {
-    const __m256i q = _mm256_srli_epi64(_mm256_mul_epu32(n, _mm256_set1_epi64x(109951163)), 40);  // n / 10^4
-    const __m256i r = _mm256_sub_epi64(n, _mm256_mul_epu32(q, _mm256_set1_epi64x(10000)));
-    const __m256i w4 = _mm256_or_si256(q, _mm256_slli_epi64(r, 32));  // dwords < 10^4
-    const __m256i h = _mm256_srli_epi16(_mm256_mulhi_epu16(w4, _mm256_set1_epi32(5243)), 3);  // / 100
-    const __m256i w2 = _mm256_or_si256(h, _mm256_slli_epi32(_mm256_sub_epi16(w4, _mm256_mullo_epi16(h, _mm256_set1_epi32(100))), 16));  // words < 100
-    const __m256i t = _mm256_mulhi_epu16(w2, _mm256_set1_epi16(6554));  // / 10
-    const __m256i w1 = _mm256_or_si256(t, _mm256_slli_epi16(_mm256_sub_epi16(w2, _mm256_mullo_epi16(t, _mm256_set1_epi16(10))), 8));
-    return _mm256_add_epi8(w1, _mm256_set1_epi8('0'));
+    const __m256i q4 = _mm256_srli_epi64(_mm256_mul_epu32(n, _mm256_set1_epi64x(109951163)), 40);  // n / 10^4
+    const __m256i w4 = _mm256_add_epi64(n, _mm256_mul_epu32(q4, _mm256_set1_epi64x(0xFFFFD8F0)));  // dwords < 10^4
+    const __m256i q2 = _mm256_srli_epi16(_mm256_mulhi_epu16(w4, _mm256_set1_epi32(5243)), 3);  // / 100
+    const __m256i w2 = _mm256_add_epi32(w4, _mm256_mullo_epi32(q2, _mm256_set1_epi32(65436)));  // words < 100
+    const __m256i q1 = _mm256_mulhi_epu16(w2, _mm256_set1_epi16(6554));  // / 10
+    const __m256i w1 = _mm256_add_epi16(w2, _mm256_mullo_epi16(q1, _mm256_set1_epi16(246)));  // digits
+    const __m256i reverse = _mm256_setr_epi8(7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8,  //
+                                             7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8);
+    return _mm256_add_epi8(_mm256_shuffle_epi8(w1, reverse), _mm256_set1_epi8('0'));
 }
 
 inline void store16(char* p, __m128i v) { _mm_storeu_si128(reinterpret_cast<__m128i*>(p), v); }

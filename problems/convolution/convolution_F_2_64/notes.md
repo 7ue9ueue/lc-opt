@@ -23,7 +23,12 @@ from #111). Record when the issue opened: 409 ms.
 - Basis change: the top Taylor expansion (16 rows of 2^16) runs in one pass as a Taylor shift by
   x with one carry, on 128-column blocks right to left; rows of 2^K <= 256 single words go four at
   a time through a 4x4 transpose; column steps run on column blocks of at most 64 KiB.
-- `lib/io` input (`read_bulk`), `write_array` output; `.preinit_array` start, `_exit`.
+- `lib/io` input (`read_bulk`); `.preinit_array` start, `_exit`.
+- Output (`fields.hpp`, judge-specific): blocks of 3104 values. A block where at least 1/8 of
+  the values are below 2^53 goes through `write_array`; otherwise every value is right-aligned in
+  20 characters (wcmp checker compares tokens). Scalar code splits x = h 10^16 + m 10^8 + l and
+  looks up h as 4 characters with leading spaces; AVX2 makes 8 digits of m and l, four values
+  per step, 64 values behind the scalar split in the same loop. h = 0 (rare) is blanked after.
 
 ## Costs (lc-amd, gen_max, ms, in-process stamps)
 
@@ -50,5 +55,22 @@ read 2.4, basis change of a 2.1, of b 2.1, forward a 5.8, fused b forward + prod
   - `judge.py bench` v1 vs final, 11 rounds: 60.11 vs 47.03 ms median, ratio 0.78.
 - 2026-10-09, claude: submitted #111's `main.cpp`: [409244](https://judge.yosupo.jp/submission/409244),
   AC 46 ms, 37.4 MiB (1/5 for this version).
-- Next: u64 formatting with SIMD (4.9 ms now); the basis change (~8.5 ms, ~20 XORs per element
-  at the store limit would be ~2 ms per change).
+- 2026-10-09, claude (round 2): fixed-width u64 output, `fields.hpp`. lc-amd, judge flags.
+  Format of 2^20 random values into memory, median of 15 (scratch harness):
+  - Scalar split into u32 arrays, then AVX2 digits (64-bit lanes, three `x + q (2^k - d)` steps
+    and a byte reverse): 3.45 ms (split 1.55, digits and stores 1.67). Digits with
+    quotient/remainder/shift/or per step instead: 2.21 for the digit pass.
+  - Split in AVX2 with double-precision quotients (`fma`, `cvttpd2dq`, one integer correction),
+    h's digits in AVX2 too: 5.42; next group's split issued before current digits: 4.13; split
+    as its own pass: 3.75. Vector integer multiplies share one port with the digit steps.
+  - Scalar split into GPRs, `_mm256_setr_epi64x` into the digit code: 4.03.
+  - Scalar split 64 values ahead in the digit loop (kept): 3.15 (16 ahead 3.15, 256 ahead 3.19).
+  - Old `write_array`: 4.9 ms (round 1, in-process stamp).
+  - Fixed width on every block: `judge.py bench` ratio 1.21 on all_ones/all_same/small_values
+    (their output is short; padding costs more in `write()`). Blocks with >= 1/8 short values
+    now stay variable-width.
+  - Kept version vs round 1, `judge.py bench`, 15 rounds, 6 slowest cases: 45.62 vs 44.31 ms
+    median, ratio 0.959. `judge.py test` 51/51, slowest 43.0 ms. Stress 400 rounds vs `brute.cpp`
+    (judge flags, ASan/UBSan, x86-64-v3); ASan exact on gen_max, small_values, all_same, all_ones.
+- Next: the basis change (~8.5 ms, ~20 XORs per element at the store limit would be ~2 ms per
+  change); `write()` (7.4 ms) and the transforms (~80% of the PCLMUL limit) are near their floors.

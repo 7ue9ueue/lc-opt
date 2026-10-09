@@ -2,7 +2,8 @@
 
 c_k = sum over i j = k (mod 2^N) of a_i b_j mod 998244353, N <= 20. 5 s.
 
-Best judged: ours, 22 ms: [409243](https://judge.yosupo.jp/submission/409243) (current `main.cpp`, #108).
+Best judged: ours, 21 ms: [409247](https://judge.yosupo.jp/submission/409247) (current `main.cpp`, #115).
+Earlier: 22 ms, [409243](https://judge.yosupo.jp/submission/409243) (#108).
 Record when opened (issue #30): 81 ms.
 
 ## Design
@@ -88,6 +89,8 @@ Record when opened (issue #30): 81 ms.
   - Checks: 47/47 official tests (slowest 20.2 ms); `stress.py` 300 rounds plus 10 N = 20 known
     cases; random N = 13-16 against `brute.cpp` (7 cases); ASan/UBSan on all 47 official cases
     and pipe input.
+  - Submitted the merged `main.cpp` (#115): [409247](https://judge.yosupo.jp/submission/409247)
+    AC 21 ms, 24.9 MiB (was 22 ms, 32.9 MiB).
 - Next: the products are `vpmuludq`-bound (about 1.3 of the 2.0 ms): a Karatsuba short product
   over levels saves about 12% of them (guess). Gathers run at about 2.2 cycles per element on
   level 0 and 4 on level 1. Forward and inverse are the lib's kernels (3.2 ms).

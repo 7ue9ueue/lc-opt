@@ -78,11 +78,11 @@ inline __m256i digits4(__m256i h) {
     constexpr char x = char(0x80);
     const __m256i d = _mm256_shuffle_epi8(w1, _mm256_setr_epi8(3, 2, 1, 0, x, x, x, x, 11, 10, 9, 8, x, x, x, x,  //
                                                                 3, 2, 1, 0, x, x, x, x, 11, 10, 9, 8, x, x, x, x));
-    __m256i lead = _mm256_cmpeq_epi8(d, _mm256_setzero_si256());
-    lead = _mm256_and_si256(lead, _mm256_slli_epi32(lead, 8));
-    lead = _mm256_and_si256(lead, _mm256_slli_epi32(lead, 16));  // bytes after only zeros
+    __m256i seen = _mm256_cmpgt_epi8(d, _mm256_setzero_si256());
+    seen = _mm256_or_si256(seen, _mm256_slli_epi32(seen, 8));
+    seen = _mm256_or_si256(seen, _mm256_slli_epi32(seen, 16));  // a nonzero digit here or before
     const __m256i text = _mm256_set1_epi64x(0x30303030), space = _mm256_set1_epi64x(0x10101010);  // '0' - ' '
-    return _mm256_add_epi8(d, _mm256_sub_epi8(text, _mm256_and_si256(lead, space)));
+    return _mm256_add_epi8(d, _mm256_sub_epi8(text, _mm256_andnot_si256(seen, space)));
 }
 
 inline void store16(char* p, __m128i v) { _mm_storeu_si128(reinterpret_cast<__m128i*>(p), v); }

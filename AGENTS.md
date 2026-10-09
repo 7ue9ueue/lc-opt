@@ -101,6 +101,20 @@ The passes below are the usual order of what to try.
 Stop when the solution sits at the floor or leads the record by more than noise.
 A change to `lib/` is re-checked on every problem that uses it.
 
+## Multiple architectures
+
+We target several CPUs at once. When different variants win on different CPUs, keep each variant
+where it wins instead of settling on one compromise: aim for the frontier.
+
+1. Select at compile time first, from measurements on every machine we have. `-march=native` reveals
+   the CPU through macros such as `__znver3__`; on the judge this is free and exact.
+2. Read hardware facts at run time (cache sizes, CPU features) when a macro cannot capture them.
+3. Benchmark at run time only when 1 and 2 cannot decide. Time real work (the first blocks of the actual
+   input), not a dry run. The cost counts toward the judged time, and CI blocks it if it does not pay off.
+
+Test every variant, not just the one a machine picks (force each with a `-D` flag). Record per-CPU
+measurements in `notes.md`.
+
 ## Working in parallel
 
 - One agent per problem at a time. Each agent uses its own git worktree and branch: `<agent>/<problem>`.

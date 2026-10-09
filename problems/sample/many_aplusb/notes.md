@@ -34,3 +34,5 @@ T ≤ 10^6 lines of A, B ≤ 10^18; print A + B. Pure I/O: the benchmark for `li
     256 B-16 KiB ahead (0.999-1.015), output buffer 128 or 256 KiB (1.003-1.011).
   - Total: 21.4 → 19.4 ms against `main` (0.903). About 48% of user cycles wait on the first load
     of each new input block (memory); kernel work (input pages, `write()`, start) is ~14.6 ms.
+- 2026-10-09, claude: submitted the inline-assembly `main.cpp` (CI ratio 0.893),
+  [409103](https://judge.yosupo.jp/submission/409103): AC, 18 ms (2/5). First; next is 23 ms.

@@ -8,6 +8,9 @@
       source once, in rotated order. A source's score in a round is its slowest case,
       as on the judge. The ratio column is the median over rounds of each source's time
       divided by the first source's time in the same round.
+
+Inputs and outputs live on tmpfs; runs go in batches that fit it, one container each, so outputs
+of hundreds of MB (convolution_mod_large) do not accumulate.
 """
 import argparse
 import hashlib
@@ -29,6 +32,13 @@ COMPILE = 'g++ -O2 -std=c++23 -DEVAL -DONLINE_JUDGE -march=native -o main main.c
 TOOLS = Path(__file__).resolve().parent
 
 
+# Case files and outputs live on tmpfs, as on the judge. Runs go in batches, one container each,
+# whose inputs and outputs fit in BATCH_BYTES of tmpfs. A container's output files count against
+# its 1 GiB memory limit until they are deleted after the batch, so they stay under OUTPUT_BYTES.
+BATCH_BYTES = 3 << 30
+OUTPUT_BYTES = 256 << 20
+
+
 class Problem:
     def __init__(self, name: str):
         self.dir = cases.generate(name)
@@ -37,22 +47,25 @@ class Problem:
         self.checker = self.dir / Path(info.get('checker', 'checker.cpp')).stem
         self.cases = sorted(p.stem for p in (self.dir / 'in').glob('*.in'))
 
+    def input(self, case: str) -> Path:
+        return self.dir / 'in' / f'{case}.in'
+
+    def output_size(self, case: str) -> int:
+        return (self.dir / 'out' / f'{case}.out').stat().st_size
+
     def accepts(self, case: str, output: Path) -> bool:
-        args = [self.checker, self.dir / 'in' / f'{case}.in', output, self.dir / 'out' / f'{case}.out']
+        args = [self.checker, self.input(case), output, self.dir / 'out' / f'{case}.out']
         return subprocess.run(args, capture_output=True).returncode == 0
 
 
-def docker(work: Path, script: str, problem: Problem | None = None) -> str:
+def docker(work: Path, script: str) -> str:
     """Run a shell script in the judge's compiler image with judge-like limits."""
     cmd = ['docker', 'run', '--rm', '--network', 'none', '--memory', '1g', '--memory-swap', '1g',
            '--ulimit', 'stack=-1:-1', '--cpuset-cpus', str(os.cpu_count() - 1),
            '--user', f'{os.getuid()}:{os.getgid()}',
            '-v', f'{work}:/w', '-w', '/w']
-    if problem:
-        cases = work / 'in'  # on tmpfs, as the judge's case files are
-        if not cases.exists():
-            shutil.copytree(problem.dir / 'in', cases)
-        cmd += ['-v', f'{cases}:/in:ro']
+    if (work / 'in').exists():
+        cmd += ['-v', f'{work / "in"}:/in:ro']
     result = subprocess.run(cmd + [IMAGE, 'sh', '-ec', script], capture_output=True, text=True)
     if result.returncode != 0:
         sys.exit(f'docker failed:\n{result.stdout}{result.stderr}')
@@ -70,13 +83,51 @@ def build(sources: list[str], work: Path) -> list[str]:
     return names
 
 
-def run_all(work: Path, problem: Problem, runs: list[tuple[str, str]]) -> list[tuple[str, float, int]]:
-    """Run (name, case) pairs in order inside one container; return (verdict, ms, rss_kb) each."""
-    lines = [f'mkdir -p out/{n}' for n in {name for name, _ in runs}]
-    lines += [f'./runner {problem.time_limit} /in/{case}.in out/{name}/{case}.out {name}/main'
-              for name, case in runs]
-    rows = docker(work, '\n'.join(lines), problem).split()
-    return [(rows[i], float(rows[i + 1]), int(rows[i + 2])) for i in range(0, len(rows), 3)]
+def batches(problem: Problem, runs: list[tuple[str, str]]) -> list[list[tuple[str, str]]]:
+    """Split runs, in order, into batches within BATCH_BYTES and OUTPUT_BYTES."""
+    result, inputs, outputs = [], {}, 0
+    for name, case in runs:
+        output, needed = problem.output_size(case), dict(inputs)
+        needed.setdefault(case, problem.input(case).stat().st_size)
+        if not result or outputs + output > min(OUTPUT_BYTES, BATCH_BYTES - sum(needed.values())):
+            result.append([])
+            outputs, needed = 0, {case: problem.input(case).stat().st_size}
+        result[-1].append((name, case))
+        inputs, outputs = needed, outputs + output
+    return result
+
+
+def stage(work: Path, problem: Problem, needed: set[str]):
+    """Make work/in hold exactly the inputs of the needed cases."""
+    staged = work / 'in'
+    staged.mkdir(exist_ok=True)
+    for path in staged.iterdir():
+        if path.stem not in needed:
+            path.unlink()
+    for case in needed:
+        if not (staged / f'{case}.in').exists():
+            shutil.copy(problem.input(case), staged)
+
+
+def run_all(work: Path, problem: Problem, runs: list[tuple[str, str]],
+            check: bool = False) -> list[tuple[str, float, int]]:
+    """Run (name, case) pairs in order; return (verdict, ms, rss_kb) each. With check, a run whose
+    output the checker rejects gets verdict WA."""
+    results = []
+    for batch in batches(problem, runs):
+        stage(work, problem, {case for _, case in batch})
+        lines = [f'mkdir -p out/{n}' for n in {name for name, _ in batch}]
+        lines += [f'./runner {problem.time_limit} /in/{case}.in out/{name}/{case}.out {name}/main'
+                  for name, case in batch]
+        rows = docker(work, '\n'.join(lines)).split()
+        for i, (name, case) in enumerate(batch):
+            verdict, ms, kb = rows[3 * i], float(rows[3 * i + 1]), int(rows[3 * i + 2])
+            output = work / 'out' / name / f'{case}.out'
+            if check and verdict == 'OK' and not problem.accepts(case, output):
+                verdict = 'WA'
+            output.unlink(missing_ok=True)
+            results.append((verdict, ms, kb))
+    return results
 
 
 def environment(sources: list[str]) -> dict:
@@ -94,11 +145,9 @@ def test(args) -> int:
     with tempfile.TemporaryDirectory(dir='/dev/shm') as tmp:
         work = Path(tmp)
         [name] = build([args.source], work)
-        results = run_all(work, problem, [(name, case) for case in problem.cases])
+        results = run_all(work, problem, [(name, case) for case in problem.cases], check=True)
         failures = 0
         for case, (verdict, ms, kb) in zip(problem.cases, results):
-            if verdict == 'OK' and not problem.accepts(case, work / 'out' / name / f'{case}.out'):
-                verdict = 'WA'
             failures += verdict != 'OK'
             print(f'{verdict:3} {ms:9.1f} ms {kb / 1024:7.1f} MiB  {case}')
     slowest = max(ms for _, ms, _ in results)
@@ -114,10 +163,10 @@ def bench(args) -> int:
         names = build(args.sources, work)
 
         # Warmup: every source on every case. Checks all outputs and finds the slowest cases.
-        warmup = [(name, case) for name in names for case in problem.cases]
+        warmup = [(name, case) for case in problem.cases for name in names]
         slowest = {}
-        for (name, case), (verdict, ms, _) in zip(warmup, run_all(work, problem, warmup)):
-            if verdict != 'OK' or not problem.accepts(case, work / 'out' / name / f'{case}.out'):
+        for (name, case), (verdict, ms, _) in zip(warmup, run_all(work, problem, warmup, check=True)):
+            if verdict != 'OK':
                 sys.exit(f'{name} fails {case} ({verdict}); run judge.py test first')
             slowest[case] = max(slowest.get(case, 0.0), ms)
         chosen = sorted(problem.cases, key=slowest.get)[-args.cases:]

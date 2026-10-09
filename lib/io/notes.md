@@ -17,8 +17,9 @@ Tests: `lib/io/test.cpp`. In-memory timing: `lib/io/bench.cpp`.
 - Bulk `uint32_t` read: 128 KiB chunks cut into four streams at token boundaries, parsed in lockstep
   two tokens per step. Chunks shrink near the end of the array; the last < 1024 tokens use the
   scalar path. Irregular whitespace in a chunk falls back to one token at a time.
-- Output: 64 KiB buffer, `write(2)`. Integers: 4-digit table (10000 entries), groups placed in a
-  vector, `pshufb` drops the leading zeros, one 16-byte store. Digit count from a 32-entry table
+- Output: 64 KiB buffer (`BasicWriter<Capacity>` for other sizes), `write(2)`. Integers: 4-digit
+  table (10000 entries), groups placed in a vector, `pshufb` drops the leading zeros, one 16-byte
+  store. Digit count from a 32-entry table
   (32-bit) or two 65-entry tables (64-bit). No branches on value size. `write<MaxDigits>()` with
   MaxDigits <= 16 skips one 64-bit division. `write_with()` hands the buffer to custom formatters.
 - Bulk `uint32_t` write: eight values per step in AVX2. Digit counts come first, from vector
@@ -121,6 +122,10 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
   token; assembly would save little.
 - Judge harness (`tools/judge.py`): inputs now on tmpfs, as on the judge, instead of the VM's disk
   cache. Same timings for these programs.
+- Writer buffer size for large outputs: convolution_mod_large (331 MB out), output phase 155.6 ms
+  with 64 KiB, 151.9 with 160 KiB, 151.1 with 256 KiB, 151.3 with 1 MiB (3 runs each, `lc-amd`).
+  256 KiB on the small ones: many_aplusb 1.003, aplusb 0.991 (21 rounds). Kept as a template
+  parameter, `BasicWriter<Capacity>`; `Writer` stays 64 KiB, so their code does not change.
 
 ## Sources
 

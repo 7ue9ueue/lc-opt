@@ -52,3 +52,8 @@ blocked division 15.26 ms. So log itself takes ~10.5 ms of 15.3.
   - Checks: 25/25 official tests (slowest 15.1 ms); `stress.py` 400 rounds; lib/poly tests at -O2
     and ASan/UBSan (`lc-intel`). exp and inv re-bundled: 26/26 and 25/25 official tests; inv's
     `.text` byte-identical, exp bench 0.9994.
+  - Merged as #128 (CI: log 0.9607 over 3 AMD machines). Its exp timing on an Intel Xeon
+    6973P-C was 1.0802; confirmed on `lc-intel` (1.0716), so the K = 1 product bottom is back as
+    before #128, with a separate bottom for sums (lib/poly/notes.md). log, `judge.py bench` 21
+    rounds, ms (ratio to Karp-Markstein): `lc-amd` KM 16.02, #128 15.37 (0.9600), fix 15.31
+    (0.9582); `lc-intel` KM 16.27, #128 15.71 (0.9648), fix 15.53 (0.9544).

@@ -183,12 +183,20 @@ products 1.77 and 1.69).
   problems/polynomial/log_of_formal_power_series/notes.md): inverse to 2^18 3.89, three
   `cyclic_product`s 5.09, two forwards 1.28, calculus 0.55.
 - Blocked division (4 blocks, h to 2^17; see Log above) with a new `inverse_product_sum`:
-  10.24 vs 10.81 ms in process. `InverseProductBottom` now takes K pairs; `inverse_product` is
-  K = 1. inv's `.text` is byte-identical; exp's code moved (same size), `judge.py bench` 21
-  rounds 0.9994. Tests: `inverse_product_sum` of 1, 2, 3 pairs against cyclic products, output
+  10.24 vs 10.81 ms in process. `InverseProductBottom` took K pairs; `inverse_product` was
+  K = 1. inv's `.text` was byte-identical; exp's code moved (same size), `judge.py bench` 21
+  rounds 0.9994 on `lc-amd`. Tests: `inverse_product_sum` of 1, 2, 3 pairs against cyclic products, output
   halves, into an operand; log in place; sizes at the block boundaries (n - 1 = 3k, 3k + 1).
   The extra leaf products of a sum cost 0.27-0.29 ms each at 2^18 (the first, with the
-  inverse, 0.51 ms in all).
+  inverse, 0.51 ms in all). Merged as #128.
+- #128's CI timed exp 1.0802 on an Intel Xeon 6973P-C (AMD machines 0.9944, 1.0007); on
+  `lc-intel` (-march=native, AVX-512 code) `judge.py bench` 21 rounds: 1.0716, so real. Cause:
+  the template `InverseProductBottom<K>` with K = 1 compiled exp's products differently.
+  Fix: the single-product `InverseProductBottom` restored as before #128;
+  `InverseProductSumBottom<K>` (K = 2, 3) holds K of them and reuses their window fills. exp's
+  and inv's `.text` are again identical to before #128 on `lc-amd` and `lc-intel`. log
+  (`judge.py bench`, 21 rounds, ratios to Karp-Markstein): `lc-amd` #128 0.9600, fix 0.9582;
+  `lc-intel` 0.9648, 0.9544.
 
 ## Sources
 

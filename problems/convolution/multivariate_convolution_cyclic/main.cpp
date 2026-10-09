@@ -3390,7 +3390,7 @@ struct Crt {
     }
 
     // c z mod p of coefficients [i, i + 8) into out; the residues are readable 8 words past.
-    void reconstruct(const std::array<const std::uint32_t*, kPrimes>& y, std::size_t count, std::uint32_t* out) const {
+    void reconstruct(const std::array<std::uint32_t*, kPrimes>& y, std::size_t count, std::uint32_t* out) const {
         for (std::size_t i = 0; i < count; i += 8) {
             const auto load = [&](int k) { return _mm256_load_si256(reinterpret_cast<const Vec*>(y[k] + i)); };
             const Vec y0 = load(0), y1 = load(1), y2 = load(2);
@@ -3441,8 +3441,6 @@ public:
         const std::size_t words = (std::size_t(1) << lg_) + multimod::Transform::kPadding;
         a_ = arena.take<std::uint32_t>(words);
         b_ = arena.take<std::uint32_t>(words);
-        work_ = arena.take<std::uint32_t>(words);
-        c_ = arena.take<std::uint32_t>(words);
         for (auto& r : residues_) r = arena.take<std::uint32_t>(words);
         tables_ = arena.take<std::uint32_t>(multimod::Transform::table_words(lg_));
         for (int k = 0; k < kPrimes; ++k) moduli_.emplace_back(kPrimeList[k][0], kPrimeList[k][1]);
@@ -3453,24 +3451,29 @@ public:
         for (const Axis& axis : axes) padded *= 2 * axis.length - 1;
         const int lg = std::max(6, int(std::bit_width(padded - 1)));
         const std::size_t words = (std::size_t(1) << lg) + multimod::Transform::kPadding;
-        return (4 + kPrimes) * Arena::bytes(words) + Arena::bytes(multimod::Transform::table_words(lg));
+        return (2 + kPrimes) * Arena::bytes(words) + Arena::bytes(multimod::Transform::table_words(lg));
     }
 
-    // f[base + offset] <- (f * g)[base + offset] over the long axes, times the scale.
-    void multiply(std::uint32_t* f, const std::uint32_t* g, std::size_t base) {
+    // f[base + offset] <- (f * g)[base + offset] over the long axes, times the scale. Between
+    // calls, a and b are zero but at places_; the last call (last = true) leaves them dirty.
+    void multiply(std::uint32_t* f, const std::uint32_t* g, std::size_t base, bool last) {
         for (std::size_t t = 0; t < offsets_.size(); ++t) {
             a_[places_[t]] = f[base + offsets_[t]];
             b_[places_[t]] = g[base + offsets_[t]];
         }
         const multimod::Transform transform(lg_, tables_);
-        std::array<const std::uint32_t*, kPrimes> y;
-        for (int k = 0; k < kPrimes; ++k) {
-            transform.multiply(a_, extent_, b_, extent_, residues_[k], work_, moduli_[k], kCrtScale[k]);
-            y[k] = residues_[k];
-        }
-        crt_.reconstruct(y, (padded_ + 7) & ~std::size_t(7), c_);
-        fold();
-        for (std::size_t t = 0; t < offsets_.size(); ++t) f[base + offsets_[t]] = c_[places_[t]];
+        // The last prime's product goes to the work array and transforms b in place.
+        std::uint32_t* const work = residues_[kPrimes - 1];
+        for (int k = 0; k < kPrimes; ++k)
+            transform.multiply(a_, extent_, b_, extent_, residues_[k], k + 1 < kPrimes ? work : b_, moduli_[k],
+                               kCrtScale[k]);
+        const std::size_t count = (padded_ + 7) & ~std::size_t(7);
+        crt_.reconstruct(residues_, count, a_);
+        fold(a_);
+        for (std::size_t t = 0; t < offsets_.size(); ++t) f[base + offsets_[t]] = a_[places_[t]];
+        if (last) return;
+        std::memset(a_, 0, count * sizeof(std::uint32_t));
+        std::memset(b_, 0, (std::size_t(1) << lg_) * sizeof(std::uint32_t));
     }
 
 private:
@@ -3479,14 +3482,14 @@ private:
     };
 
     // Index n + j of an axis onto j, for every axis in turn.
-    void fold() {
+    void fold(std::uint32_t* c) const {
         const std::uint32_t p = p_;
         for (const Fold& fold : folds_) {
             const std::size_t span = fold.stride * (2 * fold.length - 1), shift = fold.length * fold.stride;
             for (std::size_t o = 0; o < padded_; o += span)
                 for (std::size_t i = o; i < o + span - shift; ++i) {
-                    const std::uint32_t sum = c_[i] + c_[i + shift];
-                    c_[i] = sum >= p ? sum - p : sum;
+                    const std::uint32_t sum = c[i] + c[i + shift];
+                    c[i] = sum >= p ? sum - p : sum;
                 }
         }
     }
@@ -3497,7 +3500,7 @@ private:
     std::vector<Fold> folds_;
     std::size_t extent_ = 0, padded_ = 0;
     int lg_ = 0;
-    std::uint32_t *a_, *b_, *work_, *c_, *tables_;
+    std::uint32_t *a_, *b_, *tables_;
     std::array<std::uint32_t*, kPrimes> residues_{};
     std::vector<multimod::Modulus> moduli_;
 };
@@ -3570,7 +3573,8 @@ void solve() {
         for (std::size_t i = 0; i < total; ++i) f[i] = field.multiply(field.multiply(f[i], g[i]), scale);
     } else {
         LongProduct product(long_axes, field, scale, arena);
-        for (const std::uint32_t base : points(short_axes)) product.multiply(f, g, base);
+        const std::vector<std::uint32_t> bases = points(short_axes);
+        for (std::size_t i = 0; i < bases.size(); ++i) product.multiply(f, g, bases[i], i + 1 == bases.size());
     }
     transform_short(f, total, short_axes, field, field.inverse(root));
 

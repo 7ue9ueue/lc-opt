@@ -3,7 +3,8 @@
 N <= 20; a, b of 2^N values < 998244353; print c_k = sum over i xor j = k of a_i b_j mod P. 5 s.
 Input ~20.7 MB (2^21 tokens), output ~10.4 MB.
 
-Best judged: ours, [409198](https://judge.yosupo.jp/submission/409198), 15 ms (round 1).
+Best judged: ours, [409210](https://judge.yosupo.jp/submission/409210), 14 ms (round 2).
+Round 1: 409198, 15 ms.
 Record when opened: 25 ms.
 
 ## Design
@@ -115,6 +116,8 @@ faults), columns a 0.59, columns b 1.05, inverse rows 0.75, print 4.63, exit 0.9
 - Compute left (probe): rows ~0.48 per array, columns a 0.57 (0.18 of it page faults), columns
   b 0.85, inverse rows 0.73. Transforms run ~1.4 instructions per vector-level against a floor of
   ~1.25 for radix-16 in 16 registers; the rest is the I/O floor and process start/exit.
+- PR #53 merged. CI ratios: EPYC 7763 0.973, EPYC 9V74 0.963 and 0.931. Submitted its `main.cpp`:
+  [409210](https://judge.yosupo.jp/submission/409210), AC, 14 ms, 23.0 MiB (2/5).
 
 ## Next
 

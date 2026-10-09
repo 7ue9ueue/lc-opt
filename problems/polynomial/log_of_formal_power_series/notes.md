@@ -4,7 +4,7 @@ N <= 500000 coefficients of f mod 998244353, f[0] = 1; print the first N coeffic
 10 s. Largest tests: max_* and random_01/03 (N close to 500000; q = f'/f has up to 499999
 coefficients, transforms up to 2^19).
 
-Best judged: none yet.
+Best judged: ours, 15 ms: [409264](https://judge.yosupo.jp/submission/409264) (`main.cpp` of #131).
 Record when opened (issue #64): 32 ms.
 
 ## Design
@@ -57,3 +57,10 @@ blocked division 15.26 ms. So log itself takes ~10.5 ms of 15.3.
     before #128, with a separate bottom for sums (lib/poly/notes.md). log, `judge.py bench` 21
     rounds, ms (ratio to Karp-Markstein): `lc-amd` KM 16.02, #128 15.37 (0.9600), fix 15.31
     (0.9582); `lc-intel` KM 16.27, #128 15.71 (0.9648), fix 15.53 (0.9544).
+  - Merged as #131 (CI: exp 0.9983, inv 0.9989, log 0.9997).
+  - Submitted the merged `main.cpp` (#131): [409264](https://judge.yosupo.jp/submission/409264)
+    AC 15 ms, 17.4 MiB.
+- Next: leaf products take ~2.7 ms of the 10.2 (estimate from the phases: q products 0.8,
+  residuals 1.5, inverse 0.4); a faster leaf product (lib/poly/notes.md) helps inv and exp too.
+  Smaller: 7 buffers instead of 8 (T(q_2) in the work buffer), the text buffer in the scratch
+  (~1.3 MB less first touch; first use costs ~0.5 ms over warm runs).

@@ -12,9 +12,9 @@ small, k0.
 
 ## Design
 
-`solution.cpp` picks one of two methods.
+`solution.cpp` picks one of three methods: ranked if it fits, else split or graded by a cost model.
 
-- Graded (any shape; used on max_random, dim1, dim2, small). chi(i) = sum_{j<k} floor(i / P_j),
+- Graded (any shape; used on dim1, dim2). chi(i) = sum_{j<k} floor(i / P_j),
   P_j = n_1 ... n_j. A carry out of digit j adds 1 to chi(i + j) - chi(i) - chi(j); the linear
   product has no carry out of the top digit, so a term has 0..k-1 carries. With grades mod m >= k,
   m | P - 1 (1, 2, 4, 7, 8, 14, 16, 17, 28, 32), t -> w^s splits the graded product into m plain
@@ -43,14 +43,47 @@ small, k0.
   - Size 3 interpolation returns twice the coefficients (2 a0 = 2 F0, 2 a1 = F1 - F2,
     2 a2 = F1 + F2 - 2 F0); for top variables the 2 F0 is folded into f's evaluation as a
     factor 2 per zero coordinate, so every top row operation is a plain signed add.
+  - Block transforms (round 2): two variables per step in registers (forward always, inverse only
+    for 2 x 2), each group only on its rank range: forward, the ranks that can be nonzero
+    ([digit sum above the step, + n - 1 of the step and of nonzero point coordinates below,
+    + top cap + 3]); inverse, the ranks read later ([digit sum below, + n - 1 from the step on,
+    + planes + 2]). Ranges per step and vector in u8 tables.
+  - Pointwise (round 2): four ranks at a time per parity (even lanes, then odd), so each f rank is
+    loaded once per four products and the 4 sums stay in registers; g is zero-padded by 3.
+  - Spread and gather (round 2): lane v of rank r is top plane r - sum(u) - popcount(v): three
+    `vpblendd` per rank instead of masked OR chains through memory. Lane evaluation by shifts
+    (`vpsllq`, `vpslldq`, `vperm2i128`) instead of shuffle + blend.
+- Split (round 2; any shape; used on max_random, small). Outer variables O (Q = prod n_o
+  positions) by schoolbook over their digits, the inner ones by the graded method with
+  m = grade_modulus(|inner|) grades: for each grade, 2Q forward transforms of length
+  2^lg >= 2 N/Q - 1, the products h_e = sum over a + b = e (digitwise, no carry) of f_a g_b,
+  Q inverse transforms. Fewer inner variables give fewer grades (k' <= 4: m = 4).
+  - Transform (`transform.hpp`): lib/ntt's tables and radix-4 kernels down to nodes of 8 vectors,
+    then per node three levels across vectors, an 8 x 8 transpose and three levels with per-lane
+    twiddles (tables rearranged per node), down to single points. The top level is fused with the
+    weighted load and the weighted, accumulated store. All 3Q arrays run depth first together, so
+    the pointwise step happens per node of 8 vectors while the node is in L1.
+  - Pointwise: the lowest outer digit is the largest outer size <= 5 (the block); per point and
+    row pair, the block's truncated product runs in registers (even lanes, then odd lanes).
+    Rows are processed in descending order, so h_e can overwrite f_e.
+  - Layout: f, g and c are permuted to [outer][inner] rows once (runs of consecutive positions).
+  - Planner: all multisets of outer sizes with Q <= 4096 and lg <= 15; cost = m (3 Q 2^lg lg
+    0.107 + pairs 2^lg c_block + N), c_block = 0.094 ns (block 3-5), 0.13 (2), 0.19 (1); graded:
+    m 2^lg lg 0.25. Constants fitted on lc-amd (log below).
+- Memory: blocks of 256 KiB or more are 2 MiB aligned with `MADV_HUGEPAGE`; smaller ones take
+  small pages (round 1 rounded every block to 2 MiB pages, faulting in a whole huge page for each).
 - Output: `../fixed_width.hpp` (judge-specific padding). `.preinit_array` start and `_exit`.
-- `-DFORCE_GRADED` forces the graded method; `-DBLOCK_BYTES=1` makes every non-lane variable a
-  top one. `stress.py` runs both and the default build against `brute.cpp`.
+- `-DFORCE_GRADED` forces the graded method, `-DFORCE_SPLIT` the cheapest split;
+  `-DBLOCK_BYTES=1` makes every non-lane variable a top one. `stress.py` runs all three and the
+  default build against `brute.cpp`.
 
 Sources: the ranked transform is the subset-convolution technique of Björklund, Husfeldt, Kaski,
 Koivisto, "Fourier meets Möbius: fast subset convolution", STOC 2007 (recalled). The chi grading
 for truncated multivariate products is a known technique (recalled from competitive-programming
 folklore; no code read). Montgomery reduction with `vpmuludq`, `vpermd` lookups: standard.
+The split method (schoolbook outer digits around graded inner transforms) and `transform.hpp`
+(lib/ntt's kernels, then a transpose and per-lane twiddles for the last three levels) are ours;
+no sources read.
 
 ## Log
 
@@ -76,12 +109,39 @@ folklore; no code read). Montgomery reduction with `vpmuludq`, `vpermd` lookups:
   - Merged in #142. Submitted: [409313](https://judge.yosupo.jp/submission/409313), AC, 20 ms,
     21.3 MiB (record 117 ms).
 
+- 2026-10-10, claude (round 2): split method, ranked block transforms, pointwise, spread.
+  - Checks: 17/17 official tests (`judge.py test`, lc-amd); `stress.py` 600 rounds, four builds
+    (lc-intel); ASan/UBSan (`-O1`) on all official cases, four builds.
+  - lc-amd, judge flags, `judge.py test`: twos_00 13.4 ms (17.8), threes_00 12.7 (15.7),
+    max_random_01 11.3 (19.8), threes_01 10.3, max_random_00 10.2 (19.3), dim2 9.1, dim1 7.4,
+    twos_01 6.9. `judge.py bench`, 21 rounds, slowest 8 cases: round 1 20.11 ms (min 19.76), round 2
+    13.84 (min 13.44), ratio 0.688.
+  - Split on max_random (lc-amd, whole program, median of 7; outer sizes, Q, lg, grades):
+    - max_random_00 (6 6 2 10 7 3 10): {2,3,7} 42, 2^13, 4: 10.40 ms; {2,3,10}: 14.36;
+      {2,3,6} (2^14): 16.04; {3,6,6}: 16.11; {10} (2^15, 7 grades): 16.60; {2,3,6,6}: 18.20;
+      {2,3,6,7}: 19.20. Graded (round 1): 19.3.
+    - max_random_01 (9 4 7 6 5 3 8): {3,5,6} 90, 2^12, 4: 11.41; {3,4,8}: 12.18; {3,4,5} (2^13):
+      13.79; {5,6} (7 grades): 20.82.
+  - Split, steps (max_random_01 forced split, ms): transforms one by one with a per-point
+    pointwise over all pieces 14.3; depth first all together 14.7 (no gain by itself); pointwise
+    with the block in registers 17.4 -> `#pragma GCC unroll` (GCC -O2 left the 5 x 5 loops rolled,
+    sums in memory) 13.5; transform bottoms unrolled 12.8; allocation fix 11.45; one arena 11.1.
+  - Allocation: perf showed 12-15% kernel time (2 MiB page zeroing: every block, even 3 KiB, got
+    its own huge page). Threshold for huge pages, lc-amd median: always (aligned) twos_00 17.04,
+    threes_00 14.91; >= 256 KiB 16.84, 14.68; >= 2 MiB 18.55, 16.98. Kept 256 KiB.
+  - Ranked phases on twos_00 (ms, before -> after): forward 2.5 (with pruning alone; 3.1 before)
+    -> 1.4 (two variables per step); inverse 1.6 -> 0.9; pointwise 3.66 -> 3.05; spread 3.0 ->
+    1.84; gather 1.14 -> 0.69. threes_00: fusing 3 x 3 pairs in the inverse 1.10 -> 1.62 (wider
+    union ranges), so the inverse fuses only 2 x 2; forward fuses all (1.43 -> 1.12).
+  - No gain: ranked pointwise with four ranks and both parities at once (3.66 -> 4.0: 8 sums plus a
+    rotated g window spill, the sums go through memory); visiting vectors sorted by (cap, nz) for
+    predictable loop bounds (3.15 -> 3.15).
+
 ## Next
 
-- max_random is bound by 7 lib convolutions of 2^19 (58% and 69% filled). With a transform API
-  that exposes forward, pointwise and inverse separately, split the top variable into q pieces
-  (schoolbook in y, grades for the rest): max_random_00 at q = 10 needs 30 transforms of 2^15
-  per grade instead of 3 of 2^19 (-37% butterflies; guess). `lib/ntt` only offers the fused
-  product, so this needs a transform here or a lib change (owned by #33).
-- Ranked: prune rank ranges in the block transforms (zero ranks per vector are known), radix-4
-  passes with lazy reduction, tighter pointwise loops (per-lane caps differ by up to 3).
+- Ranked pointwise is the largest phase (twos_00 3.05 of ~11 ms compute): a third is the per-rank
+  reduction; lanes widen each vector's cap by 3 (~35% extra products, estimate).
+- Ranked: fuse spread with the first forward step and the pointwise with the first inverse step
+  (one L2 pass each); three variables per step for size 2.
+- Split: `forward_bottom` is ~20% of max_random (intrinsics, per-lane twiddle loads); the
+  arena's huge pages still cost ~0.3 ms of zeroing (estimate).

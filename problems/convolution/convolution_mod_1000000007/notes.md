@@ -1,7 +1,9 @@
 # convolution_mod_1000000007
 
 N, M <= 2^19 coefficients mod 10^9 + 7; print the N + M - 1 coefficients of the product. 10 s.
-Record when opened: 29 ms (another user). Best judged: none yet.
+Record when opened: 29 ms (another user). Best judged: ours, 31 ms:
+[409262](https://judge.yosupo.jp/submission/409262) (current `main.cpp`); its large cases take
+22-23 ms, the maximum is one outlier.
 
 ## Design
 
@@ -38,6 +40,11 @@ Record when opened: 29 ms (another user). Best judged: none yet.
     for every value < 10^9 + 7, against a scalar formatter); `stress.py` 400 rounds, 200 with
     `-DFORCE_WIDE`; ASan/UBSan stress 60 + 40 (`-DFORCE_WIDE`) rounds and 6 official cases with
     file and pipe input.
+  - Submitted the merged `main.cpp` (#129): [409262](https://judge.yosupo.jp/submission/409262)
+    AC 31 ms from one outlier (fft_killer_06 31, the other large cases 21-23);
+    [409263](https://judge.yosupo.jp/submission/409263) AC 32 ms from three outliers
+    (max_ans_zero_00 32, fft_killer_07 31, random_00 30; the rest 20-23). Matches `lc-amd`
+    (22.9). The judged maximum is jitter; no further submissions of this version.
 - Next: the transforms are 14.6 of ~23 ms (kernel-bound, as convolution_mod). Ideas: CRT fused
   into the last prime's final pass; kernel work in lib/ntt carried over.
 

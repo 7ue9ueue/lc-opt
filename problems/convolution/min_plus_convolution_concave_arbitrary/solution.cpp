@@ -20,15 +20,18 @@
 #include <cstdlib>
 
 #include "lib/io/io.hpp"
+#include "columns.hpp"
 
 namespace {
 
-// Rows are sweep offsets t in [0, len). The last row where the column beats the entry below is in
-// [lo, hi); the bottom entry has [len - 1, len).
+// A column in a sweep: its value at row offset t is a[offset + Step t] + bias (offset wraps mod
+// 2^32). The last row where it beats the entry below is in [lo, hi); the bottom entry has
+// [len - 1, len).
 struct Entry {
-    std::uint32_t column;
-    std::uint32_t lo;  // beats the entry below here
-    std::uint32_t hi;  // loses to it here
+    std::uint32_t offset;
+    std::uint32_t bias;  // b of the column
+    std::uint32_t lo;    // beats the entry below here
+    std::uint32_t hi;    // loses to it here
 };
 
 // Sweeps len rows: first, first + Step, ... (Step = +1 or -1). Column enter_first + Step t joins
@@ -40,12 +43,14 @@ public:
         : a_(a), b_(b), first_(first), len_(len), stack_(stack) {}
 
     void run(std::uint32_t* c, std::uint32_t enter_first, std::uint32_t enter_count) {
+        // A joining column is at a[first - enter_first] (a's first or last value).
+        const std::uint32_t joining = a_[first_ - enter_first];
         for (std::uint32_t t = 0; t < len_; ++t) {
             std::uint32_t at_t = expire(t);
             if (t < enter_count) {
                 const std::uint32_t k = enter_first + Step * t;
-                if (const std::uint32_t v = value(k, t); v <= at_t) {
-                    insert(k, t);
+                if (const std::uint32_t v = joining + b_[k]; v <= at_t) {
+                    insert({first_ - k, b_[k], 0, 0}, t);
                     at_t = v;
                 }
             }
@@ -55,17 +60,17 @@ public:
     }
 
 private:
-    std::uint32_t value(std::uint32_t j, std::uint32_t t) const { return a_[first_ + Step * t - j] + b_[j]; }
-    bool beats(std::uint32_t j, std::uint32_t o, std::uint32_t t) const { return value(j, t) <= value(o, t); }
+    std::uint32_t value(const Entry& e, std::uint32_t t) const { return a_[e.offset + Step * t] + e.bias; }
+    bool beats(const Entry& e, const Entry& o, std::uint32_t t) const { return value(e, t) <= value(o, t); }
 
     // Pops the entries that stopped owning rows before t; returns the top's value at t (any value
     // if the stack is empty).
     std::uint32_t expire(std::uint32_t t) {
         while (top_) {
             Entry& e = stack_[top_ - 1];
-            const std::uint32_t v = value(e.column, t);
+            const std::uint32_t v = value(e, t);
             if (top_ == 1 || t <= e.lo) return v;
-            if (t < e.hi && v <= value(stack_[top_ - 2].column, t)) {
+            if (t < e.hi && v <= value(stack_[top_ - 2], t)) {
                 e.lo = t;
                 return v;
             }
@@ -75,24 +80,27 @@ private:
     }
 
     // Column k joins at row t, where it beats the top; every entry owns rows from t on.
-    void insert(std::uint32_t k, std::uint32_t t) {
+    void insert(Entry k, std::uint32_t t) {
+        k.lo = t;
         while (top_) {
             Entry& q = stack_[top_ - 1];
             // Pop q if k beats it at q's last row; else q keeps rows and k loses to q from there.
             // Narrow q's bracket until one of the two is known.
-            while (!beats(k, q.column, q.hi - 1)) {
+            while (!beats(k, q, q.hi - 1)) {
                 for (;;) {
                     const std::uint32_t lo = std::max(q.lo, t);
                     if (lo == q.hi - 1) {
-                        stack_[top_++] = {k, t, lo};
+                        k.hi = lo;
+                        stack_[top_++] = k;
                         return;
                     }
-                    if (q.lo > t && !beats(k, q.column, q.lo)) {
-                        stack_[top_++] = {k, t, q.lo};
+                    if (q.lo > t && !beats(k, q, q.lo)) {
+                        k.hi = q.lo;
+                        stack_[top_++] = k;
                         return;
                     }
                     const std::uint32_t mid = lo + (q.hi - lo) / 2;
-                    if (!beats(q.column, stack_[top_ - 2].column, mid)) {
+                    if (!beats(q, stack_[top_ - 2], mid)) {
                         q.hi = mid;
                         break;
                     }
@@ -101,7 +109,9 @@ private:
             }
             --top_;
         }
-        stack_[top_++] = {k, len_ - 1, len_};
+        k.lo = len_ - 1;
+        k.hi = len_;
+        stack_[top_++] = k;
     }
 
     const std::uint32_t* a_;
@@ -131,11 +141,13 @@ void solve() {
     const auto m = in.read<std::uint32_t>();
     std::uint32_t* const a = allocate<std::uint32_t>(n);
     std::uint32_t* const b = allocate<std::uint32_t>(m);
-    std::uint32_t* const c = allocate<std::uint32_t>(n + m - 1);
+    const std::size_t count = n + m - 1;
+    std::uint32_t* const c = allocate<std::uint32_t>((count + 15) / 16 * 16);  // tail stays 0
+    char* const text = allocate<char>(columns::kTextBytes);
     Entry* const stack = allocate<Entry>(std::min(n, m));
     in.read(a, n);
     in.read(b, m);
-    std::fill(c, c + (n + m - 1), ~0u);
+    std::fill(c, c + count, ~0u);
 
     for (std::uint32_t j0 = 0; j0 < m; j0 += n) {
         const std::uint32_t j1 = std::min(m, j0 + n);
@@ -144,8 +156,7 @@ void solve() {
     }
 
     io::Writer out;
-    out.write_array(c, n + m - 1, ' ');
-    out.write('\n');
+    columns::write(out, c, count, text);
 }
 
 #ifdef __ELF__

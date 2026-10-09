@@ -3,7 +3,7 @@
 N, M <= 2^19; a and b convex, 0 <= a_i, b_i <= 10^9; print c_k = min_{i+j=k} a_i + b_j
 (N + M - 1 values, each < 2^31). 5 s.
 
-Best judged: ours, 19 ms: [409238](https://judge.yosupo.jp/submission/409238) (current `main.cpp`).
+Best judged: ours, 17 ms: [409240](https://judge.yosupo.jp/submission/409240) (current `main.cpp`).
 Record when opened: 20 ms (issue #29).
 I/O floor (`../floor.py`, `lib/io/notes.md`): 11.31 ms on `lc-amd` (with `lib/io` output).
 
@@ -70,3 +70,7 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.31 ms on `lc-amd` (with `lib/io
   - This `main.cpp`: 34/34, slowest 8.7 ms. Bench against round 1, 21 rounds: 10.17 -> 9.50
     (0.940). Stress 1500 rounds; ASan/UBSan on all 34 cases, file and piped input.
   - Next: write() of 11.5 MB (5 ms) is the floor's bulk; format 1.4 ms (W = 11), merge 0.9.
+  - Submitted: [409240](https://judge.yosupo.jp/submission/409240) AC 17 ms (max_random_02 17,
+    other max cases 7-9); [409241](https://judge.yosupo.jp/submission/409241) AC 17 ms, same source,
+    to re-roll the noise (monotone_00 17, others <= 9). Without the spike the judge's slowest case
+    is 9 ms. Every submission so far had one +8-10 ms spike.

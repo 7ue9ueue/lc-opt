@@ -198,6 +198,20 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
   41 rounds, control: a copy of main): 2^15 1.013, 1.014, 0.999; 2^16 1.011, 1.007, 1.008;
   control 1.005, 1.009, 0.992. A first run of 21 rounds had shown 0.95 for 2^15: noise. Kept 2^17.
 
+2026-10-09, claude, issue #21 round 2 (`lc-amd`, judge flags, `floor.py --fixed`, ratio to `Reader`):
+- New reason to retry streamed input: bitwise_and_convolution measured `read()` into a reused
+  64 KiB buffer at 1.87 ms against 2.16 ms for mapping, touching and unmapping its 20.7 MB input,
+  and the convolution problems read all input before any output. `io::StreamReader` in a new
+  header: 64 KiB refills, `BulkParser` per refill, limit at the start of the last complete token
+  (its scans past the chunk then stay in the buffer; a limit at the last separator let a long
+  whitespace run read past the buffer, caught by the test). Passed the lib tests with judge flags
+  and ASan/UBSan, file and pipe, 4 KiB and 64 KiB buffers.
+- Floors, 21 rounds (convolution_mod_large 7): bitwise_and 11.82 → 12.41 ms (1.039),
+  convolution_mod 9.44 → 9.69 (1.018), gcd 11.28 → 11.63 (1.026), convolution_mod_large
+  222.3 → 229.4 (1.033). Removed. Why (a guess from the phases): with the mapping, the DRAM
+  reads overlap the parse and only fault-around and `munmap` (1.64 ms per 20.7 MB) are extra;
+  the kernel copy of `read()` runs serially and costs more than that.
+
 ## Sources
 
 - Our own QPoly explorations 007 and 011 (`../SymPoly/work/ntt/io_yosupo`, `io_large`): the
@@ -219,4 +233,8 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
 - A faster uint64 write: only if a problem's floor becomes a large share of its time
   (convolution_mod_2_64 and convolution_F_2_64 are at 25% and 5% now).
 - Huge-page arrays (2 MiB-aligned mapping, `MADV_HUGEPAGE`) are copied in three solutions and cut
-  floors by 15-20%: a shared helper may belong in `lib/`.
+  floors by 15-20%: a shared helper may belong in `lib/`. It gains nothing on solved problems
+  (all allocate this way already); add it with the next problem that needs it.
+- Streamed input lost to the mapping on all four solved convolution problems (round 2); the rest
+  of the floors is kernel time (`write()`, input faults, `munmap`), the parser (~1.2 ns per token)
+  and the formatter.

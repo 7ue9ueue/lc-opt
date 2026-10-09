@@ -32,8 +32,9 @@ struct Entry {
 // Sweeps len rows: first, first + Step, ... (Step = +1 or -1). Column enter_first + Step t joins
 // at offset t for t < enter_count. c[x] = min(c[x], envelope at x).
 template <int Step>
-void sweep(const std::uint32_t* a, const std::uint32_t* b, std::uint32_t* c, std::uint32_t first,
-           std::uint32_t len, std::uint32_t enter_first, std::uint32_t enter_count, Entry* stack) {
+void sweep(const std::uint32_t* __restrict a, const std::uint32_t* __restrict b, std::uint32_t* __restrict c,
+           std::uint32_t first, std::uint32_t len, std::uint32_t enter_first, std::uint32_t enter_count,
+           Entry* __restrict stack) {
     auto value = [&](std::uint32_t j, std::uint32_t t) { return a[first + Step * t - j] + b[j]; };
     auto beats = [&](std::uint32_t j, std::uint32_t o, std::uint32_t t) { return value(j, t) <= value(o, t); };
     std::uint32_t top = 0;

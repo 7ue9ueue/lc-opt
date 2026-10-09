@@ -3228,88 +3228,112 @@ struct Axis {
     std::size_t length, stride;
 };
 
-// In-place DFT of length n along one axis: x[a + s j + s n b], j < n, for every a < s, b.
-// Values stay canonical (< p).
-class AxisDft {
+struct alignas(32) Lane {
+    Vec v;
+};
+
+// DFT of length n over F_p on 8 lanes at once: x[j stride], j < n, in place. Values stay
+// canonical (< p).
+class Dft {
 public:
-    AxisDft(const Field& field, std::uint32_t root, Axis axis)
-        : field_(field), n_(axis.length), s_(axis.stride), lanes_(n_), column_(n_) {
+    Dft(const Field& field, std::uint32_t root, std::size_t n) : p_(field.p), n_(n), in_(n) {
         std::uint32_t w = 1;
-        for (std::size_t e = 0; e < n_; ++e, w = field.multiply(w, root)) {
-            roots_.push_back(w);
-            quotients_.push_back(field.quotient(w));
-            factors_.emplace_back(w, quotients_.back(), field.p);
-        }
+        for (std::size_t e = 0; e < n; ++e, w = field.multiply(w, root)) factors_.emplace_back(w, field.quotient(w), p_);
     }
 
-    void apply(std::uint32_t* x, std::size_t total) {
-        for (std::size_t b = 0; b < total; b += s_ * n_) {
-            std::size_t a = 0;
-            for (; a + 8 <= s_; a += 8) vectors(x + b + a);
-            for (; a < s_; ++a) scalars(x + b + a);
+    // kMasked: stores only the lanes set in keep.
+    template <bool kMasked = false>
+    void operator()(std::uint32_t* x, std::size_t stride, Vec keep = Vec{}) {
+        const Vec p = broadcast(p_), p2 = add(p, p);
+        const auto at = [&](std::size_t j) { return reinterpret_cast<Vec*>(x + j * stride); };
+        const auto store = [&](std::size_t j, Vec v) {
+            if constexpr (kMasked) _mm256_maskstore_epi32(reinterpret_cast<int*>(at(j)), keep, v);
+            else _mm256_storeu_si256(at(j), v);
+        };
+        for (std::size_t j = 0; j < n_; ++j) in_[j].v = _mm256_loadu_si256(at(j));
+        if (n_ == 2) {
+            store(0, reduce(add(in_[0].v, in_[1].v), p));
+            store(1, reduce(_mm256_sub_epi32(add(in_[0].v, p), in_[1].v), p));
+            return;
+        }
+        Vec sum = in_[0].v;
+        for (std::size_t j = 1; j < n_; ++j) sum = reduce(add(sum, in_[j].v), p);
+        store(0, sum);
+        for (std::size_t k = 1; k < n_; ++k) {
+            Vec acc = in_[0].v;  // < 2p
+            std::size_t e = 0;
+            for (std::size_t j = 1; j < n_; ++j) {
+                e += k;
+                if (e >= n_) e -= n_;
+                acc = reduce(add(acc, multiply(in_[j].v, factors_[e])), p2);
+            }
+            store(k, reduce(acc, p));
         }
     }
 
 private:
-    // Eight adjacent columns.
-    void vectors(std::uint32_t* x) {
-        const Vec p = broadcast(field_.p), p2 = add(p, p);
-        const auto at = [&](std::size_t j) { return reinterpret_cast<Vec*>(x + j * s_); };
-        for (std::size_t j = 0; j < n_; ++j) lanes_[j] = _mm256_loadu_si256(at(j));
-        if (n_ == 2) {
-            _mm256_storeu_si256(at(0), reduce(add(lanes_[0], lanes_[1]), p));
-            _mm256_storeu_si256(at(1), reduce(_mm256_sub_epi32(add(lanes_[0], p), lanes_[1]), p));
-            return;
-        }
-        Vec sum = lanes_[0];
-        for (std::size_t j = 1; j < n_; ++j) sum = reduce(add(sum, lanes_[j]), p);
-        _mm256_storeu_si256(at(0), sum);
-        for (std::size_t k = 1; k < n_; ++k) {
-            Vec acc = lanes_[0];  // < 2p
-            std::size_t e = 0;
-            for (std::size_t j = 1; j < n_; ++j) {
-                e += k;
-                if (e >= n_) e -= n_;
-                acc = reduce(add(acc, multiply(lanes_[j], factors_[e])), p2);
-            }
-            _mm256_storeu_si256(at(k), reduce(acc, p));
-        }
-    }
-
-    // One column.
-    void scalars(std::uint32_t* x) {
-        const std::uint32_t p = field_.p;
-        std::uint32_t* v = column_.data();
-        for (std::size_t j = 0; j < n_; ++j) v[j] = x[j * s_];
-        for (std::size_t k = 0; k < n_; ++k) {
-            std::uint32_t acc = v[0];  // < 2p
-            std::size_t e = 0;
-            for (std::size_t j = 1; j < n_; ++j) {
-                e += k;
-                if (e >= n_) e -= n_;
-                const auto q = std::uint32_t(std::uint64_t(v[j]) * quotients_[e] >> 32);
-                acc += v[j] * roots_[e] - q * p;  // product in [0, 2p)
-                if (acc >= 2 * p) acc -= 2 * p;
-            }
-            x[k * s_] = acc >= p ? acc - p : acc;
-        }
-    }
-
-    const Field& field_;
-    std::size_t n_, s_;
-    std::vector<std::uint32_t> roots_, quotients_;
-    std::vector<Factor> factors_;
-    std::vector<Vec> lanes_;
-    std::vector<std::uint32_t> column_;
+    std::uint32_t p_;
+    std::size_t n_;
+    std::vector<Factor> factors_;  // w^e, e < n
+    std::vector<Lane> in_;
 };
 
+// An axis of stride s >= 8, 8 adjacent columns per step: x[a + s j + s n b] for a < s. The last
+// step of each run of s columns overlaps the one before and stores only its new lanes.
+void transform_wide(std::uint32_t* x, std::size_t total, Axis axis, Dft& dft) {
+    const std::size_t s = axis.stride, full = s / 8 * 8;
+    const Vec lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    const Vec keep = _mm256_cmpgt_epi32(lane, _mm256_set1_epi32(int(7 - (s - full))));
+    for (std::size_t b = 0; b < total; b += s * axis.length) {
+        for (std::size_t a = 0; a < full; a += 8) dft(x + b + a, s);
+        if (full < s) dft.operator()<true>(x + b + s - 8, s, keep);
+    }
+}
+
+// Rows of m words hold every axis of stride < 8; rows_total is a multiple of 8 m. Eight rows at a time are interleaved into a
+// buffer (word c of row l at 8 c + l) and transformed along those axes there.
+void transform_narrow(std::uint32_t* x, std::size_t rows_total, std::size_t m, const std::vector<Axis>& axes,
+                      std::vector<Dft>& dfts) {
+    std::vector<Lane> buffer(m);
+    auto* t = reinterpret_cast<std::uint32_t*>(buffer.data());
+    for (std::size_t r = 0; r < rows_total; r += 8 * m) {
+        for (std::size_t l = 0; l < 8; ++l)
+            for (std::size_t c = 0; c < m; ++c) t[8 * c + l] = x[r + l * m + c];
+        for (std::size_t i = 0; i < axes.size(); ++i) {
+            const std::size_t s = axes[i].stride;
+            for (std::size_t b = 0; b < m; b += s * axes[i].length)
+                for (std::size_t a = 0; a < s; ++a) dfts[i](t + 8 * (b + a), 8 * s);
+        }
+        for (std::size_t l = 0; l < 8; ++l)
+            for (std::size_t c = 0; c < m; ++c) x[r + l * m + c] = t[8 * c + l];
+    }
+}
+
+// Words per row of the axes of stride < 8 (1 if none).
+std::size_t narrow_row(const std::vector<Axis>& axes) {
+    std::size_t m = 1;
+    for (const Axis& axis : axes)
+        if (axis.stride < 8) m = std::max(m, axis.stride * axis.length);
+    return m;
+}
+
 // The DFT along every short axis, forward (root = generator) or inverse (root = its inverse).
+// x holds total words, writable up to total rounded up to a multiple of 8 narrow_row(axes).
 void transform_short(std::uint32_t* x, std::size_t total, const std::vector<Axis>& axes, const Field& field,
                      std::uint32_t root) {
+    std::vector<Axis> narrow;
+    std::vector<Dft> narrow_dfts;
     for (const Axis& axis : axes) {
-        AxisDft dft(field, field.power(root, (field.p - 1) / axis.length), axis);
-        dft.apply(x, total);
+        Dft dft(field, field.power(root, (field.p - 1) / axis.length), axis.length);
+        if (axis.stride >= 8) {
+            transform_wide(x, total, axis, dft);
+        } else {
+            narrow.push_back(axis);
+            narrow_dfts.push_back(std::move(dft));
+        }
     }
+    const std::size_t m = narrow_row(axes);
+    if (!narrow.empty()) transform_narrow(x, (total + 8 * m - 1) / (8 * m) * (8 * m), m, narrow, narrow_dfts);
 }
 
 constexpr int kPrimes = 3;
@@ -3528,7 +3552,8 @@ void solve() {
             short_total *= axis.length;
         }
 
-    const std::size_t padded_total = (total + 15) & ~std::size_t(15);
+    const std::size_t rows = 8 * narrow_row(short_axes);
+    const std::size_t padded_total = (total + rows - 1) / rows * rows;
     Arena arena(2 * Arena::bytes(padded_total) + Arena::bytes(fields::kTextBytes / 4 + 1) +
                 (long_axes.empty() ? 0 : LongProduct::arena_bytes(long_axes)));
     auto* f = arena.take<std::uint32_t>(padded_total);

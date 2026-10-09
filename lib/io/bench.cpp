@@ -53,6 +53,10 @@ Timing time_rounds(const std::function<double()>& round) {
 
 volatile std::uint64_t sink;
 
+// Types with a bulk read path.
+template <class T>
+constexpr bool kBulkRead = std::same_as<T, std::uint32_t> || std::same_as<T, std::uint64_t>;
+
 template <class T>
 std::vector<T> make(std::mt19937_64& rng, const std::function<T(std::mt19937_64&)>& gen) {
     std::vector<T> v(kTokens);
@@ -87,8 +91,8 @@ void bench(const char* name, const std::function<T(std::mt19937_64&)>& gen) {
         return t1 - t0;
     });
     Timing bulk{};
-    if constexpr (std::same_as<T, std::uint32_t>) {
-        std::vector<std::uint32_t> got(kTokens);
+    if constexpr (kBulkRead<T>) {
+        std::vector<T> got(kTokens);
         bulk = time_rounds([&] {
             io::Reader in(pipe_with(text));
             ::wait(nullptr);
@@ -133,6 +137,7 @@ int main() {
     bench<u32>("digit", [](auto& r) { return u32(r() % 10); });
     bench<u32>("mixed32", [](auto& r) { return u32(r() >> (r() % 32)); });
     bench<u32>("u32", [](auto& r) { return u32(r()); });
+    bench<u64>("u64", [](auto& r) { return u64(r()); });
     bench<u64>("1e18", [](auto& r) { return u64(r() % 1000000000000000001); });
     bench<u64>("mixed64", [](auto& r) { return u64(r() >> (r() % 64)); });
     bench<u64>("<1e16", [](auto& r) { return u64(r() % 10000000000000000); });

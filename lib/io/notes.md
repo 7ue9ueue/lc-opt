@@ -17,6 +17,10 @@ Tests: `lib/io/test.cpp`. In-memory timing: `lib/io/bench.cpp`.
 - Bulk `uint32_t` read: 128 KiB chunks cut into four streams at token boundaries, parsed in lockstep
   two tokens per step. Chunks shrink near the end of the array; the last < 1024 tokens use the
   scalar path. Irregular whitespace in a chunk falls back to one token at a time.
+- Bulk `uint64_t` read: the same chunks and streams. A step finds two tokens in the separator mask
+  of the 64 bytes at a stream's position; each token's digits are the 32 bytes that end at it, minus
+  a row of `kDigitMask` (0xFF before the token, '0' in it) with unsigned saturation. Values are
+  8-digit limbs joined in vectors: top * 10^16 + mid * 10^8 + low.
 - Output: 64 KiB buffer, `write(2)`. Integers: 4-digit table (10000 entries), groups placed in a
   vector, `pshufb` drops the leading zeros, one 16-byte store. Digit count from a 32-entry table
   (32-bit) or two 65-entry tables (64-bit). No branches on value size. `write<MaxDigits>()` with
@@ -32,14 +36,15 @@ In memory, ns per token, median of 15 rounds of 2^20 tokens (`bench.cpp`):
 
 | Input | read | bulk read | write | bulk write |
 |---|---|---|---|---|
-| uint32 < 998244353 | 2.06 | 2.26 | 3.83 | 2.53 |
+| uint32 < 998244353 | 2.07 | 2.27 | 3.80 | 2.53 |
 | uint32 0..9 | 1.59 | 2.11 | 3.69 | 2.47 |
-| uint32, random bit length | 2.19 | 2.27 | 3.88 | 2.54 |
-| uint64 <= 10^18 | 2.97 | | 5.28 | |
-| uint64 < 10^16 | 2.95 | | 5.26 | |
-| uint64 < 10^16, MaxDigits 16 | 2.27 | | 4.03 | |
-| int64, random | 3.29 | | 6.04 | |
-| int, random sign | 2.19 | | 4.60 | |
+| uint32, random bit length | 2.18 | 2.27 | 3.81 | 2.53 |
+| uint64, full range | 2.98 | 3.91 | 5.31 | |
+| uint64 <= 10^18 | 2.97 | 3.90 | 5.33 | |
+| uint64 < 10^16 | 2.95 | 3.88 | 5.30 | |
+| uint64 < 10^16, MaxDigits 16 | 2.26 | 3.87 | 4.05 | |
+| int64, random | 3.28 | | 5.95 | |
+| int, random sign | 2.18 | | 4.60 | |
 
 Whole process, judge-like runner, ms, median of 21 rounds, max over the 3 largest cases:
 
@@ -54,6 +59,10 @@ Whole process, judge-like runner, ms, median of 21 rounds, max over the 3 larges
 | many_aplusb: lib/io, one value at a time | 31.90 |
 | many_aplusb: decimal addition in vectors (its `main.cpp`; record 23 ms) | 21.12 |
 | aplusb: `scanf`/`printf` vs lib/io, ratio | 0.99 |
+
+The 64-bit bulk read loses in `bench.cpp` (21 MB of text streamed from memory) but wins on warm
+input (`BulkParser64::parse` 1.6 ns per token for 2^14..2^20 tokens, a scalar chain of separator
+and `parse_ending24` 5.0) and in the whole process (below).
 
 The old code prints every value in 10 columns (the checker allows it), about 1.1 ns per value.
 That is a judge-specific trick: it belongs in a problem's `main.cpp`, not here.

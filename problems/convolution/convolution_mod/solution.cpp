@@ -1,11 +1,11 @@
 // a * b mod 998244353: one cyclic NTT of length 2^lg >= N + M - 1 (lib/ntt), output in fixed-width
-// fields (../fixed_width.hpp). For 2^lg = 2 * 4^j (2^20 at the maximum) the top level is a radix-8
+// fields (fields.hpp). For 2^lg = 2 * 4^j (2^20 at the maximum) the top level is a radix-8
 // pass here (Product); other lengths use ntt::Convolution as is.
 #include <unistd.h>
 
 #include "lib/io/io.hpp"
 #include "lib/ntt/ntt.hpp"
-#include "../fixed_width.hpp"
+#include "fields.hpp"
 
 namespace {
 
@@ -58,7 +58,7 @@ public:
     Product(std::size_t n, std::size_t m) : lg_(log_length(n, m)) {
         const std::size_t len = length(), words = 2 * (len + kPadding) + 2 * ntt::detail::table_words(lg_);
         constexpr std::size_t kHuge = std::size_t(1) << 21;
-        bytes_ = (words * sizeof(std::uint32_t) + kHuge - 1) / kHuge * kHuge + kHuge;
+        bytes_ = (words * sizeof(std::uint32_t) + fields::kTextBytes + kHuge - 1) / kHuge * kHuge + kHuge;
         region_ = ::mmap(nullptr, bytes_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (region_ == MAP_FAILED) std::abort();
         const std::uintptr_t aligned = (reinterpret_cast<std::uintptr_t>(region_) + kHuge - 1) & ~(kHuge - 1);
@@ -69,6 +69,7 @@ public:
         b_ = a_ + len + kPadding;  // a different cache set from a at equal offsets
         roots_ = b_ + len + kPadding;
         inverse_roots_ = roots_ + ntt::detail::table_words(lg_);
+        text_ = reinterpret_cast<char*>(inverse_roots_ + ntt::detail::table_words(lg_));
     }
 
     ~Product() { ::munmap(region_, bytes_); }
@@ -78,6 +79,9 @@ public:
 
     std::uint32_t* a() { return a_; }
     std::uint32_t* b() { return b_; }
+    // fields::kTextBytes bytes for the output, 16-byte aligned, after the tables. At 2^20 it shares
+    // their huge page (9.25 of 10 MiB used), so it costs no page faults.
+    char* text() { return text_; }
 
     // The coefficients of a * b, canonical, in a(); b() is destroyed.
     const std::uint32_t* multiply() {
@@ -113,7 +117,15 @@ private:
     void* region_;
     std::size_t bytes_;
     std::uint32_t *a_, *b_, *roots_, *inverse_roots_;
+    char* text_;
 };
+
+char* text(Product& product) { return product.text(); }
+
+char* text(ntt::Convolution&) {
+    alignas(64) static char buffer[fields::kTextBytes];
+    return buffer;
+}
 
 template <class Multiplier>
 void convolve(io::Reader& in, std::size_t n, std::size_t m) {
@@ -122,7 +134,7 @@ void convolve(io::Reader& in, std::size_t n, std::size_t m) {
     in.read(product.b(), m);
     const std::uint32_t* c = product.multiply();
     io::Writer out;
-    fixed_width::write(out, c, n + m - 1);
+    fields::write(out, c, n + m - 1, text(product));
 }
 
 void solve() {

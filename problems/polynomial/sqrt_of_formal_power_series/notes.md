@@ -6,7 +6,9 @@ Slowest tests: max_random_01, _02 and random_01, _02 (N = 500000, f[0] a square,
 has 500000 coefficients; transforms up to 2^18). The others: -1 (odd leading zero count or a
 non-square leading coefficient), all zeros, or u = f / x^k of N - k coefficients.
 
-Best judged: none yet.
+Best judged: ours, 16 ms: [409316](https://judge.yosupo.jp/submission/409316) (`main.cpp` of #148),
+with a +9 ms launch spike on near_262144_01 (16 ms, its peers 7; `tools/spikes.py`): clean
+score 12 ms.
 Record when opened (issue #66): 25 ms.
 
 ## Design
@@ -44,6 +46,9 @@ sqrt 7.72 ms warm (median of 14), 7.9 ms on first use; tables 0.06-0.1 ms.
     copies ~0.2.
   - Considered, not done (estimates in lib/poly/notes.md): blocked last stage with smaller
     transforms (more leaf products), h at full precision, an inverse square root then f u.
+  - Merged as #148 (CI: correctness only, no baseline). Submitted its `main.cpp`:
+    [409316](https://judge.yosupo.jp/submission/409316) AC 16 ms, 13.6 MiB; clean score 12 ms
+    (spikes on near_262144_01 16 ms, monomial_02 11 ms, lower_deg_zero_00 10 ms).
 - Next: the leaf-product kernel (#95, shared); a leaf square for g^2 (36 of 64 products);
   fusing the residual pass into the inverse of g^2.
 

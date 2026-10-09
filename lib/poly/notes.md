@@ -306,6 +306,8 @@ products 1.77 and 1.69).
   `inverse_product` 0.260 / 0.531; `cyclic_product` (half-zero input, lower half) 0.387 / 0.821.
 - Whole process (`judge.py bench`, `lc-amd`, 15 rounds, slowest 4): 12.87 ms against 28.91 ms
   for the same program with `power(u, 1/2, c)`.
+- Merged as #148. Judged [409316](https://judge.yosupo.jp/submission/409316): AC 16 ms with a
+  +9 ms launch spike; clean score 12 ms (record 25 ms).
 
 ## Sources
 

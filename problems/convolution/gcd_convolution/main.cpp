@@ -3,10 +3,12 @@
 // Sums over multiples (zeta) of a and b, pointwise product, then the inverse (Moebius). Both are
 // products of commuting per-prime passes. Primes 2..13: one pass each (zeta: x_i += x_ip, i
 // descending; Moebius: x_i -= x_ip, i ascending). Primes >= 17 together: one sweep over the
-// multipliers m coprime to 30030 ("rough"), segment by segment so the sources stay in L2.
+// multipliers m coprime to 30030 ("rough"), segment by segment so the sources stay in L2 (in L1
+// for m < 256).
 // a and b are interleaved as pairs, so one load fetches both.
 #include <immintrin.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -771,13 +773,16 @@ private:
 };
 
 }  // namespace io
-// problems/convolution/fixed_width.hpp
-// Fixed-width output of residues < 10^9: each value right-aligned in 9 characters, then a space;
-// the last separator is a newline. Judge-specific: the checker compares tokens, so the padding is
-// accepted. No branches on value size, and four 32-byte stores per eight values.
+// problems/convolution/convolution_mod/fields.hpp
+// Fixed-width output of residues < 10^9, byte for byte as ../fixed_width.hpp: each value
+// right-aligned in 9 characters, then a space; the last separator is a newline. Judge-specific:
+// the checker compares tokens, so the padding is accepted.
+//
+// 16 values per step, written as ten 16-byte chunks. The divisions of the next step are issued
+// before the digits of this one, so the two dependency chains overlap.
 
 
-namespace fixed_width {
+namespace fields {
 
 namespace detail {
 
@@ -786,134 +791,162 @@ struct alignas(32) Lanes {
 };
 
 constexpr Lanes all(std::uint32_t x) { return {{x, x, x, x, x, x, x, x}}; }
+constexpr Lanes all16(std::uint32_t x) { return all(x * 0x10001); }
 
-constexpr Lanes bytes(const int (&b)[32]) {
+constexpr int Z = 0x80;  // shuffle control: zero byte
+
+// The same 16-byte shuffle control in both lanes.
+constexpr Lanes shuffle(const int (&b)[16]) {
     Lanes t{};
-    for (int i = 0; i < 32; ++i) t.lane[i / 4] |= std::uint32_t(b[i] & 0xFF) << 8 * (i % 4);
+    for (int i = 0; i < 32; ++i) t.lane[i / 4] |= std::uint32_t(b[i % 16] & 0xFF) << 8 * (i % 4);
     return t;
 }
 
-constexpr int x = 0x80;  // shuffle control: zero byte
-
 struct Constants {
-    Lanes div4 = all(3518437209), div8 = all(720575941);  // ceil(2^45 / 10^4), ceil(2^56 / 10^8)
-    Lanes ten4 = all(10000);
-    Lanes by100 = all(0x147B147B), hundreds_up = all(65436);  // 5243 in each 16-bit half
-    Lanes by10 = all(0x199A199A), tens_up = all(0x00F600F6);  // 6554 and 246 in each half
-    Lanes zero = all(0x30303030), lead = all(0x20000020), lead_shown = all(0x10);
-    // max_below[e] = 10^e - 1; blank masks for the low and high digit dwords, and the shift
-    // offset of the high one (its digits come 4 after the low ones: 8 * 3 bits).
-    Lanes max_below[9] = {all(0),     all(9),      all(99),      all(999),     all(9999),
-                          all(99999), all(999999), all(9999999), all(99999999)};
-    Lanes blank_low = all(0x10101000), blank_high = all(0x10101010), high_offset = all(24);
-    // Two fields from one lane's [high_i, low_i, high_i+1, low_i+1] digit dwords, copied to both
-    // lanes; the 9th digits (bytes 0, 10) and separators (9, 19) come from lead dwords j, j + 1.
-    Lanes order = bytes({x, 3, 2, 1, 0, 7, 6, 5, 4, x, x, 11, 10, 9, 8, 15,  //
-                         14, 13, 12, x, x, x, x, x, x, x, x, x, x, x, x, x});
-    Lanes ends[2] = {bytes({0, x, x, x, x, x, x, x, x, 3, 4, x, x, x, x, x,  //
-                            x, x, x, 7, x, x, x, x, x, x, x, x, x, x, x, x}),
-                     bytes({8, x, x, x, x, x, x, x, x, 11, 12, x, x, x, x, x,  //
-                            x, x, x, 15, x, x, x, x, x, x, x, x, x, x, x, x})};
+    Lanes div10 = all(429496730);     // ceil(2^32 / 10): v / 10 = v * div10 >> 32 for v < 2^30
+    Lanes div10e5 = all(1407374884);  // ceil(2^47 / 10^5): v / 10^5 = v * div10e5 >> 47
+    Lanes pack = all(1 - 10000 * 65536u);  // [h, w - 10^4 h] in 16-bit halves = 2^16 w + h pack
+    Lanes ten = all(10);
+    Lanes tail = all(' ' << 8 | '0');
+    Lanes by100 = all16(5243), hundred = all16(100);  // x / 100 = (x * 5243 >> 16) >> 3 for x < 10^4
+    Lanes by10 = all16(6554);  // z / 10 = z * 6554 >> 16 for z < 100
+    Lanes tens_out = all16(2559);  // bytes [z / 10, z % 10] = 256 z - 2559 (z / 10)
+    Lanes ones = all(~0u), zero = all(0x30303030), space = all(0x20202020);
+    // Chunk c of a step: text bytes [16c, 16c + 16) of values 0-7 in the low lane, of values 8-15
+    // in the high lane. Sources, each lane: digits of two values (8 bytes each), or four tails
+    // (2 bytes in each dword). Comments: field bytes of the low lane.
+    Lanes chunk0[2] = {shuffle({0, 1, 2, 3, 4, 5, 6, 7, Z, Z, 8, 9, 10, 11, 12, 13}),  // D0 D1
+                       shuffle({Z, Z, Z, Z, Z, Z, Z, Z, 0, 1, Z, Z, Z, Z, Z, Z})};     // T0
+    Lanes chunk1[3] = {shuffle({14, 15, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z}),    // D1
+                       shuffle({Z, Z, 4, 5, Z, Z, Z, Z, Z, Z, Z, Z, 8, 9, Z, Z}),      // T1 T2
+                       shuffle({Z, Z, Z, Z, 0, 1, 2, 3, 4, 5, 6, 7, Z, Z, 8, 9})};     // D2 D3
+    Lanes chunk2[3] = {shuffle({10, 11, 12, 13, 14, 15, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z}),  // D3
+                       shuffle({Z, Z, Z, Z, Z, Z, 12, 13, Z, Z, Z, Z, Z, Z, Z, Z}),      // T3
+                       shuffle({Z, Z, Z, Z, Z, Z, Z, Z, 0, 1, 2, 3, 4, 5, 6, 7})};       // D4
+    Lanes chunk3[3] = {shuffle({0, 1, Z, Z, Z, Z, Z, Z, Z, Z, 4, 5, Z, Z, Z, Z}),        // T4 T5
+                       shuffle({Z, Z, 8, 9, 10, 11, 12, 13, 14, 15, Z, Z, Z, Z, Z, Z}),  // D5
+                       shuffle({Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, 0, 1, 2, 3})};       // D6
+    Lanes chunk4[2] = {shuffle({4, 5, 6, 7, Z, Z, 8, 9, 10, 11, 12, 13, 14, 15, Z, Z}),  // D6 D7
+                       shuffle({Z, Z, Z, Z, 8, 9, Z, Z, Z, Z, Z, Z, Z, Z, 12, 13})};     // T6 T7
 };
 
 inline constexpr Constants kConstants{};
-
-// kConstants through a pointer the compiler cannot see through: the output stores might change
-// the table, so each use stays a memory operand instead of a constant rebuilt in a register.
-inline const Constants& constants() {
-    const Constants* k = &kConstants;
-    asm("" : "+r"(k));
-    return *k;
-}
 
 [[gnu::always_inline]] inline __m256i load(const Lanes& l) {
     return _mm256_load_si256(reinterpret_cast<const __m256i*>(&l));
 }
 
-// floor(v / d) for each dword v < 10^9 as (v * magic) >> Shift; odd: v >> 32 per qword. The odd
-// lanes shift 32 bits less, which leaves the quotient in the high dword.
-template <int Shift>
-[[gnu::always_inline]] inline __m256i divide(__m256i v, __m256i odd, const Lanes& magic) {
-    return _mm256_blend_epi32(_mm256_srli_epi64(_mm256_mul_epu32(v, load(magic)), Shift),
-                              _mm256_srli_epi64(_mm256_mul_epu32(odd, load(magic)), Shift - 32), 0xAA);
+[[gnu::always_inline]] inline __m256i shuffle(__m256i x, const Lanes& control) {
+    return _mm256_shuffle_epi8(x, load(control));
 }
 
-// Each dword y < 10^4 -> its 4 decimal digits as byte values, least significant first.
-[[gnu::always_inline]] inline __m256i digits4(__m256i y, const Constants& k) {
-    const __m256i hundreds = _mm256_srli_epi16(_mm256_mulhi_epu16(y, load(k.by100)), 3);
-    const __m256i halves = _mm256_add_epi32(y, _mm256_mullo_epi32(hundreds, load(k.hundreds_up)));  // [y % 100, y / 100]
-    const __m256i tens = _mm256_mulhi_epu16(halves, load(k.by10));  // each 16-bit half / 10
-    return _mm256_add_epi16(halves, _mm256_mullo_epi16(tens, load(k.tens_up)));  // [x % 10, x / 10] bytes
+// Eight values v < 10^9 (dwords) after the divisions by 10 and 10^5: halves holds
+// [w / 10^4, w % 10^4] in 16-bit halves for w = v / 10; tail holds the units digit and the
+// separator as text.
+struct Divided {
+    __m256i halves, tail;
+};
+
+[[gnu::always_inline]] inline Divided divide(__m256i v, __m256i odd, const Constants& k) {
+    const __m256i w = _mm256_blend_epi32(_mm256_srli_epi64(_mm256_mul_epu32(v, load(k.div10)), 32),
+                                         _mm256_mul_epu32(odd, load(k.div10)), 0xAA);
+    const __m256i h = _mm256_blend_epi32(_mm256_srli_epi64(_mm256_mul_epu32(v, load(k.div10e5)), 47),
+                                         _mm256_srli_epi64(_mm256_mul_epu32(odd, load(k.div10e5)), 15), 0xAA);
+    const __m256i halves = _mm256_add_epi32(_mm256_slli_epi32(w, 16), _mm256_mullo_epi32(h, load(k.pack)));
+    const __m256i tail = _mm256_sub_epi32(_mm256_add_epi32(v, load(k.tail)), _mm256_mullo_epi32(w, load(k.ten)));
+    return {halves, tail};
 }
 
-// Eight values < 10^9 as 80 bytes at p. Stores 12 bytes past the end.
-[[gnu::always_inline]] inline void format8(char* p, __m256i v, const Constants& k) {
-    const __m256i odd = _mm256_srli_epi64(v, 32);
-    const __m256i q4 = divide<45>(v, odd, k.div4);  // v / 10^4
-    const __m256i q8 = divide<56>(v, odd, k.div8);  // v / 10^8
-    const __m256i high = _mm256_sub_epi32(q4, _mm256_mullo_epi32(q8, load(k.ten4)));
-    const __m256i low = _mm256_sub_epi32(v, _mm256_mullo_epi32(q4, load(k.ten4)));
-    // v has n digits: the 9 - n leading positions are blank, '0' - 0x10 = ' '. Blank masks (0x10
-    // per byte, the most significant digit in the top byte) shift left by 8 (n - 1) bits for the
-    // low dword, 8 (n - 4) for the high one. c = 1 - n from the compares v >= 10^e, e = 1..8.
-    const auto at_least = [&](int e) { return _mm256_cmpgt_epi32(v, load(k.max_below[e])); };
-    const auto sum = [](__m256i a, __m256i b) { return _mm256_add_epi32(a, b); };
-    const __m256i at_least8 = at_least(8);
-    const __m256i c = sum(sum(sum(at_least(1), at_least(2)), sum(at_least(3), at_least(4))),
-                          sum(sum(at_least(5), at_least(6)), sum(at_least(7), at_least8)));
-    const __m256i shift = _mm256_slli_epi32(_mm256_abs_epi32(c), 3);
-    const __m256i blank_low = _mm256_sllv_epi32(load(k.blank_low), shift);  // the units always shown
-    const __m256i high_shift = _mm256_subs_epu16(shift, load(k.high_offset));  // 0 if n < 4
-    const __m256i blank_high = _mm256_sllv_epi32(load(k.blank_high), high_shift);
-    const __m256i h = _mm256_sub_epi8(_mm256_add_epi8(digits4(high, k), load(k.zero)), blank_high);
-    const __m256i l = _mm256_sub_epi8(_mm256_add_epi8(digits4(low, k), load(k.zero)), blank_low);
-    // Lead dwords: the digit of 10^8 (or a space) in byte 0, the separator in byte 3.
-    const __m256i lead_digit = _mm256_and_si256(at_least8, load(k.lead_shown));  // ' ' + 0x10 = '0'
-    const __m256i lead = _mm256_add_epi32(_mm256_add_epi32(q8, load(k.lead)), lead_digit);
-    const __m256i hl01 = _mm256_unpacklo_epi32(h, l);  // [h0 l0 h1 l1 | h4 l4 h5 l5]
-    const __m256i hl23 = _mm256_unpackhi_epi32(h, l);  // [h2 l2 h3 l3 | h6 l6 h7 l7]
-    // Each lane copied to both lanes.
-    const auto low_lane = [](__m256i a) { return _mm256_inserti128_si256(a, _mm256_castsi256_si128(a), 1); };
-    const auto high_lane = [](__m256i a) { return _mm256_permute2x128_si256(a, a, 0x11); };
-    const __m256i lead_low = low_lane(lead), lead_high = high_lane(lead);
-    const auto two_fields = [&](__m256i digits, __m256i leads, int j) {
-        return _mm256_or_si256(_mm256_shuffle_epi8(digits, load(k.order)),
-                               _mm256_shuffle_epi8(leads, load(k.ends[j])));
-    };
-    const auto store = [](char* q, __m256i f) { _mm256_storeu_si256(reinterpret_cast<__m256i*>(q), f); };
-    store(p, two_fields(low_lane(hl01), lead_low, 0));
-    store(p + 20, two_fields(low_lane(hl23), lead_low, 1));
-    store(p + 40, two_fields(high_lane(hl01), lead_high, 0));
-    store(p + 60, two_fields(high_lane(hl23), lead_high, 1));
+// 16-bit z < 100 -> bytes [z / 10, z % 10].
+[[gnu::always_inline]] inline __m256i two_digits(__m256i z, const Constants& k) {
+    const __m256i tens = _mm256_mulhi_epu16(z, load(k.by10));
+    return _mm256_sub_epi16(_mm256_slli_epi16(z, 8), _mm256_mullo_epi16(tens, load(k.tens_out)));
+}
+
+// Qwords of 8 digits, most significant first -> text; leading zeros become spaces. x ^ (x - 1)
+// sets the bits up to the lowest set one: 0xFF in leading zero bytes, < 0x10 in the first
+// nonzero digit, 0 above. blendv takes the space where a byte's top bit is set.
+[[gnu::always_inline]] inline __m256i text(__m256i digits, const Constants& k) {
+    const __m256i upto = _mm256_xor_si256(digits, _mm256_add_epi64(digits, load(k.ones)));
+    return _mm256_blendv_epi8(_mm256_or_si256(digits, load(k.zero)), load(k.space), upto);
+}
+
+// Text of the 8 digits of w, two values per lane: values [0, 1 | 4, 5] of d in lo, [2, 3 | 6, 7]
+// in hi. Per value, 16-bit [w / 10^6, w / 10^4 % 100, w / 100 % 100, w % 100] before two_digits.
+[[gnu::always_inline]] inline void digits(const Divided& d, __m256i& lo, __m256i& hi, const Constants& k) {
+    const __m256i hundreds = _mm256_srli_epi16(_mm256_mulhi_epu16(d.halves, load(k.by100)), 3);
+    const __m256i rest = _mm256_sub_epi16(d.halves, _mm256_mullo_epi16(hundreds, load(k.hundred)));
+    lo = text(two_digits(_mm256_unpacklo_epi16(hundreds, rest), k), k);
+    hi = text(two_digits(_mm256_unpackhi_epi16(hundreds, rest), k), k);
+}
+
+// 160 bytes at p (16-byte aligned) for values x0..x15, divided as lo = [x0..x3 | x8..x11] and
+// hi = [x4..x7 | x12..x15].
+[[gnu::always_inline]] inline void store(char* p, const Divided& lo, const Divided& hi, const Constants& k) {
+    __m256i d01, d23, d45, d67;  // values x0 x1 | x8 x9, x2 x3 | x10 x11, and so on
+    const auto either = [](__m256i a, __m256i b) { return _mm256_or_si256(a, b); };
+    digits(lo, d01, d23, k);
+    digits(hi, d45, d67, k);
+    const __m256i c0 = either(shuffle(d01, k.chunk0[0]), shuffle(lo.tail, k.chunk0[1]));
+    const __m256i c1 = either(either(shuffle(d01, k.chunk1[0]), shuffle(lo.tail, k.chunk1[1])), shuffle(d23, k.chunk1[2]));
+    const __m256i c2 = either(either(shuffle(d23, k.chunk2[0]), shuffle(lo.tail, k.chunk2[1])), shuffle(d45, k.chunk2[2]));
+    const __m256i c3 = either(either(shuffle(hi.tail, k.chunk3[0]), shuffle(d45, k.chunk3[1])), shuffle(d67, k.chunk3[2]));
+    const __m256i c4 = either(shuffle(d67, k.chunk4[0]), shuffle(hi.tail, k.chunk4[1]));
+    // Chunk c whole at p + 64 + 16c: its high lane lands in place, its low lane on the slot of the
+    // previous chunk's high lane (or of chunk 4's low lane), which a later store fixes.
+    const auto whole = [p](int c, __m256i chunk) { _mm256_storeu_si256(reinterpret_cast<__m256i*>(p + 64 + 16 * c), chunk); };
+    const auto low = [p](int c, __m256i chunk) { _mm_store_si128(reinterpret_cast<__m128i*>(p + 16 * c), _mm256_castsi256_si128(chunk)); };
+    whole(4, c4), whole(3, c3), whole(2, c2), whole(1, c1), whole(0, c0);
+    low(0, c0), low(1, c1), low(2, c2), low(3, c3), low(4, c4);
+}
+
+// Values x[0, 16) in the lane order of store(), divided.
+[[gnu::always_inline]] inline void divide16(const std::uint32_t* x, Divided& lo, Divided& hi, const Constants& k) {
+    const auto at = [x](int i) { return _mm256_loadu_si256(reinterpret_cast<const __m256i*>(x + i)); };
+    const auto both = [x](int i) { return _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(x + i))); };
+    const __m256i l = _mm256_blend_epi32(at(0), both(8), 0xF0), h = _mm256_blend_epi32(at(8), both(4), 0x0F);
+    lo = divide(l, _mm256_srli_epi64(l, 32), k);
+    hi = divide(h, _mm256_srli_epi64(h, 32), k);
+}
+
+// Text of x[0, count), count a positive multiple of 16, at p (16-byte aligned).
+inline void format(char* p, const std::uint32_t* x, std::size_t count, const Constants& k) {
+    Divided dl, dh;
+    divide16(x, dl, dh, k);
+    for (std::size_t i = 16; i < count; i += 16, p += 160) {
+        Divided nl, nh;
+        divide16(x + i, nl, nh, k);  // before the stores: 12% faster
+        store(p, dl, dh, k);
+        dl = nl, dh = nh;
+    }
+    store(p, dl, dh, k);
 }
 
 }  // namespace detail
 
-// values[0, count), count >= 1, as fixed-width fields. They are formatted in blocks of 250 KB,
-// longer than the Writer's buffer, so the Writer hands each block to write(2) directly: on a
-// 331 MB output 3% faster than 64 KiB writes.
-inline void write(io::Writer& out, const std::uint32_t* values, std::size_t count) {
-    constexpr std::size_t kBlock = 25600;  // values
-    alignas(64) static char text[10 * kBlock + 96];
-    const detail::Constants& k = detail::constants();
+inline constexpr std::size_t kBlock = 25600;  // values per write(2), a multiple of 16
+inline constexpr std::size_t kTextBytes = 10 * kBlock;
+
+// values[0, count), count >= 1, as fixed-width fields; text: kTextBytes bytes, 16-byte aligned.
+// Blocks of 250 KB are longer than the Writer's buffer, so it hands each to write(2) directly.
+inline void write(io::Writer& out, const std::uint32_t* values, std::size_t count, char* text) {
+    const detail::Constants& k = detail::kConstants;
     for (std::size_t i = 0; i < count; i += kBlock) {
-        const std::size_t n = std::min(kBlock, count - i);
-        char* p = text;
-        std::size_t j = 0;
-        for (; j + 8 <= n; j += 8, p += 80)
-            detail::format8(p, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(values + i + j)), k);
-        if (j < n) {
-            alignas(32) std::uint32_t tail[8] = {};
-            std::memcpy(tail, values + i + j, (n - j) * sizeof(std::uint32_t));
-            detail::format8(p, _mm256_load_si256(reinterpret_cast<const __m256i*>(tail)), k);
-            p += 10 * (n - j);
+        const std::size_t n = std::min(kBlock, count - i), full = n / 16 * 16;
+        if (full) detail::format(text, values + i, full, k);
+        if (full < n) {
+            alignas(32) std::uint32_t rest[16] = {};
+            alignas(16) char last[160];
+            std::memcpy(rest, values + i + full, (n - full) * sizeof(std::uint32_t));
+            detail::format(last, rest, 16, k);
+            std::memcpy(text + 10 * full, last, 10 * (n - full));
         }
-        if (i + n == count) p[-1] = '\n';
-        out.write(std::string_view(text, std::size_t(p - text)));
+        if (i + n == count) text[10 * n - 1] = '\n';
+        out.write(std::string_view(text, 10 * n));
     }
 }
 
-}  // namespace fixed_width
+}  // namespace fields
 
 namespace {
 
@@ -1067,6 +1100,8 @@ inline std::uint32_t divide(std::uint32_t x, std::uint64_t r) { return std::uint
 // target i <= n / (kSplit + 1), into 64-bit sums. Sources come in segments that fit in L2.
 constexpr std::uint32_t kSplit = 2048;
 constexpr std::uint32_t kSmall = kRough.index(kSplit + 1);  // small m: spoke[1..kSmall)
+// Tiny m (17..251, spoke[1..kTiny)) take their sources by L1-sized pieces of each segment.
+constexpr std::uint32_t kTiny = kRough.index(256);
 constexpr std::uint32_t kMaxN = 1 << 20;
 constexpr std::uint32_t kMaxTargets = kMaxN / (kSplit + 1) + 1;
 
@@ -1141,7 +1176,7 @@ void zeta_pass(std::uint64_t* pairs, std::uint32_t n, std::uint32_t p) {
 // Sources go segment by segment, ascending, so each is read before it changes: the targets of a
 // segment's sources lie in earlier segments. Segment 0 goes by target, ascending.
 void zeta_rough(std::uint64_t* pairs, std::uint32_t n) {
-    constexpr std::uint32_t kSegment = 1 << 15;  // 256 KiB of pairs
+    constexpr std::uint32_t kSegment = 1 << 15, kPiece = 1 << 12;  // pairs: 256 KiB, 32 KiB
     auto widened = [&](std::uint32_t j) { return widen_pair(pairs + j); };
     const std::uint32_t end0 = std::min(n + 1, kSegment);
     for (std::uint32_t i = 1; 17 * i < end0; ++i)  // below 2^15 terms of 2^30 per lane
@@ -1157,13 +1192,18 @@ void zeta_rough(std::uint64_t* pairs, std::uint32_t n) {
         next_index[i] = std::max(kSmall, kRough.index((kSegment - 1) / i + 1));
     for (std::uint32_t start = kSegment; start <= n; start += kSegment) {
         const std::uint32_t last_source = std::min(n, start + kSegment - 1);
-        for (std::uint32_t k = 1; k < kSmall; ++k) {
-            const std::uint32_t m = kRough.spoke[k], last = divide(last_source, kSmallReciprocal[k]);
-            std::uint32_t i = next_target[k];
-            for (; i + 3 <= last; i += 4) store(pairs + i, add(load(pairs + i), gather_pairs(pairs + i * m, m)));
-            for (; i <= last; ++i) add_pair(pairs + i, pairs + i * m);
-            next_target[k] = i;
-        }
+        // Multipliers [1, k_end) with sources up to last.
+        auto by_multiplier = [&](std::uint32_t k_end, std::uint32_t last_source) {
+            for (std::uint32_t k = 1; k < k_end; ++k) {
+                const std::uint32_t m = kRough.spoke[k], last = divide(last_source, kSmallReciprocal[k]);
+                std::uint32_t i = next_target[k];
+                for (; i + 3 <= last; i += 4) store(pairs + i, add(load(pairs + i), gather_pairs(pairs + i * m, m)));
+                for (; i <= last; ++i) add_pair(pairs + i, pairs + i * m);
+                next_target[k] = i;
+            }
+        };
+        for (std::uint32_t piece = start + kPiece; piece <= last_source; piece += kPiece) by_multiplier(kTiny, piece - 1);
+        by_multiplier(kSmall, last_source);
         for (std::uint32_t i = 1; i * (kSplit + 1) <= last_source; ++i) {
             const std::uint32_t end = kRough.index(divide(last_source, kTargetReciprocal[i]) + 1);
             sums[i] = sum_multiples(i, next_index[i], end, sums[i], widened);
@@ -1225,7 +1265,7 @@ void moebius_pass(std::uint32_t* c, std::uint32_t n, std::uint32_t p) {
 // primes >= 17 (inverting zeta_rough: x_i = y_i - sum over m > 1 of x_im). Segments descend, so a
 // segment is final when read; segment 0 goes by target, descending.
 void moebius_rough(std::uint32_t* c, std::uint32_t n) {
-    constexpr std::uint32_t kSegment = 1 << 16;  // 256 KiB
+    constexpr std::uint32_t kSegment = 1 << 16, kPiece = 1 << 13;  // 256 KiB, 32 KiB
     auto value = [&](std::uint32_t j) { return std::uint64_t(c[j]); };
     if (n >= kSegment) {
         // Per small m: the last target. Per large target: the end of its multiplier indices,
@@ -1236,14 +1276,20 @@ void moebius_rough(std::uint32_t* c, std::uint32_t n) {
         const std::uint32_t targets = n / (kSplit + 1);
         for (std::uint32_t i = 1; i <= targets; ++i) end_index[i] = kRough.index(n / i + 1);
         for (std::uint32_t start = n / kSegment * kSegment; start >= kSegment; start -= kSegment) {
-            for (std::uint32_t k = 1; k < kSmall; ++k) {
-                const std::uint32_t m = kRough.spoke[k], last = last_target[k];
-                std::uint32_t i = divide(start - 1, kSmallReciprocal[k]) + 1;
-                last_target[k] = i - 1;
-                for (; i + 7 <= last; i += 8) store(c + i, sub(load(c + i), gather_dwords(c + i * m, m)));
-                for (; i <= last; ++i) c[i] = sub(c[i], c[i * m]);
-            }
+            // Multipliers [1, k_end) with sources from first on.
+            auto by_multiplier = [&](std::uint32_t k_end, std::uint32_t first) {
+                for (std::uint32_t k = 1; k < k_end; ++k) {
+                    const std::uint32_t m = kRough.spoke[k], last = last_target[k];
+                    std::uint32_t i = divide(first - 1, kSmallReciprocal[k]) + 1;
+                    last_target[k] = i - 1;
+                    for (; i + 7 <= last; i += 8) store(c + i, sub(load(c + i), gather_dwords(c + i * m, m)));
+                    for (; i <= last; ++i) c[i] = sub(c[i], c[i * m]);
+                }
+            };
             const std::uint32_t last_source = std::min(n, start + kSegment - 1);
+            for (std::uint32_t piece = start + (last_source - start) / kPiece * kPiece; piece > start; piece -= kPiece)
+                by_multiplier(kTiny, piece);
+            by_multiplier(kSmall, start);
             for (std::uint32_t i = 1; i * (kSplit + 1) <= last_source; ++i) {
                 const std::uint32_t begin =
                     std::max(kSmall, kRough.index(divide(start - 1, kTargetReciprocal[i]) + 1));
@@ -1260,15 +1306,15 @@ void moebius_rough(std::uint32_t* c, std::uint32_t n) {
     }
 }
 
-}  // namespace
-
-int main() {
+void solve() {
     io::Reader in;
     const auto n = in.read<std::uint32_t>();
-    // One region: the pairs, with a parsed into their first half; then b, later c.
+    // One region: the pairs, with a parsed into their first half; then b, later c. The pairs'
+    // first huge page later holds the output text.
     constexpr std::size_t kPad = 64;
     const std::size_t words = n + kPad;
-    auto* region = allocate<std::uint32_t>(3 * words);
+    static_assert(fields::kTextBytes <= std::size_t(1) << 21);
+    auto* region = allocate<std::uint32_t>(std::max(3 * words, fields::kTextBytes / sizeof(std::uint32_t)));
     auto* pairs = reinterpret_cast<std::uint64_t*>(region);
     std::uint32_t* const b = region + 2 * words;
     in.read(region + 1, n);
@@ -1283,5 +1329,20 @@ int main() {
     moebius_rough(c, n);
 
     io::Writer out;
-    fixed_width::write(out, c + 1, n);
+    fields::write(out, c + 1, n, reinterpret_cast<char*>(region));
 }
+
+#ifdef __ELF__
+// The program runs from the executable's pre-initializers, before the C++ runtime initializes
+// iostreams and locales (unused here), and _exit skips their teardown.
+void run_early(int, char**, char**) {
+    solve();
+    ::_exit(0);
+}
+
+[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
+#endif
+
+}  // namespace
+
+int main() { solve(); }  // reached only without .preinit_array support

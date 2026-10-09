@@ -14,7 +14,7 @@ LIMIT = 10**9
 
 
 def convex(rng: random.Random, n: int) -> list[int]:
-    spread = rng.choice([0, 1, 3, 1000, LIMIT // max(1, n) * 2])
+    spread = min(rng.choice([0, 1, 3, 1000, LIMIT]), LIMIT // max(1, 2 * n))
     slopes = sorted(rng.randint(-spread, spread) for _ in range(n - 1))
     a = [0]
     for s in slopes:

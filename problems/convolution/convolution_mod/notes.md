@@ -15,8 +15,12 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
   and writes the first radix-4 group of both halves (no copy of the lower half, no separate
   pass for the upper half's group); the rest is `lib/ntt`'s recursion and kernels.
 - `lib/io` for input (bulk `uint32_t` read straight into the transform buffers).
-- Output: `../fixed_width.hpp`, every value in a 10-byte field (judge-specific; the checker
-  compares tokens).
+- Output: `fields.hpp`, every value in a 10-byte field (judge-specific; the checker compares
+  tokens), the same bytes as `../fixed_width.hpp`. Per value: w = v / 10 as 8 digits, most
+  significant first, in a qword; leading zeros from x ^ (x - 1) and `vpblendvb`; the units digit
+  and separator from v - 10w. 16 values per step, ten 16-byte chunks built by `pshufb`; the
+  divisions of the next step are issued before the digits of this one. The text buffer sits
+  after the NTT tables in their huge page.
 - The program runs from `.preinit_array` and ends with `_exit`: libstdc++'s initializers
   (iostreams, locales) and exit handlers never run.
 
@@ -62,6 +66,41 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
     large cases median 13 ms (max 14, three at 12), against 14 (max 14) in 408716. Tiny cases
     also took up to 10 ms in both runs: the judge's jitter is several ms, so the maximum over 53
     cases moves by a tick or more between runs.
-- Next: the formatter (1.15 ms; ~27 cycles per 8 values against a ~20-cycle port bound, long
-  dependency chain per iteration) and the bulk parse (~1 ms besides page faults) are the
-  largest parts not fixed by the system.
+- 2026-10-09, claude (round 2): new formatter, `fields.hpp`. `lc-amd`, judge flags.
+  - Formatter in memory, 2^20 values in 250 KB blocks, min of 40 runs (ms): old
+    (`fixed_width.hpp`) 1.04. Steps: 8 MS-first digits per qword with blanks from the lowest set
+    bit, units digit and separator from v - 10w, eight 16-byte stores at 10i: 0.92. Divisions of
+    the next 8 values issued before this block's digits: 0.79. 16 values per step written as ten
+    16-byte chunks (`pshufb`, `por`): 0.73. Blanks by `vpblendvb`: 0.695. Shifts instead of
+    multiplies by 2^16 and 2^8: 0.670. High lanes stored by whole 32-byte stores that a later
+    store overwrites instead of `vextracti128`: 0.640 (-38%). Exhaustive check: equal to
+    `fixed_width.hpp` for every value below P; `write()` equal for 18 counts from 1 to 2^20 - 1.
+  - Lost or neutral (ms, same test): store stage before the divisions 0.83; a two-step
+    ping-pong unroll 0.737 (base 0.733); chunks interleaved with the digits 0.767 (fewer spills);
+    a laundered pointer per constant 0.780 (pointer spills); GCC `schedule-insns` 0.80, with
+    `sched-pressure` 0.731, `O3` 0.747; odd lanes from loads 4 bytes on 0.691 vs 0.695;
+    multiplies instead of shifts after the store change 0.654-0.665 vs 0.640; 10w by shifts
+    0.69 vs 0.67.
+  - Why: Zen 3 (`lc-amd`, 3.48 GHz) runs integer vector multiplies on 2 pipes and shifts,
+    unpacks and `pshufb` on 2 others (0.5 cycles each, pairs across groups 0.25-0.27);
+    `vperm2i128`, `vinserti128` 1 per cycle. Stores per 80 bytes (cycles): 8 xmm at 10i 10.3,
+    4 ymm at 20i 5.1, 5 aligned xmm 5.0, 2 ymm + 1 xmm aligned 3.1. The final loop has 99 vector
+    ops per 16 values (25 cycles at 4 per cycle) and takes 34: GCC's schedule and 4 spills.
+  - Output by mapping stdout instead of `write()` (reopened read-write via `/proc/self/fd/1`,
+    `ftruncate`, `MAP_SHARED`): 7.4 ms vs 4.7 for 10 MB on tmpfs, with or without
+    `MAP_POPULATE` or `MADV_POPULATE_WRITE`. Not pursued.
+  - Text buffer after the tables in Product's last huge page instead of a 250 KB static: whole
+    process 0.976 vs 0.979 against main (within noise; kept, no page faults of its own).
+    Blocks of 12800, 19200, 25600 values: equal within noise.
+  - Transform, measured to see what is left: the 32 subtrees of 2^12 vectors take 3.57 of
+    4.5 ms, about 75% of the 4-pipe bound from the kernels' instruction counts; the top levels and
+    the L3-resident second level are near their compute bounds. Not changed.
+  - Phases now (ms, fft_killer_04, 31 runs): parse 1.91, tables 0.09, top 0.30, transform 4.20,
+    format 0.65, `write()` 3.42, unmap 0.39; wall 13.39 (12.89 min).
+  - `tools/judge.py bench`, slowest 3 cases: 41 rounds 13.96 -> 13.49 ms, ratio 0.965; an earlier
+    run of 31 rounds 0.956.
+  - Checks: 53/53 official tests, stress 500 rounds, ASan/UBSan on 11 official cases (file and
+    pipe input).
+- Next: assembly for the formatter loop (34 cycles per 16 values against ~25); the parse
+  (lib/io) and the transform kernels (lib/ntt) are the largest parts left in user code.
+  `convolution_mod_large` could use `fields.hpp` (its formatter takes ~35 ms of 425).

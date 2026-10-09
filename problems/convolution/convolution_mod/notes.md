@@ -2,8 +2,8 @@
 
 N, M <= 2^19 coefficients mod 998244353; print the N + M - 1 coefficients of the product. 5 s.
 
-Best judged: ours, 14 ms: [409184](https://judge.yosupo.jp/submission/409184) (current
-`main.cpp`) and [408716](https://judge.yosupo.jp/submission/408716) (the QPoly exploration-011
+Best judged: ours, 13 ms: [409226](https://judge.yosupo.jp/submission/409226) (current
+`main.cpp`). Earlier versions: 14 ms, [409184](https://judge.yosupo.jp/submission/409184) and [408716](https://judge.yosupo.jp/submission/408716) (the QPoly exploration-011
 program, `../SymPoly/work/ntt/yosupo_convolution_mod_large_io_probe.cpp`, a guess from the
 submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
 
@@ -105,6 +105,10 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
     AC 21 ms, from one outlier (max_random_01 21 ms, random_02 16). The 17 large cases have a
     median of 12 ms (409184: 13), min 11, and the rest are at most 13. The judged maximum is jitter;
     best judged stays 14 ms (409184).
+- 2026-10-09, audit (claude): the current `main.cpp` (#50) has 7 submissions, over the cap of 5:
+  409208 above plus 409220-409224 and 409226, none logged before (not from this session).
+  Judged 19, 21, 23, 21, 21, 13 ms. Each slow run has one or two outlier cases (19-23 ms); the
+  large cases are otherwise 12-13 ms, matching `lc-amd` (13.49 ms). No further submissions.
 - Next: assembly for the formatter loop (34 cycles per 16 values against ~25); the parse
   (lib/io) and the transform kernels (lib/ntt) are the largest parts left in user code.
   `convolution_mod_large` could use `fields.hpp` (its formatter takes ~35 ms of 425).

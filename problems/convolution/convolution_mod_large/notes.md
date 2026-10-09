@@ -62,3 +62,25 @@ and `_exit` as in `../convolution_mod`.
 - 2026-10-09, claude: submitted the merged `main.cpp` (#127). [409265](https://judge.yosupo.jp/submission/409265):
   AC, 439 ms, 612.9 MiB (1/5), against 448 for 409233. `lc-amd` predicted 414.6 vs 428.3 (-3.2%);
   judged -2.0%.
+- 2026-10-09, claude (round 3): `lib/ntt` kernels against Zen 3 limits. No code change. `lc-amd`,
+  scratch benchmarks (not committed), TSC ticks per vector in L1, 1 core cycle = 0.873 ticks:
+  - Zen 3 facts (dependency-free asm loops): 4 vector ops per cycle for any mix of `vpmuludq`,
+    `vpmulld`, `vpsrlq`, `vpaddd`, `vpminud`, `vpblendd` (49-op mixes in 12.3 cycles); loads take no
+    vector pipe; 2 vector loads per cycle; a load across a 64-byte line takes 2 load slots.
+  - Measured against that bound: `forward` 3.19 (84%), `inverse` 3.18; the bottom (`tile<256>`
+    minus its 9 level passes) 33 (~64%). A dependency-free copy of the leaf product's op mix runs
+    at 9.6; the real leaf loop does not go below 12.9.
+  - Knob searches with `gen_kernels.py` timed on `lc-amd`: `forward` 105 schedules, best 3.13 vs
+    3.17-3.19 (1-2%, ~1 ms in the program); `inverse` 42 schedules, best -0.4%. Not kept.
+  - Bottom as three plain loops (forward h = 1 and leaf windows; leaf products; inverse h = 1),
+    GCC intrinsics: same results, 61.7 ticks per vector for `tile<256>` vs 61.6. Phases 14.4 +
+    13.6 + 3.9. The leaf loop scheduled by the generator (24 schedules, 2 or 4 leaves per
+    iteration): best 12.9 vs 13.6. `bottom_first` per group: 16.7 vs 14.4 for the plain loop.
+    Fusing leaves with the inverse: 20.2 vs 17.5. Estimated total gain ~2 ms; not pursued.
+  - Op counts: a radix-4 butterfly is 49 vector ops (4 Shoup products of 7-8 ops, 8 for lazy
+    reductions, 3 extra for `+ 2P` in differences), ~6.1 per vector per binary level; radix-2 and
+    radix-8 come to ~6 as well. Signed residues would drop the `+ 2P` ops, but the reductions then
+    land on intervals that do not fit the next Shoup input; not found to save ops.
+  - Next (guesses): a smaller footprint (b's upper half as a reused scratch quarter, inverse
+    twiddles from the forward table) saves ~4 ms of page zeroing on `lc-amd`; the judge's 6% offset
+    may make it worth more there.

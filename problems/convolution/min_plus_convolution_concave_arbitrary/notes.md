@@ -3,7 +3,8 @@
 c_k = min over i + j = k of a_i + b_j; a concave, b arbitrary. N, M <= 2^19, values in
 [0, 10^9], so c_k < 2^31 fits uint32. 5 s.
 
-Best judged: none yet. Record when the issue opened: 117 ms.
+Best judged: 31 ms, [409228](https://judge.yosupo.jp/submission/409228) (current `main.cpp`).
+Record when the issue opened: 117 ms.
 
 ## Design
 
@@ -45,6 +46,8 @@ Best judged: none yet. Record when the issue opened: 117 ms.
     it is lower (max_random_00 takes 14.4 ms in full); not measured separately.
   - Checks: 41/41 official tests; `stress.py` 2000 rounds; ASan/UBSan on 12 official cases
     (file and pipe input).
+  - Submitted the merged `main.cpp` (#91): [409228](https://judge.yosupo.jp/submission/409228)
+    AC 31 ms, 21.1 MiB.
 - Next: monotone cases spend ~18 ms more than random ones (guess: the sweeps' ~1M insertions,
   data-dependent branches on L2 loads). Ideas: decide pops from cached values without loading;
   a 10-digit fixed-width formatter (output is ~11 MB); input straight into the huge pages.

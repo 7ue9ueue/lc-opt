@@ -18,10 +18,13 @@ convolution problems: `problems/convolution/floor.py`.
 - Bulk `uint32_t` read: 128 KiB chunks cut into four streams at token boundaries, parsed in lockstep
   two tokens per step. Chunks shrink near the end of the array; the last < 1024 tokens use the
   scalar path. Irregular whitespace in a chunk falls back to one token at a time.
-- Bulk `uint64_t` read: the same chunks and streams. A step finds two tokens in the separator mask
-  of the 64 bytes at a stream's position; each token's digits are the 32 bytes that end at it, minus
-  a row of `kDigitMask` (0xFF before the token, '0' in it) with unsigned saturation. Values are
-  8-digit limbs joined in vectors: top * 10^16 + mid * 10^8 + low.
+- Bulk `uint64_t` read (`bulk64.hpp`, `io::read_bulk(in, dst, n)`): the same chunks and streams.
+  A step finds two tokens in the separator mask of the 64 bytes at a stream's position; each
+  token's digits are the 32 bytes that end at it, minus a row of `kDigitMask` (0xFF before the
+  token, '0' in it) with unsigned saturation. Values are 8-digit limbs joined in vectors:
+  top * 10^16 + mid * 10^8 + low. It needs no input end: n tokens span at least 2n - 1 bytes,
+  which bounds chunks and loads. It works through `Reader::scan()`/`resume()` and has its own
+  header so that io.hpp, and the code of every problem bundled from it, stays unchanged.
 - Output: 64 KiB buffer, `write(2)`. Integers: 4-digit table (10000 entries), groups placed in a
   vector, `pshufb` drops the leading zeros, one 16-byte store. Digit count from a 32-entry table
   (32-bit) or two 65-entry tables (64-bit). No branches on value size. `write<MaxDigits>()` with
@@ -172,10 +175,16 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
   io.hpp versions in one run. Table under Floors. Its first version kept a and b in `new[]` arrays:
   floors 1.9 to 63 ms higher (convolution_mod 12.93, bitwise_and 16.95, convolution_mod_large 347
   ms), page faults on 4 KiB pages. Now one 2 MiB-aligned `MADV_HUGEPAGE` mapping, as the solutions do.
-- Bulk `uint64_t` read (`BulkParser64`), floor ratios to main (21 rounds): convolution_mod_2_64
-  0.941 (19.87 → 18.67 ms), convolution_F_2_64 0.913 (20.52 → 18.94); a control without it 1.002
-  and 1.011. With the first harness: 0.927 and 0.930. Kept. All 95 official inputs of both
-  problems parse the same as one token at a time.
+- Bulk `uint64_t` read (`BulkParser64`) as a branch of `Reader::read`, floor ratios to main (21
+  rounds): convolution_mod_2_64 0.941 (19.87 → 18.67 ms), convolution_F_2_64 0.913 (20.52 →
+  18.94); a control without it 1.002 and 1.011. With the first harness: 0.927 and 0.930. All 95
+  official inputs of both problems parse the same as one token at a time.
+- In io.hpp (PR #46) it changed every bundled `main.cpp`. The six problems on lib/io compiled to
+  byte-identical `.text` and `.rodata` (judge flags, `-march=znver3`), yet CI's strict gate called
+  five of them slower: aplusb 1.0104 (Xeon 6973P-C 1.026), gcd_convolution 1.0062, many_aplusb
+  1.0046, convolution_mod_large 1.0006, bitwise_and_convolution 1.0001. If each passes on noise half
+  the time (a guess), all six pass 1 time in 64. Moved to `lib/io/bulk64.hpp` (`io::read_bulk`), without the input end: io.hpp
+  is unchanged and no problem is re-timed.
 - Bulk `uint64_t` write (pass 1 scalar: three 8-digit limbs and the digit count; pass 2 AVX2:
   20 digits for eight values, one 32-byte store per value ending at its last digit, separators
   blended in, stores right to left so each overwrites the previous one's leading bytes). In memory
@@ -203,6 +212,8 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
 - Bulk write is 1.3 ns per value slower than fixed-width output; the vector work, not the stores,
   is the limit (in-memory: compute 1.4, with movemask 1.7, full 2.4 ns per value).
 - Bulk reads for signed values.
+- Fold `io::read_bulk` into `Reader::read` when io.hpp changes anyway, with gains that outweigh
+  the noise of re-timing every problem.
 - A faster uint64 write: only if a problem's floor becomes a large share of its time
   (convolution_mod_2_64 and convolution_F_2_64 are at 25% and 5% now).
 - Huge-page arrays (2 MiB-aligned mapping, `MADV_HUGEPAGE`) are copied in three solutions and cut

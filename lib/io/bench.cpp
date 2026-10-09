@@ -2,6 +2,7 @@
 // holds it in an already-touched heap buffer and only parsing is timed. Output goes to /dev/null.
 // Build: g++ -O2 -std=c++23 -march=native -I. lib/io/bench.cpp
 #include "lib/io/io.hpp"
+#include "lib/io/bulk64.hpp"
 
 #include <sys/wait.h>
 
@@ -53,7 +54,7 @@ Timing time_rounds(const std::function<double()>& round) {
 
 volatile std::uint64_t sink;
 
-// Types with a bulk read path.
+// Types with a bulk read: Reader::read for uint32, io::read_bulk for uint64.
 template <class T>
 constexpr bool kBulkRead = std::same_as<T, std::uint32_t> || std::same_as<T, std::uint64_t>;
 
@@ -97,7 +98,8 @@ void bench(const char* name, const std::function<T(std::mt19937_64&)>& gen) {
             io::Reader in(pipe_with(text));
             ::wait(nullptr);
             const double t0 = now_ns();
-            in.read(got.data(), kTokens);
+            if constexpr (std::same_as<T, std::uint64_t>) io::read_bulk(in, got.data(), kTokens);
+            else in.read(got.data(), kTokens);
             const double t1 = now_ns();
             sink = got[kTokens / 2];
             return t1 - t0;

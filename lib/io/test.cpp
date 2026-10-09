@@ -1,5 +1,6 @@
 // Tests for lib/io. Build: g++ -O2 -std=c++23 -march=x86-64-v3 -I. lib/io/test.cpp
 #include "lib/io/io.hpp"
+#include "lib/io/bulk64.hpp"
 
 #include <sys/wait.h>
 
@@ -219,6 +220,13 @@ T bulk_value(int shape, std::size_t i, std::size_t count) {
     }
 }
 
+// The bulk read for T: Reader::read, or io::read_bulk for uint64.
+template <class T>
+void read_array(io::Reader& in, T* dst, std::size_t count) {
+    if constexpr (std::same_as<T, std::uint64_t>) io::read_bulk(in, dst, count);
+    else in.read(dst, count);
+}
+
 // Bulk reads: sizes around the chunk threshold, uneven token lengths across a chunk (unbalanced
 // streams), irregular whitespace (fallback path), and scalar reads before and after.
 template <class T>
@@ -241,7 +249,7 @@ void test_bulk() {
                 io::Reader in(fd);
                 CHECK(in.read<int>() == 7);
                 std::vector<T> got(count + 1, T(0xDEADBEEF));
-                in.read(got.data(), count);
+                read_array(in, got.data(), count);
                 for (std::size_t i = 0; i < count; ++i)
                     if (got[i] != v[i]) {
                         CHECK(got[i] == v[i]);
@@ -266,12 +274,34 @@ void test_bulk_split() {
     std::vector<T> got(v.size());
     std::size_t done = 0;
     for (const std::size_t part : {std::size_t(70000), std::size_t(5), std::size_t(100000), std::size_t(1)}) {
-        in.read(got.data() + done, part);
+        read_array(in, got.data() + done, part);
         done += part;
     }
-    in.read(got.data() + done, v.size() - done);
+    read_array(in, got.data() + done, v.size() - done);
     CHECK(got == v);
     ::close(fd);
+}
+
+// A uint64 array that ends the input, without a final separator. With one-digit tokens it is as
+// short as count tokens can be, which bounds the parser's loads.
+void test_bulk64_at_end() {
+    for (const std::size_t count : {std::size_t(1024), std::size_t(1025), std::size_t(70001), std::size_t(1) << 20})
+        for (const bool wide : {false, true}) {
+            std::vector<std::uint64_t> v(count);
+            for (auto& x : v) x = wide ? rng() | std::uint64_t(1) << 63 : rng() % 10;
+            std::string text = std::to_string(count) + "\n";
+            for (std::size_t i = 0; i < count; ++i) text += text_of(v[i]) + (i + 1 < count ? " " : "");
+            for (const bool pipe : {false, true}) {
+                const int fd = pipe ? pipe_with(text) : file_with(text);
+                io::Reader in(fd);
+                CHECK(in.read<std::size_t>() == count);
+                std::vector<std::uint64_t> got(count);
+                io::read_bulk(in, got.data(), count);
+                CHECK(got == v);
+                ::close(fd);
+            }
+        }
+    reap();
 }
 
 std::string read_all(int fd) {
@@ -429,6 +459,7 @@ int main() {
     test_bulk<std::uint64_t>();
     test_bulk_split<std::uint32_t>();
     test_bulk_split<std::uint64_t>();
+    test_bulk64_at_end();
     test_max_digits();
     test_writer();
     test_vector_arithmetic();

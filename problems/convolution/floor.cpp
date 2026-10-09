@@ -10,6 +10,7 @@
 #include <sys/mman.h>
 
 #include "lib/io/io.hpp"
+#include "lib/io/bulk64.hpp"
 #include "fixed_width.hpp"
 
 namespace {
@@ -25,6 +26,12 @@ Value* allocate(std::size_t count) {
     const std::uintptr_t start = (reinterpret_cast<std::uintptr_t>(region) + kHuge - 1) & ~(kHuge - 1);
     ::madvise(reinterpret_cast<void*>(start), bytes - kHuge, MADV_HUGEPAGE);
     return reinterpret_cast<Value*>(start);
+}
+
+// count values into dst with lib/io's bulk parsers.
+void read_values(io::Reader& in, Value* dst, std::size_t count) {
+    if constexpr (std::same_as<Value, std::uint64_t>) io::read_bulk(in, dst, count);
+    else in.read(dst, count);
 }
 
 }  // namespace
@@ -45,8 +52,8 @@ int main() {
         m = n;
     }
     Value* const a = allocate(n + m);  // a, then b
-    in.read(a, n);
-    in.read(a + n, m);
+    read_values(in, a, n);
+    read_values(in, a + n, m);
     const std::size_t answer = LAYOUT == 1 ? n + m - 1 : n;  // a, then b without its last value
 #ifdef SUMS
     for (std::size_t i = 0; i + 1 < answer; ++i) a[i] += a[i + 1];

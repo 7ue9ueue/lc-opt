@@ -3,7 +3,8 @@
 N <= 10^6, a_i, b_i < 998244353; print c_k = sum over lcm(i, j) = k of a_i b_j for k = 1..N. 5 s.
 Large tests: N = 10^6 (max_random), near primes and near prime squares; ~20 MB input, 10 MB output.
 
-Record when opened: 37 ms. Best judged: none yet.
+Record when opened: 37 ms. Best judged: ours, [409219](https://judge.yosupo.jp/submission/409219),
+17 ms.
 
 ## Design
 
@@ -50,6 +51,8 @@ Record when opened: 37 ms. Best judged: none yet.
       fused primes: the extra terms (Σ 1/d = 1.15 N for all five primes vs 0.84 N) cost what the
       saved sweeps did.
     - Not storing the pairs above n / 2 in the product sweep: 0.596 vs 0.603 ms.
+  - PR #59 merged (CI: 29/29 on 3 runners, slowest 16.5-18.0 ms). Submitted its `main.cpp`:
+    [409219](https://judge.yosupo.jp/submission/409219), AC, 17 ms, 22.4 MiB (1/5).
 
 ## Next
 

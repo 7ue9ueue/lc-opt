@@ -22,7 +22,11 @@ Record when opened: 37 ms (407011). Best judged: ours, [409190](https://judge.yo
   upwards (each source is read before it changes), Moebius uses c_i = C_i - sum of final c_im with
   segments downwards; segment 0 goes by target. Multipliers m <= 2048 go by m over a run of
   targets; larger ones by target (i <= N / 2049) into 64-bit sums. No sieve is needed.
-- Output: `../fixed_width.hpp` (10-byte fields).
+- Rough multipliers m < 256 take their sources by L1-sized pieces (32 KiB) of each segment, so
+  one fetch of a source line from L2 serves all of them; larger m go over the whole segment.
+- Output: `../convolution_mod/fields.hpp` (10-byte fields, 16 values per step); the text buffer
+  is the first 250 KB of the pair array, dead by then.
+- Runs from `.preinit_array` and ends with `_exit` (as `convolution_mod`).
 
 ## Log
 
@@ -63,10 +67,23 @@ Record when opened: 37 ms (407011). Best judged: ours, [409190](https://judge.yo
     except near_prime_squared_00 at 24 ms.
   - [409190](https://judge.yosupo.jp/submission/409190), same file: AC, 17 ms (2/5). Large cases
     15-17 ms. First; next is 37 ms (407011).
+- 2026-10-09, claude, round 2. `lc-amd`, judge image and flags. "Probe": whole-process wall time
+  on max_random_01 in the judge's Docker image, binaries interleaved, 41-61 runs, medians (ms).
+  - v6a: `.preinit_array` start, `_exit`, `fields.hpp` formatter with its buffer in the pair
+    array: probe 13.87 -> 13.17 (v5 -> v6a). `judge.py bench`, 11 rounds: 16.07 -> 15.39 (0.953).
+  - Parse b in chunks along the rough zeta sweep (a in the pairs' second half; each segment
+    interleaved just before the sweep reads it; zeta 3 then a plain pass): probe 13.26-13.29 vs
+    v6a 13.12-13.17. Chunks of 2^16 / 2^17 / 2^18 / 2^20 (one read) values: 13.33 / 13.29 /
+    13.23 / 13.15. Each extra `Reader::read` call costs more than the cache reuse gains. Dropped.
+  - v7: L1 pieces for tiny rough multipliers (above). Probe, tiny bound x piece (pairs):
+    64 x 1024/2048/4096: 13.10/13.03/13.06; 128 x same: 12.99/12.99/12.94; 256 x same:
+    13.16/13.03/12.93; 512 x 4096/8192: 12.94/13.03; 8192-pair pieces are worse for every bound
+    (13.03-13.09). v6a in the same runs 13.21-13.25. Kept 256 x 4096 (Moebius: 8192 dwords).
+  - `judge.py bench`, 31 rounds, slowest 3 cases: v5 16.28, v6a 15.41 (0.937), v7 15.17 (0.931).
+  - Checks: 29/29 official tests; `stress.py` 300 rounds; ASan/UBSan (-O1, x86-64-v3) on all 29
+    official tests, file and pipe input, tokens equal to the expected output.
 
 ## Next
 
-- Fuse the rough zeta sweep with parsing b (sources then come straight from the parser); needs an
-  upward interleave, with a in the second half of the pair array.
-- L1-sized segments for the smallest rough multipliers (17..61, 0.38 N contributions).
-- The rest is I/O (parse 3.3 ms, output 4.5 ms): `lib/io` and `fixed_width.hpp`.
+- The rest is I/O: parse 3.3 ms (`lib/io`, #21), `write()` ~3.4 ms. Compute left ~4.5 ms, of
+  which the rough sweeps ~2.6 ms.

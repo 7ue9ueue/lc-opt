@@ -2,10 +2,12 @@
 // Sums over multiples (zeta) of a and b, pointwise product, then the inverse (Moebius). Both are
 // products of commuting per-prime passes. Primes 2..13: one pass each (zeta: x_i += x_ip, i
 // descending; Moebius: x_i -= x_ip, i ascending). Primes >= 17 together: one sweep over the
-// multipliers m coprime to 30030 ("rough"), segment by segment so the sources stay in L2.
+// multipliers m coprime to 30030 ("rough"), segment by segment so the sources stay in L2 (in L1
+// for m < 256).
 // a and b are interleaved as pairs, so one load fetches both.
 #include <immintrin.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -15,7 +17,7 @@
 #include <cstring>
 
 #include "lib/io/io.hpp"
-#include "../fixed_width.hpp"
+#include "../convolution_mod/fields.hpp"
 
 namespace {
 
@@ -169,6 +171,8 @@ inline std::uint32_t divide(std::uint32_t x, std::uint64_t r) { return std::uint
 // target i <= n / (kSplit + 1), into 64-bit sums. Sources come in segments that fit in L2.
 constexpr std::uint32_t kSplit = 2048;
 constexpr std::uint32_t kSmall = kRough.index(kSplit + 1);  // small m: spoke[1..kSmall)
+// Tiny m (17..251, spoke[1..kTiny)) take their sources by L1-sized pieces of each segment.
+constexpr std::uint32_t kTiny = kRough.index(256);
 constexpr std::uint32_t kMaxN = 1 << 20;
 constexpr std::uint32_t kMaxTargets = kMaxN / (kSplit + 1) + 1;
 
@@ -243,7 +247,7 @@ void zeta_pass(std::uint64_t* pairs, std::uint32_t n, std::uint32_t p) {
 // Sources go segment by segment, ascending, so each is read before it changes: the targets of a
 // segment's sources lie in earlier segments. Segment 0 goes by target, ascending.
 void zeta_rough(std::uint64_t* pairs, std::uint32_t n) {
-    constexpr std::uint32_t kSegment = 1 << 15;  // 256 KiB of pairs
+    constexpr std::uint32_t kSegment = 1 << 15, kPiece = 1 << 12;  // pairs: 256 KiB, 32 KiB
     auto widened = [&](std::uint32_t j) { return widen_pair(pairs + j); };
     const std::uint32_t end0 = std::min(n + 1, kSegment);
     for (std::uint32_t i = 1; 17 * i < end0; ++i)  // below 2^15 terms of 2^30 per lane
@@ -259,13 +263,18 @@ void zeta_rough(std::uint64_t* pairs, std::uint32_t n) {
         next_index[i] = std::max(kSmall, kRough.index((kSegment - 1) / i + 1));
     for (std::uint32_t start = kSegment; start <= n; start += kSegment) {
         const std::uint32_t last_source = std::min(n, start + kSegment - 1);
-        for (std::uint32_t k = 1; k < kSmall; ++k) {
-            const std::uint32_t m = kRough.spoke[k], last = divide(last_source, kSmallReciprocal[k]);
-            std::uint32_t i = next_target[k];
-            for (; i + 3 <= last; i += 4) store(pairs + i, add(load(pairs + i), gather_pairs(pairs + i * m, m)));
-            for (; i <= last; ++i) add_pair(pairs + i, pairs + i * m);
-            next_target[k] = i;
-        }
+        // Multipliers [1, k_end) with sources up to last.
+        auto by_multiplier = [&](std::uint32_t k_end, std::uint32_t last_source) {
+            for (std::uint32_t k = 1; k < k_end; ++k) {
+                const std::uint32_t m = kRough.spoke[k], last = divide(last_source, kSmallReciprocal[k]);
+                std::uint32_t i = next_target[k];
+                for (; i + 3 <= last; i += 4) store(pairs + i, add(load(pairs + i), gather_pairs(pairs + i * m, m)));
+                for (; i <= last; ++i) add_pair(pairs + i, pairs + i * m);
+                next_target[k] = i;
+            }
+        };
+        for (std::uint32_t piece = start + kPiece; piece <= last_source; piece += kPiece) by_multiplier(kTiny, piece - 1);
+        by_multiplier(kSmall, last_source);
         for (std::uint32_t i = 1; i * (kSplit + 1) <= last_source; ++i) {
             const std::uint32_t end = kRough.index(divide(last_source, kTargetReciprocal[i]) + 1);
             sums[i] = sum_multiples(i, next_index[i], end, sums[i], widened);
@@ -327,7 +336,7 @@ void moebius_pass(std::uint32_t* c, std::uint32_t n, std::uint32_t p) {
 // primes >= 17 (inverting zeta_rough: x_i = y_i - sum over m > 1 of x_im). Segments descend, so a
 // segment is final when read; segment 0 goes by target, descending.
 void moebius_rough(std::uint32_t* c, std::uint32_t n) {
-    constexpr std::uint32_t kSegment = 1 << 16;  // 256 KiB
+    constexpr std::uint32_t kSegment = 1 << 16, kPiece = 1 << 13;  // 256 KiB, 32 KiB
     auto value = [&](std::uint32_t j) { return std::uint64_t(c[j]); };
     if (n >= kSegment) {
         // Per small m: the last target. Per large target: the end of its multiplier indices,
@@ -338,14 +347,20 @@ void moebius_rough(std::uint32_t* c, std::uint32_t n) {
         const std::uint32_t targets = n / (kSplit + 1);
         for (std::uint32_t i = 1; i <= targets; ++i) end_index[i] = kRough.index(n / i + 1);
         for (std::uint32_t start = n / kSegment * kSegment; start >= kSegment; start -= kSegment) {
-            for (std::uint32_t k = 1; k < kSmall; ++k) {
-                const std::uint32_t m = kRough.spoke[k], last = last_target[k];
-                std::uint32_t i = divide(start - 1, kSmallReciprocal[k]) + 1;
-                last_target[k] = i - 1;
-                for (; i + 7 <= last; i += 8) store(c + i, sub(load(c + i), gather_dwords(c + i * m, m)));
-                for (; i <= last; ++i) c[i] = sub(c[i], c[i * m]);
-            }
+            // Multipliers [1, k_end) with sources from first on.
+            auto by_multiplier = [&](std::uint32_t k_end, std::uint32_t first) {
+                for (std::uint32_t k = 1; k < k_end; ++k) {
+                    const std::uint32_t m = kRough.spoke[k], last = last_target[k];
+                    std::uint32_t i = divide(first - 1, kSmallReciprocal[k]) + 1;
+                    last_target[k] = i - 1;
+                    for (; i + 7 <= last; i += 8) store(c + i, sub(load(c + i), gather_dwords(c + i * m, m)));
+                    for (; i <= last; ++i) c[i] = sub(c[i], c[i * m]);
+                }
+            };
             const std::uint32_t last_source = std::min(n, start + kSegment - 1);
+            for (std::uint32_t piece = start + (last_source - start) / kPiece * kPiece; piece > start; piece -= kPiece)
+                by_multiplier(kTiny, piece);
+            by_multiplier(kSmall, start);
             for (std::uint32_t i = 1; i * (kSplit + 1) <= last_source; ++i) {
                 const std::uint32_t begin =
                     std::max(kSmall, kRough.index(divide(start - 1, kTargetReciprocal[i]) + 1));
@@ -362,15 +377,15 @@ void moebius_rough(std::uint32_t* c, std::uint32_t n) {
     }
 }
 
-}  // namespace
-
-int main() {
+void solve() {
     io::Reader in;
     const auto n = in.read<std::uint32_t>();
-    // One region: the pairs, with a parsed into their first half; then b, later c.
+    // One region: the pairs, with a parsed into their first half; then b, later c. The pairs'
+    // first huge page later holds the output text.
     constexpr std::size_t kPad = 64;
     const std::size_t words = n + kPad;
-    auto* region = allocate<std::uint32_t>(3 * words);
+    static_assert(fields::kTextBytes <= std::size_t(1) << 21);
+    auto* region = allocate<std::uint32_t>(std::max(3 * words, fields::kTextBytes / sizeof(std::uint32_t)));
     auto* pairs = reinterpret_cast<std::uint64_t*>(region);
     std::uint32_t* const b = region + 2 * words;
     in.read(region + 1, n);
@@ -385,5 +400,20 @@ int main() {
     moebius_rough(c, n);
 
     io::Writer out;
-    fixed_width::write(out, c + 1, n);
+    fields::write(out, c + 1, n, reinterpret_cast<char*>(region));
 }
+
+#ifdef __ELF__
+// The program runs from the executable's pre-initializers, before the C++ runtime initializes
+// iostreams and locales (unused here), and _exit skips their teardown.
+void run_early(int, char**, char**) {
+    solve();
+    ::_exit(0);
+}
+
+[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
+#endif
+
+}  // namespace
+
+int main() { solve(); }  // reached only without .preinit_array support

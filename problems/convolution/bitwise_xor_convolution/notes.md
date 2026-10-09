@@ -3,7 +3,8 @@
 N <= 20; a, b of 2^N values < 998244353; print c_k = sum over i xor j = k of a_i b_j mod P. 5 s.
 Input ~20.7 MB (2^21 tokens), output ~10.4 MB.
 
-Best judged: none yet. Record when opened: 25 ms.
+Best judged: ours, [409198](https://judge.yosupo.jp/submission/409198), 15 ms (round 1).
+Record when opened: 25 ms.
 
 ## Design
 
@@ -80,6 +81,9 @@ per MiB of huge pages.
 - Checks: 13/13 official tests (`lc-amd`, `lc-intel`); `stress.py` 200 rounds against `brute.cpp`
   (N <= 12) plus three N = 20 inputs with known answers (all P - 1; a = P - 1; b a delta), which
   hit the 2^51 bound; ASan/UBSan build on all official tests and 60 random inputs.
+- PR #45 merged (CI: 13/13 on 3 runners, slowest 12.7-15.6 ms). Submitted its `main.cpp`:
+  [409198](https://judge.yosupo.jp/submission/409198), AC, 15 ms, 23.4 MiB (1/5). Previous
+  record 25 ms.
 
 ## Next
 

@@ -4,8 +4,13 @@
 //
 // Columns go in blocks [j0, j1) of at most N. Rows [j0, j0 + N) see no column end; a forward
 // sweep adds column x at row x, and the newest column wins a prefix of the rows left, so the
-// envelope is a stack of segments, newest on top. Rows [j1 - 1, j1 + N - 1) see no column start;
+// envelope is a stack, newest on top, each column owning the rows from where the one above it
+// stops to where it starts losing to the one below. Rows [j1 - 1, j1 + N - 1) see no column start;
 // a backward sweep is the mirror image. The two sweeps cover the block's rows.
+//
+// Crossings are found lazily: each column keeps a bracket around the last row where it beats the
+// one below, narrowed by bisection only when an insertion needs it, and for free as the sweep
+// passes.
 #include <unistd.h>
 
 #include <algorithm>
@@ -16,83 +21,60 @@
 
 namespace {
 
-struct Segment {
+// Rows are sweep offsets t in [0, len). The last row where the column beats the entry below is in
+// [lo, hi); the bottom entry has [len - 1, len).
+struct Entry {
     std::uint32_t column;
-    std::uint32_t last;  // last row it owns, in sweep order
+    std::uint32_t lo;  // beats the entry below here
+    std::uint32_t hi;  // loses to it here
 };
 
-// The last t in [0, len) with gap(t) <= 0, for a non-decreasing gap with gap(0) = g0 <= 0 and
-// gap(len) = g1 > 0. On the judge's data the gap is nearly linear, so interpolation lands within
-// a row or two; each probe also tests its neighbour on the far side. A probe that leaves more
-// than half of the interval is followed by a bisection step.
-template <class Gap>
-std::uint32_t last_nonpositive(Gap gap, std::uint32_t len, std::int64_t g0, std::int64_t g1) {
-    std::uint32_t lo = 0, hi = len;
-    bool bisect = false;
-    while (hi - lo > 1) {
-        const std::uint32_t width = hi - lo;
-        std::uint32_t t = lo + width / 2;
-        if (!bisect) {
-            const double guess = double(lo) + double(-g0) * double(width) / double(g1 - g0);
-            t = std::clamp(std::uint32_t(guess), lo + 1, hi - 1);
-        }
-        if (const std::int64_t g = gap(t); g <= 0) {
-            lo = t, g0 = g;
-            if (t + 1 < hi) {
-                if (const std::int64_t g = gap(t + 1); g > 0) return t;
-                else lo = t + 1, g0 = g;
-            }
-        } else {
-            hi = t, g1 = g;
-            if (t - 1 > lo) {
-                if (const std::int64_t g = gap(t - 1); g <= 0) return t - 1;
-                else hi = t - 1, g1 = g;
-            }
-        }
-        bisect = !bisect && 2 * (hi - lo) > width;
-    }
-    return lo;
-}
-
-// Sweeps rows first, first + Step, ..., last (Step = +1 or -1). Column enter_first + Step k joins
-// at the k-th row for k < enter_count; it beats every older column on a prefix of the rows left.
-// c[x] = min(c[x], envelope at x).
+// Sweeps len rows: first, first + Step, ... (Step = +1 or -1). Column enter_first + Step t joins
+// at offset t for t < enter_count. c[x] = min(c[x], envelope at x).
 template <int Step>
 void sweep(const std::uint32_t* a, const std::uint32_t* b, std::uint32_t* c, std::uint32_t first,
-           std::uint32_t last, std::uint32_t enter_first, std::uint32_t enter_count, Segment* stack) {
-    auto value = [&](std::uint32_t j, std::uint32_t x) { return a[x - j] + b[j]; };
-    auto before = [](std::uint32_t x, std::uint32_t y) { return Step > 0 ? x < y : x > y; };
+           std::uint32_t len, std::uint32_t enter_first, std::uint32_t enter_count, Entry* stack) {
+    auto value = [&](std::uint32_t j, std::uint32_t t) { return a[first + Step * t - j] + b[j]; };
+    auto beats = [&](std::uint32_t j, std::uint32_t o, std::uint32_t t) { return value(j, t) <= value(o, t); };
     std::uint32_t top = 0;
-    for (std::uint32_t x = first, k = 0;; x += Step, ++k) {
-        while (top && before(stack[top - 1].last, x)) --top;
-        if (k < enter_count) {
-            const std::uint32_t j = enter_first + Step * k;
-            std::uint32_t won = x - Step;  // the new column wins rows up to here
-            std::uint32_t from = x;
-            while (top) {
-                const auto [o, end] = stack[top - 1];
-                auto gap = [&](std::uint32_t t) {
-                    const std::uint32_t y = from + Step * t;
-                    return std::int64_t(value(j, y)) - std::int64_t(value(o, y));
-                };
-                const std::uint32_t len = Step > 0 ? end - from : from - end;
-                const std::int64_t at_end = gap(len);
-                if (at_end <= 0) {
-                    won = end;
-                    from = end + Step;
-                    --top;
-                    continue;
+    // Column k joins at row t, where every entry still owns rows from t on.
+    auto insert = [&](std::uint32_t k, std::uint32_t t) {
+        if (top && !beats(k, stack[top - 1].column, t)) return;  // loses at once: never wins
+        while (top) {
+            Entry& q = stack[top - 1];
+            // Pop q if k beats it at q's last row; else q keeps rows and k loses to q from there.
+            for (;;) {
+                const std::uint32_t lo = std::max(q.lo, t);
+                if (beats(k, q.column, q.hi - 1)) break;
+                if (lo == q.hi - 1) {
+                    stack[top++] = {k, t, lo};
+                    return;
                 }
-                if (const std::int64_t at_from = gap(0); at_from <= 0)
-                    won = from + Step * last_nonpositive(gap, len, at_from, at_end);
+                if (q.lo > t && !beats(k, q.column, q.lo)) {
+                    stack[top++] = {k, t, q.lo};
+                    return;
+                }
+                const std::uint32_t mid = lo + (q.hi - lo) / 2;
+                if (beats(q.column, stack[top - 2].column, mid)) q.lo = mid;
+                else q.hi = mid;
+            }
+            --top;
+        }
+        stack[top++] = {k, len - 1, len};
+    };
+    for (std::uint32_t t = 0; t < len; ++t) {
+        // The top owns row t while it beats the entry below.
+        while (top > 1) {
+            Entry& e = stack[top - 1];
+            if (t < e.hi && (t <= e.lo || beats(e.column, stack[top - 2].column, t))) {
+                e.lo = std::max(e.lo, t);
                 break;
             }
-            if (!top) won = last;
-            if (won != x - Step) stack[top++] = {j, won};
+            --top;
         }
-        const std::uint32_t o = stack[top - 1].column;
-        c[x] = std::min(c[x], value(o, x));
-        if (x == last) break;
+        if (t < enter_count) insert(enter_first + Step * t, t);
+        const std::uint32_t x = first + Step * t;
+        c[x] = std::min(c[x], value(stack[top - 1].column, t));
     }
 }
 
@@ -104,11 +86,11 @@ void solve() {
     in.read(a.data(), n);
     in.read(b.data(), m);
 
-    std::vector<Segment> stack(std::min(n, m));
+    std::vector<Entry> stack(std::min(n, m));
     for (std::uint32_t j0 = 0; j0 < m; j0 += n) {
         const std::uint32_t j1 = std::min(m, j0 + n);
-        sweep<1>(a.data(), b.data(), c.data(), j0, j0 + n - 1, j0, j1 - j0, stack.data());
-        sweep<-1>(a.data(), b.data(), c.data(), j1 + n - 2, j1 - 1, j1 - 1, j1 - j0, stack.data());
+        sweep<1>(a.data(), b.data(), c.data(), j0, n, j0, j1 - j0, stack.data());
+        sweep<-1>(a.data(), b.data(), c.data(), j1 + n - 2, n, j1 - 1, j1 - j0, stack.data());
     }
 
     io::Writer out;

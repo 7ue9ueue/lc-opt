@@ -1,5 +1,5 @@
 // Tests for lib/poly against O(n^2) references: transforms leaf by leaf against their definition,
-// products against schoolbook multiplication, the inverse, exp and log against their recurrences,
+// products against schoolbook multiplication, the inverse, exp, log and power against their recurrences,
 // coefficient-wise operations against scalar code. Long results are checked at random
 // coefficients (each an O(n) sum).
 #include <algorithm>
@@ -12,6 +12,7 @@
 #include "lib/poly/exp.hpp"
 #include "lib/poly/inverse.hpp"
 #include "lib/poly/log.hpp"
+#include "lib/poly/pow.hpp"
 #include "lib/poly/transform.hpp"
 
 namespace {
@@ -82,13 +83,14 @@ std::array<u32, 8> leaf(const std::vector<u32>& a, std::size_t p, const u32* roo
 }
 
 struct Fixture {
-    poly::Arena arena{2 * poly::Transform::words(kLgMax) + 15 * poly::Arena::footprint(std::size_t(1) << kLgMax)};
+    poly::Arena arena{2 * poly::Transform::words(kLgMax) + 20 * poly::Arena::footprint(std::size_t(1) << kLgMax)};
     poly::Transform t{arena, kLgMax};
     std::span<u32> buffer[4] = {arena.take(1 << kLgMax), arena.take(1 << kLgMax), arena.take(1 << kLgMax),
                                 arena.take(1 << kLgMax)};
     std::span<u32> scratch = arena.take(poly::inverse_scratch(std::size_t(1) << kLgMax));
     std::span<u32> exp_scratch = arena.take(poly::exp_scratch(std::size_t(1) << kLgMax));
     std::span<u32> log_scratch = arena.take(poly::log_scratch((std::size_t(1) << kLgMax) + 1));
+    std::span<u32> power_scratch = arena.take(poly::power_scratch(std::size_t(1) << kLgMax));
     std::span<u32> roots = arena.take(ntt::detail::table_words(kLgMax));  // for the leaf definition
 
     Fixture() { ntt::detail::build_table(roots.data(), (std::size_t(1) << kLgMax) / 16, ntt::detail::kRoots[0]); }
@@ -493,6 +495,79 @@ void test_log(Fixture& fx) {
     }
 }
 
+
+// Coefficient i of g = c (f / f[0])^e, from the coefficients below it: f g' = e f' g gives
+// f[0] i g_i = sum_(0<j<=i) (e j - (i - j)) f_j g_(i-j).
+u32 power_coefficient(const std::vector<u32>& f, u32 e, std::span<const u32> g, std::size_t i) {
+    u64 s = 0;
+    for (std::size_t j = 1; j <= i && j < f.size(); ++j) s = (s + u64(sub(mul(e, u32(j)), u32(i - j))) * f[j] % P * g[i - j]) % P;
+    return u32(s);
+}
+
+std::vector<u32> power_reference(const std::vector<u32>& f, u32 e, u32 c, std::size_t n) {
+    std::vector<u32> g(n);
+    g[0] = c;
+    const u32 inv0 = power(f[0], P - 2);
+    for (std::size_t i = 1; i < n; ++i) g[i] = mul(mul(power_coefficient(f, e, g, i), power(u32(i), P - 2)), inv0);
+    return g;
+}
+
+void check_power(Fixture& fx, const std::vector<u32>& f, u32 e, u32 c, std::size_t n, bool in_place = false) {
+    std::vector<u32> g(n, 0xFFFFFFFF);
+    if (in_place) {
+        g = f;
+        g.resize(n);
+        poly::power(fx.t, g, e, c, g, fx.power_scratch);
+    } else {
+        poly::power(fx.t, f, e, c, g, fx.power_scratch);
+    }
+    if (n <= 3000) {
+        expect(g == power_reference(f, e, c, n), "power", n, e);
+        return;
+    }
+    const std::size_t prefix = 1000;  // g mod x^m is c (f / f[0])^e mod x^m
+    expect(std::equal(g.begin(), g.begin() + prefix, power_reference(f, e, c, prefix).begin()), "power prefix", n, e);
+    std::vector<std::size_t> at = {n - 1, n - 2, n / 2, n / 2 - 1};
+    for (int i = 0; i < 24; ++i) at.push_back(1 + pick(n - 1));
+    for (std::size_t i : at)
+        expect(power_coefficient(f, e, g, i) == mul(mul(f[0], u32(i)), g[i]), "f g' = e f' g at coefficient", n, i);
+}
+
+void test_power(Fixture& fx) {
+    const auto exponent = [](int trial) -> u32 { return trial % 4 == 0 ? 0 : trial % 4 == 1 ? 1 : trial % 4 == 2 ? (P + 1) / 2 : u32(pick(P)); };
+    for (std::size_t n = 1; n <= 160; ++n)
+        for (int kind = 0; kind < 4; ++kind) {
+            auto f = random_poly(n, kind % 3);
+            if (!f[0]) f[0] = 1 + u32(pick(P - 1));
+            check_power(fx, f, exponent(kind + int(n)), u32(pick(P)), n, kind == 1);
+        }
+    // Edge cases: f = f[0] (g = c), f = 1 - x with e = -1 (g = all ones), f shorter and longer
+    // than n, e = 1 (g = c f / f[0]), e = 0 (g = c); sizes around log's blocks.
+    for (std::size_t n : {65, 66, 1000, 3073, 4096, 4097, 70000}) {
+        check_power(fx, {5}, u32(pick(P)), 3, n);
+        check_power(fx, {1, P - 1}, P - 1, 1, n);
+        auto f = random_poly(n / 3 + 1);
+        f[0] = 1 + u32(pick(P - 1));
+        check_power(fx, f, u32(pick(P)), u32(pick(P)), n);
+        f = random_poly(2 * n);
+        f[0] = 1 + u32(pick(P - 1));
+        check_power(fx, f, 1, 1, n);
+        check_power(fx, f, 0, 7, n);
+        f = random_poly(n);
+        f[0] = 1 + u32(pick(P - 1));
+        check_power(fx, f, u32(pick(P)), u32(pick(P)), n, true);
+    }
+    for (int lg = 7; lg <= kLgMax; ++lg) {
+        const std::size_t n = std::size_t(1) << lg;
+        for (std::size_t m : {n - 1, n, n + 1, 3 * n / 4 + 1, n / 2 + pick(n / 2) + 1}) {
+            if (m > (std::size_t(1) << kLgMax)) continue;
+            auto f = random_poly(m, int(pick(3)));
+            if (!f[0]) f[0] = 1;
+            check_power(fx, f, exponent(lg), u32(pick(P)), m, lg % 2 == 0);
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -503,6 +578,7 @@ int main() {
     test_divide_by_index();
     test_exp(fx);
     test_log(fx);
+    test_power(fx);
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

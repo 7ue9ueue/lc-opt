@@ -3,7 +3,8 @@
 N, M <= 2^24 coefficients mod 998244353; print the N + M - 1 coefficients of the product. 10 s,
 1 GiB (the output file's tmpfs pages count). Inputs and outputs are ~331 MB at the maximum.
 
-Best judged: ours, [409233](https://judge.yosupo.jp/submission/409233), 448 ms (current `main.cpp`).
+Best judged: ours, [409265](https://judge.yosupo.jp/submission/409265), 439 ms (current `main.cpp`).
+Earlier: [409233](https://judge.yosupo.jp/submission/409233), 448 ms.
 Before: [408888](https://judge.yosupo.jp/submission/408888), 452 ms, the QPoly exploration-014
 program (`../SymPoly/work/ntt/yosupo_convolution_mod_large_opt.cpp`, guess from the submission dates). Next other user: 737 ms (403499). Judge phases of 406521 (the exploration-011
 twin, 454 ms): parse 71, NTT 205, output 156 (`write()` ~120), ~12-15 outside `main`.
@@ -58,3 +59,6 @@ and `_exit` as in `../convolution_mod`.
   - Next: the transform is at the vector ALU bound of its kernels (~190 of ~415 ms); gains need
     fewer ops per butterfly or cheaper leaves (`lib/ntt`). Kernel time (input faults 20, zero
     fill 16, `write()` 110, unmap ~15) is ~160 ms.
+- 2026-10-09, claude: submitted the merged `main.cpp` (#127). [409265](https://judge.yosupo.jp/submission/409265):
+  AC, 439 ms, 612.9 MiB (1/5), against 448 for 409233. `lc-amd` predicted 414.6 vs 428.3 (-3.2%);
+  judged -2.0%.

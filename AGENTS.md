@@ -32,6 +32,7 @@ Solve every [Library Checker](https://judge.yosupo.jp) problem, then make each s
 
 ## Target
 
+- Library Checker account: **Aiyiyi** (https://judge.yosupo.jp/user/Aiyiyi). All submissions go under it.
 - Judge: AMD EPYC 7B13 (Zen 3), one core, 1 GiB.
 - Compile: `g++ -O2 -std=c++23 -DEVAL -DONLINE_JUDGE -march=native main.cpp`.
 - Time covers the whole process: start, I/O, page faults, exit. The score is the slowest case.
@@ -75,7 +76,9 @@ They need Linux and Docker: run them on a VM or in CI, not on the Mac.
 
 ```
 AGENTS.md                    rules (CLAUDE.md imports it)
-STATUS.md                    foundations and one row per problem
+STATUS.md                    foundations (per-problem status is in GitHub issues)
+tools/                       judge copy, CI verdict, submission, round brief (prompt.md)
+.claude/commands/work.md     /work: run rounds on ready issues with subagents
 lib/                         shared code: I/O, modint, NTT, ...
 problems/<category>/<name>/  category as in library-checker-problems
   main.cpp                   current best submission
@@ -85,7 +88,9 @@ problems/<category>/<name>/  category as in library-checker-problems
 
 ## Process
 
-Each problem goes through four passes. Several agents repeat a pass until a round gives no measurable gain.
+Work happens in rounds: one subagent per round, started by `/work` and briefed with `tools/prompt.md`.
+A problem gets at most 5 rounds and stops after 2 rounds in a row without gain.
+The passes below are the usual order of what to try.
 
 0. **Research**: algorithms, papers, limits. Measure the floor (read input, write output, nothing else)
    and compare it with the record to estimate headroom.
@@ -120,5 +125,7 @@ A change to `lib/` is re-checked on every problem that uses it.
 
 ## Status
 
-After a meaningful result, update the problem's `notes.md` and its `STATUS.md` row:
-pass, best time (estimated or judged), record, next idea.
+- Each problem has one GitHub issue, labeled `ready`, `running`, `blocked` or `done`.
+- After each round, comment on the issue: what you tried, the numbers, and a last line that is exactly
+  `Result: gain` or `Result: no gain`. `/work` reads that line.
+- Keep `notes.md` current: best judged time, record, next idea. Do not edit `STATUS.md` from a problem round.

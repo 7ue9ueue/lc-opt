@@ -11,11 +11,13 @@
 // Crossings are found lazily: each column keeps a bracket around the last row where it beats the
 // one below, narrowed by bisection only when an insertion needs it, and for free as the sweep
 // passes.
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
-#include <vector>
+#include <cstdlib>
 
 #include "lib/io/io.hpp"
 
@@ -109,23 +111,40 @@ private:
     std::uint32_t top_ = 0;
 };
 
+// Zeroed memory in 2 MiB pages where the kernel allows. Never freed.
+template <class T>
+T* allocate(std::size_t count) {
+    constexpr std::size_t kHuge = std::size_t(1) << 21;
+    const std::size_t bytes = (count * sizeof(T) + kHuge - 1) / kHuge * kHuge;
+    void* p = ::mmap(nullptr, bytes + kHuge, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) std::abort();
+    const std::uintptr_t aligned = (reinterpret_cast<std::uintptr_t>(p) + kHuge - 1) & ~(kHuge - 1);
+#ifdef MADV_HUGEPAGE
+    ::madvise(reinterpret_cast<void*>(aligned), bytes, MADV_HUGEPAGE);
+#endif
+    return reinterpret_cast<T*>(aligned);
+}
+
 void solve() {
     io::Reader in;
     const auto n = in.read<std::uint32_t>();
     const auto m = in.read<std::uint32_t>();
-    std::vector<std::uint32_t> a(n), b(m), c(n + m - 1, ~0u);
-    in.read(a.data(), n);
-    in.read(b.data(), m);
+    std::uint32_t* const a = allocate<std::uint32_t>(n);
+    std::uint32_t* const b = allocate<std::uint32_t>(m);
+    std::uint32_t* const c = allocate<std::uint32_t>(n + m - 1);
+    Entry* const stack = allocate<Entry>(std::min(n, m));
+    in.read(a, n);
+    in.read(b, m);
+    std::fill(c, c + (n + m - 1), ~0u);
 
-    std::vector<Entry> stack(std::min(n, m));
     for (std::uint32_t j0 = 0; j0 < m; j0 += n) {
         const std::uint32_t j1 = std::min(m, j0 + n);
-        Sweep<1>(a.data(), b.data(), j0, n, stack.data()).run(c.data(), j0, j1 - j0);
-        Sweep<-1>(a.data(), b.data(), j1 + n - 2, n, stack.data()).run(c.data(), j1 - 1, j1 - j0);
+        Sweep<1>(a, b, j0, n, stack).run(c, j0, j1 - j0);
+        Sweep<-1>(a, b, j1 + n - 2, n, stack).run(c, j1 - 1, j1 - j0);
     }
 
     io::Writer out;
-    out.write_array(c.data(), c.size(), ' ');
+    out.write_array(c, n + m - 1, ' ');
     out.write('\n');
 }
 

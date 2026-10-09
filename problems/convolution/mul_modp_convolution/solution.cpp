@@ -4,6 +4,8 @@
 // 2^20 at the maximum) folded mod x^n - 1. c_0 = a_0 sum(b) + b_0 sum(a) - a_0 b_0.
 #include <unistd.h>
 
+#include <memory>
+
 #include "lib/io/io.hpp"
 #include "lib/ntt/ntt.hpp"
 #include "fields.hpp"
@@ -66,13 +68,15 @@ public:
 
     std::uint32_t next(std::uint32_t y) const { return std::uint32_t(std::uint64_t(y) * g_ % p_); }
 
-    // [g^x, ..., g^(x + 7)].
+    // g^(x + j) for j = 0, 1, 4, 5, 2, 3, 6, 7: the lane order of fetch().
     Vec at(std::uint32_t x) const {
         alignas(32) std::uint32_t lanes[8];
-        lanes[0] = power_mod(g_, x, p_);
-        for (int j = 1; j < 8; ++j) lanes[j] = next(lanes[j - 1]);
+        std::uint32_t y = power_mod(g_, x, p_);
+        for (const int j : kOrder) lanes[j] = y, y = next(y);
         return _mm256_load_si256(reinterpret_cast<const Vec*>(lanes));
     }
+
+    static constexpr int kOrder[8] = {0, 1, 4, 5, 2, 3, 6, 7};  // lane of g^(x + j)
 
     // Multiplies vectors of powers by g^k, Shoup style: y < p -> y g^k mod p.
     class Step {
@@ -104,11 +108,25 @@ struct Sums {
     std::uint32_t a, b;  // sums of a_i and b_i over i != 0, mod P
 };
 
-// Factors read from the input: a_i at a[i - 1] and b_i at b[i - 1] for 0 < i < p.
+// The input: pairs[i - 1] = a_i + 2^32 b_i for 0 < i < p.
 struct Input {
-    const std::uint32_t *a, *b;
+    const std::uint64_t* pairs;
     std::uint32_t p, g;
 };
+
+// Reads a_1.., b_0, b_1.. (n each but b_0) into pairs; returns b_0. a, b: scratch for n + 8 words.
+std::uint32_t read_pairs(io::Reader& in, std::uint32_t n, std::uint32_t* a, std::uint32_t* b, std::uint64_t* pairs) {
+    in.read(a, n);
+    const std::uint32_t b0 = in.read<std::uint32_t>();
+    in.read(b, n);
+    auto* out = reinterpret_cast<Vec*>(pairs);
+    for (std::uint32_t i = 0; i < n; i += 8, out += 2) {
+        const Vec x = _mm256_permute4x64_epi64(load(a + i), 0xD8), y = _mm256_permute4x64_epi64(load(b + i), 0xD8);
+        _mm256_storeu_si256(out, _mm256_unpacklo_epi32(x, y));
+        _mm256_storeu_si256(out + 1, _mm256_unpackhi_epi32(x, y));
+    }
+    return b0;
+}
 
 // Shoup product, < 2P for any x < 2^32.
 Vec times(Vec x, const Factor& f) { return ntt::detail::multiply(x, f); }
@@ -141,9 +159,14 @@ private:
     Factor i_, y_, z_;
 };
 
-// t[y - 1] for the lanes y of index where valid is all ones, else 0.
-Vec fetch(const std::uint32_t* t, Vec index, Vec valid) {
-    return _mm256_mask_i32gather_epi32(_mm256_setzero_si256(), reinterpret_cast<const int*>(t) - 1, index, valid, 4);
+// The pairs at index - 1, index in Powers lane order: a and b in natural order. One load serves
+// both factors.
+void fetch(const std::uint64_t* pairs, Vec index, Vec& a, Vec& b) {
+    const auto* base = reinterpret_cast<const long long*>(pairs - 1);
+    const __m256 lo = _mm256_castsi256_ps(_mm256_i32gather_epi64(base, _mm256_castsi256_si128(index), 8));
+    const __m256 hi = _mm256_castsi256_ps(_mm256_i32gather_epi64(base, _mm256_extracti128_si256(index, 1), 8));
+    a = _mm256_castps_si256(_mm256_shuffle_ps(lo, hi, 0x88));
+    b = _mm256_castps_si256(_mm256_shuffle_ps(lo, hi, 0xDD));
 }
 
 // The first transform level (Radix8) of A[x] = a_(g^x) and B[x] = b_(g^x), zero for x >= p - 1,
@@ -166,8 +189,8 @@ Sums gather_forward(Vec* a, Vec* b, std::size_t q, const std::uint32_t* roots, c
         Vec fa[4], fb[4];
         for (int t = 0; t < 4; ++t) {
             const Vec valid = _mm256_cmpgt_epi32(limit[t], at);
-            fa[t] = fetch(in.a, y[t], valid);
-            fb[t] = fetch(in.b, y[t], valid);
+            fetch(in.pairs, y[t], fa[t], fb[t]);
+            fa[t] = _mm256_and_si256(fa[t], valid), fb[t] = _mm256_and_si256(fb[t], valid);
             sum_a = add_mod(sum_a, fa[t]);
             sum_b = add_mod(sum_b, fb[t]);
             y[t] = step(y[t]);
@@ -183,19 +206,19 @@ Sums gather(std::uint32_t* a, std::uint32_t* b, const Input& in) {
     const std::uint32_t n = in.p - 1;
     const Powers powers(in.g, in.p);
     const Powers::Step step(powers, 16);
-    const Vec all = _mm256_set1_epi32(-1);
     Vec lo = powers.at(0), hi = powers.at(8), sum_a = _mm256_setzero_si256(), sum_b = sum_a;
     std::uint32_t x = 0;
     for (; x + 16 <= n; x += 16, lo = step(lo), hi = step(hi)) {
-        const Vec a0 = fetch(in.a, lo, all), a1 = fetch(in.a, hi, all);
-        const Vec b0 = fetch(in.b, lo, all), b1 = fetch(in.b, hi, all);
+        Vec a0, a1, b0, b1;
+        fetch(in.pairs, lo, a0, b0);
+        fetch(in.pairs, hi, a1, b1);
         store(a + x, a0), store(a + x + 8, a1), store(b + x, b0), store(b + x + 8, b1);
         sum_a = add_mod(add_mod(sum_a, a0), a1);
         sum_b = add_mod(add_mod(sum_b, b0), b1);
     }
     std::uint64_t ra = lane_sum(sum_a), rb = lane_sum(sum_b);
     for (std::uint32_t y = std::uint32_t(_mm256_cvtsi256_si32(lo)); x < n; ++x, y = powers.next(y)) {
-        a[x] = in.a[y - 1], b[x] = in.b[y - 1];
+        a[x] = std::uint32_t(in.pairs[y - 1]), b[x] = std::uint32_t(in.pairs[y - 1] >> 32);
         ra += a[x], rb += b[x];
     }
     return {std::uint32_t(ra % kP), std::uint32_t(rb % kP)};
@@ -211,8 +234,9 @@ void scatter(std::uint32_t* c, const std::uint32_t* d, std::uint32_t p, std::uin
     std::uint32_t k = 0;
     for (; k + 16 <= n; k += 16, lo = step(lo), hi = step(hi)) {
         store(index, lo), store(index + 8, hi);
-        store(value, add_mod(load(d + k), load(d + k + n)));
-        store(value + 8, add_mod(load(d + k + 8), load(d + k + n + 8)));
+        constexpr int kLanes = 0xD8;  // 64-bit lanes 0, 2, 1, 3: Powers lane order
+        store(value, _mm256_permute4x64_epi64(add_mod(load(d + k), load(d + k + n)), kLanes));
+        store(value + 8, _mm256_permute4x64_epi64(add_mod(load(d + k + 8), load(d + k + n + 8)), kLanes));
         for (int j = 0; j < 16; ++j) c[index[j]] = value[j];
     }
     for (std::uint32_t y = std::uint32_t(_mm256_cvtsi256_si32(lo)); k < n; ++k, y = powers.next(y)) {
@@ -255,9 +279,10 @@ public:
     Product(const Product&) = delete;
     Product& operator=(const Product&) = delete;
 
-    // Room for the inputs a_1.., b_1..: 2^lg / 2 words each.
-    std::uint32_t* input_a() { return input_; }
-    std::uint32_t* input_b() { return input_ + length() / 2; }
+    // Room for the input: 2^lg / 2 pairs, and the factors as scratch until load().
+    std::uint64_t* pairs() { return reinterpret_cast<std::uint64_t*>(input_); }
+    std::uint32_t* scratch_a() { return a_; }
+    std::uint32_t* scratch_b() { return b_; }
     std::uint32_t* b() { return b_; }
     // fields::kTextBytes bytes for the output, 16-byte aligned, after the tables (in their huge page).
     char* text() { return text_; }
@@ -304,11 +329,11 @@ private:
 // Other lengths: gather, then ntt::Convolution.
 class SmallProduct {
 public:
-    explicit SmallProduct(std::size_t n) : lg_(log_length(n)), convolution_(n, n) {}
+    explicit SmallProduct(std::size_t n) : convolution_(n, n), pairs_(new std::uint64_t[n + 8]) {}
 
-    // The inputs go to the factors' upper halves, which gather() does not write.
-    std::uint32_t* input_a() { return convolution_.a() + half(); }
-    std::uint32_t* input_b() { return convolution_.b() + half(); }
+    std::uint64_t* pairs() { return pairs_.get(); }
+    std::uint32_t* scratch_a() { return convolution_.a(); }
+    std::uint32_t* scratch_b() { return convolution_.b(); }
     std::uint32_t* b() { return convolution_.b(); }
 
     char* text() {
@@ -320,24 +345,18 @@ public:
     const std::uint32_t* multiply() { return convolution_.multiply(); }
 
 private:
-    std::size_t half() const { return std::size_t(1) << (lg_ - 1); }
-
-    int lg_;
     ntt::Convolution convolution_;
+    std::unique_ptr<std::uint64_t[]> pairs_;
 };
 
 template <class Multiplier>
 void convolve(io::Reader& in, std::uint32_t p) {
     const std::uint32_t n = p - 1;
     Multiplier product(n);
-    std::uint32_t* a = product.input_a();
-    std::uint32_t* b = product.input_b();
     const std::uint32_t a0 = in.read<std::uint32_t>();
-    in.read(a, n);
-    const std::uint32_t b0 = in.read<std::uint32_t>();
-    in.read(b, n);
+    const std::uint32_t b0 = read_pairs(in, n, product.scratch_a(), product.scratch_b(), product.pairs());
     const std::uint32_t g = primitive_root(p);
-    const Sums sums = product.load({a, b, p, g});
+    const Sums sums = product.load({product.pairs(), p, g});
     const std::uint32_t* d = product.multiply();
     std::uint32_t* c = product.b();
     scatter(c, d, p, g);

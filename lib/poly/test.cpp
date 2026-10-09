@@ -65,7 +65,7 @@ u32 product_coefficient(std::span<const u32> a, std::span<const u32> b, std::siz
     return u32(s);
 }
 
-// Leaf p of the transform by its definition: 2^32 (a mod (x^8 - w_p)).
+// Leaf p of the transform by its definition: a mod (x^8 - w_p).
 std::array<u32, 8> leaf(const std::vector<u32>& a, std::size_t p, const u32* roots) {
     const u32 r = roots[ntt::detail::slot(p >> 1)], w = p & 1 ? P - r : r;
     std::array<u32, 8> c{};
@@ -74,8 +74,6 @@ std::array<u32, 8> leaf(const std::vector<u32>& a, std::size_t p, const u32* roo
         if (i && i % 8 == 0) wk = mul(wk, w);
         c[i % 8] = add(c[i % 8], mul(a[i], wk));
     }
-    const u32 montgomery = u32((u64(1) << 32) % P);
-    for (auto& x : c) x = mul(x, montgomery);
     return c;
 }
 
@@ -124,6 +122,57 @@ void test_transforms(Fixture& fx) {
             }
             fx.t.inverse(ta);
             expect(equal(ta, a), "inverse(forward(a)) = a", lg, kind);
+
+            // Sources x^shift in: out of place, and in place at offset shift (out's other words
+            // hold garbage); unaligned shifts and sizes. Output halves.
+            for (int trial = 0; trial < 6; ++trial) {
+                const std::size_t shift = trial == 0 ? 0 : trial == 1 || trial == 2 ? n / 2 : pick(n);
+                const std::size_t size = trial == 0 ? n / 2 : trial == 1 ? n / 2 : pick(n - shift + 1);
+                const bool in_place = trial % 2 == 1;
+                std::vector<u32> shifted(n, 0);
+                for (std::size_t i = 0; i < size; ++i) shifted[shift + i] = a[i];
+                auto want = fx.load(1, shifted);
+                fx.t.forward(want);
+                auto out = fx.load(0, b);  // garbage
+                std::span<const u32> in;
+                if (in_place) {
+                    std::copy_n(a.begin(), size, out.begin() + shift);
+                    in = std::span<const u32>(out).subspan(shift, size);
+                } else {
+                    in = std::span<const u32>(fx.load(2, a)).first(size);
+                }
+                fx.t.forward(in, shift, out);
+                expect(std::equal(out.begin(), out.end(), want.begin()), "forward of x^shift in", lg, trial);
+
+                const poly::Half half = trial % 3 == 0 ? poly::Half::kBoth : trial % 3 == 1 ? poly::Half::kUpper : poly::Half::kLower;
+                const std::size_t lo = half == poly::Half::kUpper ? n / 2 : 0, hi = half == poly::Half::kLower ? n / 2 : n;
+                fx.t.inverse(out, half);
+                expect(std::equal(out.begin() + lo, out.begin() + hi, shifted.begin() + lo), "inverse of a half", lg, trial);
+
+                auto tb = fx.load(3, b);
+                fx.t.forward(tb);
+                out = fx.load(0, b);
+                if (in_place) {
+                    std::copy_n(a.begin(), size, out.begin() + shift);
+                    in = std::span<const u32>(out).subspan(shift, size);
+                }
+                fx.t.cyclic_product(in, shift, out, tb, half);
+                for (std::size_t i : {lo, hi - 1, lo + pick(hi - lo), lo + pick(hi - lo)})
+                    expect(out[i] == cyclic_coefficient(shifted, b, i), "cyclic_product of x^shift in", lg, i);
+            }
+
+            // forward_upper: leaves n/8 .. n/4 - 1 of the transform of length 2n.
+            if (lg < kLgMax) {
+                const std::size_t shift = kind == 0 ? 0 : pick(n), size = pick(n - shift + 1);
+                std::vector<u32> shifted(n, 0);
+                for (std::size_t i = 0; i < size; ++i) shifted[shift + i] = a[i];
+                auto out = fx.load(0, b);
+                fx.t.forward_upper(std::span<const u32>(a).first(size), shift, out);
+                for (std::size_t p : leaves_to_check(n)) {
+                    const auto want = leaf(shifted, n / 8 + p, fx.roots.data());
+                    expect(std::equal(want.begin(), want.end(), out.begin() + 8 * p), "forward_upper leaf", lg, p);
+                }
+            }
 
             // cyclic_product, multiply and multiply_add against the cyclic product.
             std::vector<std::size_t> at;

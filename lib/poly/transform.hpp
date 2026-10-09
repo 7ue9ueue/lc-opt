@@ -8,12 +8,15 @@
 //   t.cyclic_product(a, b);                    // a = a b mod (x^n - 1), b unchanged
 //   t.multiply(b, c);                          // b = b c, both transforms
 //   t.inverse(b);                              // a transform back to coefficients
+//   t.forward(f.first(m), 0, a);               // out of place: a = transform of f[0, m), m <= n
+//   t.cyclic_product(a.subspan(n / 2), n / 2, a, b, poly::Half::kUpper);
+//                                              // a = x^(n/2) a[n/2, n) b mod (x^n - 1), upper half
 //
 // Spans: size n = 2^lg with 6 <= lg <= lg_max, 32-byte aligned, 4 readable bytes after the end
 // (the forward kernels read past the last vector). Arena::take gives such spans.
 //
 // The transform of a polynomial a of length n holds n / 8 leaves: leaf p is a mod (x^8 - w_p),
-// 8 coefficients, each times 2^32 (Montgomery form), in [0, P). Here w_p = r[p / 2] for even p,
+// 8 coefficients in [0, P). Here w_p = r[p / 2] for even p,
 // -r[p / 2] for odd p, and r[m] is the product of roots[j] over the set bits j of m, roots[j]
 // of order 2^(j + 2) (lib/ntt's twiddle table). w_p does not depend on n, so the transform of
 // length n is the first half of the transform of length 2n.
@@ -33,6 +36,9 @@
 namespace poly {
 
 inline constexpr std::uint32_t kModulus = ntt::kModulus;
+
+// The half of a transform's output that is computed; the other half is left unspecified.
+enum class Half { kBoth, kLower, kUpper };
 
 // One anonymous mapping in transparent huge pages, handed out as zero-filled spans that meet the
 // transforms' requirements. Each span starts 64 bytes after the previous one ends, so equal
@@ -157,6 +163,7 @@ inline Vec leaf_product(const Window& window, const std::uint32_t* b) {
     x = at(8);
     Vec even = _mm256_mul_epu32(x, by(0));
     odd = _mm256_add_epi64(odd, _mm256_mul_epu32(x, by(1)));
+#pragma GCC unroll 8
     for (int k = 7; k >= 2; --k) {
         x = at(k);
         even = _mm256_add_epi64(even, _mm256_mul_epu32(x, by(8 - k)));
@@ -169,19 +176,19 @@ inline Vec leaf_product(const Window& window, const std::uint32_t* b) {
     return low(_mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA));
 }
 
-// The bottom of a subtree: count groups at h = 1 (4 vectors each), the first with index first.
-// Forward: forward butterflies; leaves to Montgomery form.
+// The bottom of a subtree: count groups at h = 1 (4 vectors each, at a), the first with index
+// first. Group g holds leaves 4g .. 4g + 3, so another operand's leaves are found by index.
+// Forward: forward butterflies, canonical leaves.
 struct ForwardBottom {
     static constexpr bool kForward = true, kInverse = false;
     const std::uint32_t* roots;
 
-    void operator()(std::uint32_t* a, const std::uint32_t*, std::size_t count, std::size_t first) const {
-        const Factor to_montgomery(kR);
+    void operator()(std::uint32_t* a, std::size_t count, std::size_t first) const {
         for (std::size_t j = 0; j < count; ++j, a += 32) {
             const Group w(roots, first + j);
             Vec f[4] = {load(a), load(a + 8), load(a + 16), load(a + 24)};
             forward_h1(f, w);
-            for (int t = 0; t < 4; ++t) store(a + 8 * t, reduce(times(f[t], to_montgomery), kP));
+            for (int t = 0; t < 4; ++t) store(a + 8 * t, canonical(f[t]));
         }
     }
 };
@@ -191,7 +198,7 @@ struct InverseBottom {
     static constexpr bool kForward = false, kInverse = true;
     const std::uint32_t* inverse_roots;
 
-    void operator()(std::uint32_t* a, const std::uint32_t*, std::size_t count, std::size_t first) const {
+    void operator()(std::uint32_t* a, std::size_t count, std::size_t first) const {
         for (std::size_t j = 0; j < count; ++j, a += 32) {
             const Group w(inverse_roots, first + j);
             Vec f[4] = {load(a), load(a + 8), load(a + 16), load(a + 24)};
@@ -201,12 +208,14 @@ struct InverseBottom {
     }
 };
 
-// Product: forward butterflies of a, leaf products with b (a transform), inverse butterflies.
-// The windows of group j + 1 are written before the products of group j read those of group j.
+// Product: forward butterflies of a, leaf products with b (a transform; each product carries a
+// factor 2^-32 that the final scale undoes), inverse butterflies. The windows of group j + 1 are
+// written before the products of group j read those of group j.
 struct ProductBottom {
     static constexpr bool kForward = true, kInverse = true;
     const std::uint32_t* roots;
     const std::uint32_t* inverse_roots;
+    const std::uint32_t* b;
 
     void prepare(const std::uint32_t* a, std::size_t g, Window (&window)[4]) const {
         Vec f[4] = {load(a), load(a + 8), load(a + 16), load(a + 24)};
@@ -214,26 +223,26 @@ struct ProductBottom {
         for (int t = 0; t < 4; ++t) fill_window(window[t], canonical(f[t]), leaf_weight(roots, 4 * g + t));
     }
 
-    void finish(std::uint32_t* a, const std::uint32_t* b, std::size_t g, const Window (&window)[4]) const {
+    void finish(std::uint32_t* a, std::size_t g, const Window (&window)[4]) const {
         Vec f[4];
-        for (int t = 0; t < 4; ++t) f[t] = leaf_product(window[t], b + 8 * t);
+        for (int t = 0; t < 4; ++t) f[t] = leaf_product(window[t], b + 8 * (4 * g + t));
         inverse_h1(f, Group(inverse_roots, g));
         for (int t = 0; t < 4; ++t) store(a + 8 * t, f[t]);
     }
 
-    void operator()(std::uint32_t* a, const std::uint32_t* b, std::size_t count, std::size_t first) const {
+    void operator()(std::uint32_t* a, std::size_t count, std::size_t first) const {
         Window window[2][4];
         prepare(a, first, window[0]);
-        for (std::size_t j = 0; j < count; ++j, a += 32, b += 32) {
+        for (std::size_t j = 0; j < count; ++j, a += 32) {
             if (j + 1 < count) prepare(a + 32, first + j + 1, window[(j + 1) & 1]);
-            finish(a, b, first + j, window[j & 1]);
+            finish(a, first + j, window[j & 1]);
         }
     }
 };
 
 // Depth-first recursion over radix-4 groups, as in lib/ntt: group k at stride h holds 4h vectors
 // (a polynomial mod X^4 - r[k]^2, X = x^(8h)); its children are groups 4k + t. Subtrees of at most
-// kTile vectors run level by level. a and b advance together; b is read only by the bottom.
+// kTile vectors run level by level.
 template <class Bottom>
 class Recursion {
 public:
@@ -241,22 +250,22 @@ public:
         : r_(roots), ir_(inverse_roots), bottom_(bottom) {}
 
     // nv = 4^j >= 4 vectors at a, group k.
-    void visit(std::uint32_t* a, const std::uint32_t* b, std::size_t nv, std::size_t k) const {
-        if (nv <= kTile) return tile(a, b, nv, k);
+    void visit(std::uint32_t* a, std::size_t nv, std::size_t k) const {
+        if (nv <= kTile) return tile(a, nv, k);
         const std::size_t h = nv / 4;
         if constexpr (Bottom::kForward) forward(a, h, k);
-        for (std::size_t t = 0; t < 4; ++t) visit(a + 8 * t * h, b + 8 * t * h, h, 4 * k + t);
+        for (std::size_t t = 0; t < 4; ++t) visit(a + 8 * t * h, h, 4 * k + t);
         if constexpr (Bottom::kInverse) inverse(a, h, k);
     }
 
 private:
     static constexpr std::size_t kTile = 256;
 
-    void tile(std::uint32_t* a, const std::uint32_t* b, std::size_t nv, std::size_t k) const {
+    void tile(std::uint32_t* a, std::size_t nv, std::size_t k) const {
         if constexpr (Bottom::kForward)
             for (std::size_t h = nv / 4; h >= 4; h /= 4)
                 for (std::size_t j = 0, g = k * (nv / (4 * h)); j < nv; j += 4 * h, ++g) forward(a + 8 * j, h, g);
-        bottom_(a, b, nv / 4, k * (nv / 4));
+        bottom_(a, nv / 4, k * (nv / 4));
         if constexpr (Bottom::kInverse)
             for (std::size_t h = 4; h < nv; h *= 4)
                 for (std::size_t j = 0, g = k * (nv / (4 * h)); j < nv; j += 4 * h, ++g) inverse(a + 8 * j, h, g);
@@ -277,6 +286,95 @@ private:
     const std::uint32_t *r_, *ir_;
     Bottom bottom_;
 };
+
+// The input of a forward transform of length n: the polynomial x^shift in[0, size), shift + size
+// <= n, in canonical coefficients. Vector v holds coefficients [8v, 8v + 8); those outside
+// [shift, shift + size) are zero and not read.
+class Source {
+public:
+    Source(const std::uint32_t* in, std::size_t size, std::size_t shift)
+        : in_(in), shift_(shift), end_(shift + size), first_((shift + 7) / 8), first_touched_(shift / 8) {
+        count_ = end_ / 8 > first_ ? end_ / 8 - first_ : 0;
+        touched_ = (end_ + 7) / 8 - first_touched_;
+    }
+
+    Vec operator()(std::size_t v) const {
+        if (v - first_ < count_) return _mm256_loadu_si256(reinterpret_cast<const Vec*>(in_ + (8 * v - shift_)));
+        if (v - first_touched_ >= touched_) return _mm256_setzero_si256();
+        return edge(v);
+    }
+
+private:
+    // A vector partly inside.
+    [[gnu::noinline]] Vec edge(std::size_t v) const {
+        alignas(32) std::uint32_t x[8] = {};
+        for (std::size_t i = 8 * v; i < 8 * v + 8; ++i)
+            if (i >= shift_ && i < end_) x[i - 8 * v] = in_[i - shift_];
+        return load(x);
+    }
+
+    const std::uint32_t* in_;
+    std::size_t shift_, end_;
+    std::size_t first_, count_;          // vectors [first_, first_ + count_) are inside
+    std::size_t first_touched_, touched_;  // vectors outside [first_touched_, first_touched_ + touched_) are zero
+};
+
+// Top levels. Forward: canonical inputs, outputs < 4P. Inverse: inputs < 2P, canonical outputs
+// times s. Quarters (radix 4) or halves (radix 2) of h vectors each. Written for any input, which
+// may also be out itself.
+
+// Radix-4 identity group on the quarters a, b, c, d (a polynomial mod X^4 - 1, X = x^(n/4)):
+// outputs (a + c) + (b + d), (a + c) - (b + d), (a - c) + z (b - d), (a - c) - z (b - d), z = r[1].
+inline void forward_top4(const Source& in, Vec* out, std::size_t h, const std::uint32_t* roots) {
+    const Factor z(roots[1], roots[9]);
+    const Vec p = broadcast(kP);
+    for (std::size_t j = 0; j < h; ++j) {
+        const Vec a = in(j), b = in(j + h), c = in(j + 2 * h), d = in(j + 3 * h);
+        const Vec ac = add(a, c), amc = _mm256_sub_epi32(add(a, p), c);  // < 2P
+        const Vec bd = add(b, d), zbmd = times(_mm256_sub_epi32(add(b, p), d), z);
+        out[j] = add(ac, bd), out[j + h] = diff(ac, bd);
+        out[j + 2 * h] = add(amc, zbmd), out[j + 3 * h] = diff(amc, zbmd);
+    }
+}
+
+// Radix-2 on the halves u, v: outputs u + v, u - v.
+inline void forward_top2(const Source& in, Vec* out, std::size_t h) {
+    const Vec p = broadcast(kP);
+    for (std::size_t j = 0; j < h; ++j) {
+        const Vec u = in(j), v = in(j + h);
+        out[j] = add(u, v), out[j + h] = _mm256_sub_epi32(add(u, p), v);
+    }
+}
+
+inline void inverse_top4(Vec* f, std::size_t h, Half output, const std::uint32_t* inverse_roots, const Factor& s) {
+    if (output == Half::kBoth) return ntt::detail::inverse_radix4(f, h, inverse_roots, s);
+    const Factor z(inverse_roots[1], inverse_roots[9]);
+    const auto scale = [&s](Vec x) { return reduce(times(x, s), kP); };
+    for (std::size_t j = 0; j < h; ++j) {
+        const Vec p0 = f[j], p1 = f[j + h], p2 = f[j + 2 * h], p3 = f[j + 3 * h];
+        const Vec ab = low(add(p0, p1)), cd = low(add(p2, p3));
+        const Vec amb = low(diff(p0, p1)), cmd = times(diff(p2, p3), z);
+        if (output == Half::kLower) {
+            f[j] = scale(add(ab, cd)), f[j + h] = scale(add(amb, cmd));
+        } else {
+            f[j + 2 * h] = scale(diff(ab, cd)), f[j + 3 * h] = scale(diff(amb, cmd));
+        }
+    }
+}
+
+inline void inverse_top2(Vec* f, std::size_t h, Half output, std::uint32_t scale) {
+    if (output == Half::kBoth) {
+        alignas(32) std::uint32_t s[16] = {};  // table layout: s at entry 1
+        s[1] = scale;
+        s[9] = ntt::detail::quotient(scale);
+        return ntt::kernels::scale_radix2(f, h, s);
+    }
+    const Factor s(scale);
+    for (std::size_t j = 0; j < h; ++j) {
+        if (output == Half::kLower) f[j] = reduce(times(add(f[j], f[j + h]), s), kP);
+        else f[j + h] = reduce(times(diff(f[j], f[j + h]), s), kP);
+    }
+}
 
 }  // namespace detail
 
@@ -299,22 +397,59 @@ public:
 
     int lg_max() const { return lg_max_; }
 
-    // Coefficients in [0, P) -> transform.
-    void forward(std::span<std::uint32_t> a) const { run(a, a.data(), detail::ForwardBottom{roots_}, 0); }
+    // out = the transform of x^shift in, of length n = out.size(): coefficients in [0, P), those
+    // outside [shift, shift + in.size()) zero (shift + in.size() <= n). in may lie inside out at
+    // offset shift (in place); otherwise the two must not overlap.
+    void forward(std::span<const std::uint32_t> in, std::size_t shift, std::span<std::uint32_t> out) const {
+        run(out, source(in, shift, out.size()), detail::ForwardBottom{roots_}, 0, Half::kBoth);
+    }
+
+    // In place: coefficients in [0, P) -> transform.
+    void forward(std::span<std::uint32_t> a) const { forward(a, 0, a); }
+
+    // Doubling: out = the upper half of the transform of length 2n of x^shift in, n = out.size(),
+    // in as for forward() (needs lg_max >= lg + 1). Its leaves are n/8 .. n/4 - 1: the transform of
+    // x^shift in mod (x^n + 1). With forward(in, shift, lower) it gives the transform of length 2n.
+    void forward_upper(std::span<const std::uint32_t> in, std::size_t shift, std::span<std::uint32_t> out) const {
+        using namespace detail;
+        check_length(2 * out.size());
+        const Source src = source(in, shift, out.size());
+        const detail::Recursion recursion(roots_, inverse_roots_, ForwardBottom{roots_});
+        const std::size_t nv = out.size() / 8;
+        auto* v = reinterpret_cast<Vec*>(out.data());
+        if (std::countr_zero(nv) % 2 == 0) {  // 2n / 8 = 2 * 4^j: group 1 below a radix-2 level
+            for (std::size_t j = 0; j < nv; ++j) v[j] = src(j);
+            return recursion.visit(out.data(), nv, 1);
+        }
+        // 2n / 8 = 4^j: groups 2 and 3 below the radix-4 identity group, whose upper quarters are 0.
+        const std::size_t h = nv / 2;
+        const Factor z(roots_[1], roots_[9]);
+        for (std::size_t j = 0; j < h; ++j) {
+            const Vec a = src(j), zb = times(src(j + h), z);
+            v[j] = add(a, zb), v[j + h] = diff(a, zb);
+        }
+        recursion.visit(out.data(), h, 2);
+        recursion.visit(out.data() + 8 * h, h, 3);
+    }
 
     // Transform -> coefficients in [0, P).
-    void inverse(std::span<std::uint32_t> a) const {
+    void inverse(std::span<std::uint32_t> a, Half output = Half::kBoth) const {
         using namespace ntt::detail;
-        const std::uint32_t scale = multiply_mod(power(std::uint32_t(a.size() / 8), kP - 2), power(kR, kP - 2));
-        run(a, a.data(), detail::InverseBottom{inverse_roots_}, scale);
+        const std::uint32_t scale = power(std::uint32_t(a.size() / 8), kP - 2);  // undoes the factor n / 8
+        run(a, detail::Source(nullptr, 0, 0), detail::InverseBottom{inverse_roots_}, scale, output);
     }
 
-    // a = a b mod (x^n - 1): a holds coefficients in [0, P), b a transform of the same length.
-    void cyclic_product(std::span<std::uint32_t> a, std::span<const std::uint32_t> b) const {
+    // out = (x^shift in) b mod (x^n - 1) for b a transform of length n = out.size(); in as for
+    // forward(). Only the output half of out is computed.
+    void cyclic_product(std::span<const std::uint32_t> in, std::size_t shift, std::span<std::uint32_t> out,
+                        std::span<const std::uint32_t> b, Half output = Half::kBoth) const {
         using namespace ntt::detail;
-        const std::uint32_t scale = power(std::uint32_t(a.size() / 8), kP - 2);
-        run(a, b.data(), detail::ProductBottom{roots_, inverse_roots_}, scale);
+        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
+        run(out, source(in, shift, out.size()), detail::ProductBottom{roots_, inverse_roots_, b.data()}, scale, output);
     }
+
+    // In place: a = a b mod (x^n - 1).
+    void cyclic_product(std::span<std::uint32_t> a, std::span<const std::uint32_t> b) const { cyclic_product(a, 0, a, b); }
 
     // a = a b, both transforms of the same length.
     void multiply(std::span<std::uint32_t> a, std::span<const std::uint32_t> b) const {
@@ -333,10 +468,16 @@ private:
         if (!std::has_single_bit(n) || lg < kMinLog || lg > lg_max_) std::abort();
     }
 
+    static detail::Source source(std::span<const std::uint32_t> in, std::size_t shift, std::size_t n) {
+        if (shift > n || in.size() > n - shift) std::abort();
+        return detail::Source(in.data(), in.size(), shift);
+    }
+
     // Top level, the subtrees, the top level's inverse with the scale (canonical output).
     // n / 8 = 4^j: one radix-4 group; n / 8 = 2 * 4^j: a radix-2 level.
     template <class Bottom>
-    void run(std::span<std::uint32_t> a, const std::uint32_t* b, const Bottom& bottom, std::uint32_t scale) const {
+    void run(std::span<std::uint32_t> a, const detail::Source& in, const Bottom& bottom, std::uint32_t scale,
+             Half output) const {
         using namespace detail;
         check_length(a.size());
         const detail::Recursion recursion(roots_, inverse_roots_, bottom);
@@ -344,33 +485,30 @@ private:
         auto* v = reinterpret_cast<Vec*>(a.data());
         if (std::countr_zero(nv) % 2 == 0) {
             const std::size_t h = nv / 4;
-            if constexpr (Bottom::kForward) ntt::kernels::forward_identity(v, h, roots_);
-            for (std::size_t t = 0; t < 4; ++t) recursion.visit(a.data() + 8 * t * h, b + 8 * t * h, h, t);
-            if constexpr (Bottom::kInverse) ntt::detail::inverse_radix4(v, h, inverse_roots_, Factor(scale));
+            if constexpr (Bottom::kForward) forward_top4(in, v, h, roots_);
+            for (std::size_t t = 0; t < 4; ++t) recursion.visit(a.data() + 8 * t * h, h, t);
+            if constexpr (Bottom::kInverse) inverse_top4(v, h, output, inverse_roots_, Factor(scale));
         } else {
             const std::size_t h = nv / 2;
-            if constexpr (Bottom::kForward) ntt::detail::forward_radix2(v, h, false);
-            recursion.visit(a.data(), b, h, 0);
-            recursion.visit(a.data() + 8 * h, b + 8 * h, h, 1);
-            if constexpr (Bottom::kInverse) {
-                alignas(32) std::uint32_t s[16] = {};  // table layout: s at entry 1
-                s[1] = scale;
-                s[9] = ntt::detail::quotient(scale);
-                ntt::kernels::scale_radix2(v, h, s);
-            }
+            if constexpr (Bottom::kForward) forward_top2(in, v, h);
+            recursion.visit(a.data(), h, 0);
+            recursion.visit(a.data() + 8 * h, h, 1);
+            if constexpr (Bottom::kInverse) inverse_top2(v, h, output, scale);
         }
     }
 
-    // out = combine(out, a b / 2^32 mod P) leaf by leaf, canonical.
+    // out = combine(out, a b mod P) leaf by leaf, canonical.
     template <class Combine>
     void products(std::uint32_t* out, const std::uint32_t* a, const std::uint32_t* b, std::size_t n, Combine combine) const {
         using namespace detail;
         check_length(n);
+        const Factor undo_montgomery(kR);
         Window window[2];
         fill_window(window[0], load(a), leaf_weight(roots_, 0));
         for (std::size_t p = 0; p < n / 8; ++p) {
             if (p + 1 < n / 8) fill_window(window[(p + 1) & 1], load(a + 8 * p + 8), leaf_weight(roots_, p + 1));
-            store(out + 8 * p, canonical(combine(load(out + 8 * p), leaf_product(window[p & 1], b + 8 * p))));
+            const Vec product = reduce(times(leaf_product(window[p & 1], b + 8 * p), undo_montgomery), kP);
+            store(out + 8 * p, canonical(combine(load(out + 8 * p), product)));
         }
     }
 

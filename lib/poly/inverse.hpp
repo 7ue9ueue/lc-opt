@@ -60,15 +60,9 @@ inline void inverse(const Transform& t, std::span<const std::uint32_t> f, std::s
     for (; k < n; k *= 2) {
         const std::size_t len = 2 * k, end = std::min(len, n);
         const std::span<std::uint32_t> gk = scratch.first(len), e = scratch.subspan(Arena::footprint(len), len);
-        std::copy_n(g.begin(), k, gk.begin());
-        std::fill(gk.begin() + k, gk.end(), 0);
-        t.forward(gk);
-        const std::size_t m = std::min(len, f.size());
-        std::copy_n(f.begin(), m, e.begin());
-        std::fill(e.begin() + m, e.end(), 0);
-        t.cyclic_product(e, gk);
-        std::fill_n(e.begin(), k, 0);
-        t.cyclic_product(e, gk);
+        t.forward(g.first(k), 0, gk);
+        t.cyclic_product(f.first(std::min(len, f.size())), 0, e, gk, Half::kUpper);
+        t.cyclic_product(e.subspan(k), k, e, gk, Half::kUpper);
         for (std::size_t i = k; i < end; ++i) g[i] = e[i] ? detail::kP - e[i] : 0;
     }
 }

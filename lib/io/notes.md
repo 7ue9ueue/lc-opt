@@ -104,6 +104,9 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
 - uint64 batch write (scalar split into three 8-digit limbs, AVX2 digits for eight values, three
   stores per value): 5.5 ns per value vs 4.4 for the scalar formatter in the same loop. Not kept;
   the limb split and digit count are scalar either way.
+- Exit: `std::_Exit(0)` after `flush()` instead of returning from `main` skips the exit handlers,
+  0.03 ms per run (aplusb 1.15 → 1.12 ms). Solutions do this; the library cannot.
+- `Reader::scan()`/`resume()`: the separator state for custom token loops (many_aplusb's assembly).
 - Judge harness (`tools/judge.py`): inputs now on tmpfs, as on the judge, instead of the VM's disk
   cache. Same timings for these programs.
 

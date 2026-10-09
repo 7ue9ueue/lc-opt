@@ -1,9 +1,10 @@
 # convolution_F_2_64
 
 N, M <= 2^19 elements of F_2[x] / (x^64 + x^4 + x^3 + x + 1) as uint64; print the N + M - 1
-coefficients of the product. 10 s. Record when the issue opened: 409 ms.
+coefficients of the product. 10 s.
 
-Best judged: not submitted yet.
+Best judged: ours, 46 ms: [409244](https://judge.yosupo.jp/submission/409244) (current `main.cpp`,
+from #111). Record when the issue opened: 409 ms.
 
 ## Design
 
@@ -47,5 +48,7 @@ read 2.4, basis change of a 2.1, of b 2.1, forward a 5.8, fused b forward + prod
   - Top Taylor in one pass, transposed short rows: 45.5; vector shift in that pass: 44.0.
   - Paired stages inside the 32 KiB blocks: neutral (bench ratio 0.999, 15 rounds), kept.
   - `judge.py bench` v1 vs final, 11 rounds: 60.11 vs 47.03 ms median, ratio 0.78.
+- 2026-10-09, claude: submitted #111's `main.cpp`: [409244](https://judge.yosupo.jp/submission/409244),
+  AC 46 ms, 37.4 MiB (1/5 for this version).
 - Next: u64 formatting with SIMD (4.9 ms now); the basis change (~8.5 ms, ~20 XORs per element
   at the store limit would be ~2 ms per change).

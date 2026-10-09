@@ -3,7 +3,8 @@
 K <= 18 variables, n_l >= 2, N = prod n_l <= 2^18; print f g mod (x_1^n_1, ..., x_K^n_K) mod
 998244353. 10 s.
 
-Record when opened: 117 ms (issue #36). Best judged: none yet.
+Record when opened: 117 ms (issue #36). Best judged: ours, 20 ms:
+[409313](https://judge.yosupo.jp/submission/409313) (round 1 `main.cpp`).
 
 Official tests (shapes): twos (18 and 17 variables of size 2), threes (14 and 13 variables of
 sizes 2 and 3), max_random (7 variables of 2..10, N = 151200 and 181440), dim1 (N ~ 2^18), dim2,
@@ -72,7 +73,8 @@ folklore; no code read). Montgomery reduction with `vpmuludq`, `vpermd` lookups:
     position-major ([u][r]): spread 6.1 -> 2.9, pointwise 4.5 -> 3.7. Total compute 26 -> 15.
   - Graded: running weight products (two Montgomery products per position and step, four
     arrays) -> `vpermd` table lookup on chi mod m: 17.2 -> 16.8 ms.
-  - Not submitted yet at the time of writing.
+  - Merged in #142. Submitted: [409313](https://judge.yosupo.jp/submission/409313), AC, 20 ms,
+    21.3 MiB (record 117 ms).
 
 ## Next
 

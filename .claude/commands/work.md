@@ -4,11 +4,13 @@ argument-hint: "[agents at once, default 5]"
 ---
 Read `AGENTS.md`. Work through the open GitHub issues labeled `ready`, oldest first, with up to
 $ARGUMENTS subagents at once (5 if no number is given). Never two subagents on the same problem.
+Start an issue only after every issue it lists under `After:` is closed.
 
 For each round:
 1. Relabel the issue from `ready` to `running`.
 2. Start a subagent in its own git worktree. Brief it with `tools/prompt.md`, filling in `{problem}` (the issue
    title), `{issue}` (its number) and `{path}` (from the issue's `Folder:` line).
+   For an issue labeled `lib`, use `tools/prompt_lib.md` instead.
 3. When it returns, read the issue's newest `Result:` line. If the round left none, comment what happened,
    ending with `Result: no gain`.
 4. Relabel the issue: leave it `blocked` if the agent asked for the user; mark it `done` and close it after

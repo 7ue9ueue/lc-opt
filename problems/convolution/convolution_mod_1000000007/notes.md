@@ -3,7 +3,7 @@
 N, M <= 2^19 coefficients mod 10^9 + 7; print the N + M - 1 coefficients of the product. 10 s.
 Record when opened: 29 ms (another user). Best judged: ours, 31 ms:
 [409262](https://judge.yosupo.jp/submission/409262) (current `main.cpp`); its large cases take
-22-23 ms, the maximum is one outlier.
+22-23 ms, the maximum is a judge spike (clean score 23 ms, `tools/spikes.md`).
 
 ## Design
 
@@ -67,6 +67,11 @@ Record when opened: 29 ms (another user). Best judged: ours, 31 ms:
   AC 34, [409306](https://judge.yosupo.jp/submission/409306) AC 33. In all 5 runs the large cases take
   22-24 ms (expected 23.8, `judge.py bench`), and 1-4 of the ~30 large cases spike to 30-34 ms.
   With this many large cases a spike-free run is unlikely; best judged stays 31 ms.
+- 2026-10-09, claude (spike check). Every judged maximum so far is a judge launch spike, not our
+  code: +9 ms on 5.2% of all cases, any size (`tools/spikes.md`). `tools/spikes.py` on the 5
+  submissions: clean score 23, 23, 23, 24, 24 ms (409262, 409263, 409297, 409302, 409306).
+  23 cases sit within 9 ms of the slowest, so a run is clean with P = 0.948^23 = 0.29;
+  all 5 spiking has P = 0.71^5 = 0.18.
 - Next: everything left is in the transforms (14.2 of ~23 ms, lib/ntt's kernels) and fixed I/O.
   No problem-local idea left that is worth more than noise.
 

@@ -96,6 +96,8 @@ They need Linux and Docker: run them on a VM or in CI, not on the Mac.
 - `python3 tools/cases.py <problem>`: build the official tests only (cached in `~/.cache/lc-opt`).
 - `python3 tools/submit.py <problem> <file.cpp>`: submit to the judge as Aiyiyi and wait for the verdict.
   Mac only; enforces the 5-per-version cap. If it says "not logged in", stop and ask the user.
+- `python3 tools/spikes.py <submission>...`: flag the judge's +9 ms launch spikes (5% of cases, not ours;
+  see `tools/spikes.md`) and print the clean score. Mac or anywhere.
 - `tools/isa_probe.cpp`: submit as aplusb to re-check the judge's instruction set. AC means every check holds;
   otherwise the answer is off by a bitmask of the failed checks, listed on stderr.
 - Both VMs have the repo at `~/lc-opt`. Run `git fetch` there and check out your branch.

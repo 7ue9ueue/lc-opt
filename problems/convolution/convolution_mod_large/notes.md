@@ -16,14 +16,17 @@ input, `../fixed_width.hpp` output.
 ## Log
 - 2026-10-09, claude: refactored the QPoly program onto `lib/ntt`, `lib/io` input and
   `../fixed_width.hpp` output. 54/54 official tests (`tools/judge.py` now runs large problems in
-  tmpfs-sized batches); stress test 100 rounds. `lc-amd`, 9 rounds, slowest 3 cases: 429.4 ms vs
-  426.5 for the QPoly exploration-014 program, ratio 1.006.
-  Phases on fft_killer_04 (ms): parse 65.0 vs 65.6, transform 200.8 vs 202.5, output 151.1 vs
-  142.5, exit ~16 both.
+  tmpfs-sized batches); stress test 100 rounds. `lc-amd`, 11 rounds, slowest 3 cases: 424.6 ms vs
+  426.7 for the QPoly exploration-014 program, ratio 0.994.
+  Phases on fft_killer_04 (ms): parse 64.4 vs 64.9, transform 201.4 vs 202.6, output 144.3 vs
+  142.7, exit 15.
 - Output path, same case: formatter out of line (GCC did not inline it) 177.5 ms; inlined 166;
   constants through an opaque pointer (memory operands instead of rebuilt broadcasts) and fewer
-  operations 156.9; `io::BasicWriter` with 256 KiB instead of 64 KiB 151.1.
+  operations 156.9; 250 KB blocks passed to `io::Writer::write(std::string_view)`, which writes
+  them directly (one `write()` per block instead of per 64 KiB) 144.3 (QPoly: 142.6).
   In memory, 2^25 values: 48.7 → 34.7 ms (QPoly asm: 32.3).
+- Tried: a 256 KiB `io::Writer` as a template capacity, 147.6; it moved functions in aplusb's
+  binary and CI blocked it (see `lib/io/notes.md`). The block writes are faster anyway.
 - Tried and dropped: `std::_Exit(0)` after the flush (427.7 vs 427.8 ms); one table copy per use
   of each formatter constant (34.1 vs 34.7 ms in memory, ~15 more lines).
-  Not submitted: not faster than the judged 452 ms.
+  Not submitted yet: 0.6% is below the judge's spread (452-461 ms over our recent submissions).

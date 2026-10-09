@@ -274,8 +274,8 @@ std::string read_all(int fd) {
     return s;
 }
 
-template <class T, class Writer>
-void write_all_values(Writer& out, std::string& expected) {
+template <class T>
+void write_all_values(io::Writer& out, std::string& expected) {
     const std::vector<T> v = values_of<T>();
     for (std::size_t i = 0; i < v.size(); ++i) {
         if (i % 2) {
@@ -288,13 +288,11 @@ void write_all_values(Writer& out, std::string& expected) {
     }
 }
 
-// Writer is BasicWriter<64 KiB>; other capacities take the same paths at other points.
-template <class Writer>
 void test_writer() {
     const int fd = file_with("");
     std::string expected;
     {
-        Writer out(fd);
+        io::Writer out(fd);
         write_all_values<std::uint32_t>(out, expected);
         write_all_values<std::int32_t>(out, expected);
         write_all_values<std::uint64_t>(out, expected);
@@ -412,9 +410,7 @@ int main() {
     test_bulk();
     test_bulk_split();
     test_max_digits();
-    test_writer<io::Writer>();
-    test_writer<io::BasicWriter<1024>>();
-    test_writer<io::BasicWriter<std::size_t(1) << 18>>();
+    test_writer();
     test_vector_arithmetic();
     test_write_array();
     std::printf("%s\n", failures ? "FAIL" : "PASS");

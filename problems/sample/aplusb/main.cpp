@@ -4,8 +4,7 @@
 // Linux, x86-64 with AVX2. Design and measurements: lib/io/notes.md.
 //
 //   io::Reader in;                            // takes all of stdin
-//   io::Writer out;                           // flushes in its destructor; BasicWriter<bytes>
-//                                             // sets the buffer (Writer: 64 KiB)
+//   io::Writer out;                           // flushes in its destructor
 //   const auto n = in.read<std::uint32_t>();
 //   std::vector<std::uint32_t> a(n);
 //   in.read(a.data(), n);                     // bulk; AVX2 for uint32_t
@@ -635,16 +634,14 @@ private:
 // Buffered output. write() takes any mix of integers, chars and strings:
 //   out.write(x, ' ', y, '\n');
 // MaxDigits, if set, promises integers of at most that many digits; for 64-bit types, 16 or fewer
-// selects a faster formatter: out.write<16>(sum, '\n'). Capacity: bytes per write(2). Writer
-// (64 KiB) suits most outputs; 256 KiB writes a 331 MB output 3% faster (notes.md).
-template <std::size_t Capacity>
-class BasicWriter {
+// selects a faster formatter: out.write<16>(sum, '\n').
+class Writer {
 public:
-    explicit BasicWriter(int fd = 1) : fd_(fd) {}
-    ~BasicWriter() { flush(); }
+    explicit Writer(int fd = 1) : fd_(fd) {}
+    ~Writer() { flush(); }
 
-    BasicWriter(const BasicWriter&) = delete;
-    BasicWriter& operator=(const BasicWriter&) = delete;
+    Writer(const Writer&) = delete;
+    Writer& operator=(const Writer&) = delete;
 
     template <int MaxDigits = 0, class... Ts>
     void write(const Ts&... values) {
@@ -659,8 +656,8 @@ public:
         cur_ = p;
     }
 
-    // Custom formatting: fill(p) may store up to max_size <= Capacity bytes at p and returns the
-    // end of what it wrote.
+    // Custom formatting: fill(p) may store up to max_size <= 64 KiB bytes at p and returns the end
+    // of what it wrote.
     template <class Fill>
     void write_with(std::size_t max_size, Fill fill) {
         if (std::size_t(buffer_ + kCapacity - cur_) < max_size) [[unlikely]] flush();
@@ -695,7 +692,7 @@ public:
     }
 
 private:
-    static constexpr std::size_t kCapacity = Capacity;
+    static constexpr std::size_t kCapacity = std::size_t(1) << 16;
 
     template <class T>
     static constexpr bool kInteger = std::integral<T> && !std::same_as<T, char> && !std::same_as<T, bool>;
@@ -756,8 +753,6 @@ private:
     char* cur_ = buffer_;
     alignas(64) char buffer_[kCapacity];
 };
-
-using Writer = BasicWriter<std::size_t(1) << 16>;
 
 }  // namespace io
 

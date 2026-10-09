@@ -6,8 +6,7 @@
 // Linux, x86-64 with AVX2. Design and measurements: lib/io/notes.md.
 //
 //   io::Reader in;                            // takes all of stdin
-//   io::Writer out;                           // flushes in its destructor; BasicWriter<bytes>
-//                                             // sets the buffer (Writer: 64 KiB)
+//   io::Writer out;                           // flushes in its destructor
 //   const auto n = in.read<std::uint32_t>();
 //   std::vector<std::uint32_t> a(n);
 //   in.read(a.data(), n);                     // bulk; AVX2 for uint32_t
@@ -637,16 +636,14 @@ private:
 // Buffered output. write() takes any mix of integers, chars and strings:
 //   out.write(x, ' ', y, '\n');
 // MaxDigits, if set, promises integers of at most that many digits; for 64-bit types, 16 or fewer
-// selects a faster formatter: out.write<16>(sum, '\n'). Capacity: bytes per write(2). Writer
-// (64 KiB) suits most outputs; 256 KiB writes a 331 MB output 3% faster (notes.md).
-template <std::size_t Capacity>
-class BasicWriter {
+// selects a faster formatter: out.write<16>(sum, '\n').
+class Writer {
 public:
-    explicit BasicWriter(int fd = 1) : fd_(fd) {}
-    ~BasicWriter() { flush(); }
+    explicit Writer(int fd = 1) : fd_(fd) {}
+    ~Writer() { flush(); }
 
-    BasicWriter(const BasicWriter&) = delete;
-    BasicWriter& operator=(const BasicWriter&) = delete;
+    Writer(const Writer&) = delete;
+    Writer& operator=(const Writer&) = delete;
 
     template <int MaxDigits = 0, class... Ts>
     void write(const Ts&... values) {
@@ -661,8 +658,8 @@ public:
         cur_ = p;
     }
 
-    // Custom formatting: fill(p) may store up to max_size <= Capacity bytes at p and returns the
-    // end of what it wrote.
+    // Custom formatting: fill(p) may store up to max_size <= 64 KiB bytes at p and returns the end
+    // of what it wrote.
     template <class Fill>
     void write_with(std::size_t max_size, Fill fill) {
         if (std::size_t(buffer_ + kCapacity - cur_) < max_size) [[unlikely]] flush();
@@ -697,7 +694,7 @@ public:
     }
 
 private:
-    static constexpr std::size_t kCapacity = Capacity;
+    static constexpr std::size_t kCapacity = std::size_t(1) << 16;
 
     template <class T>
     static constexpr bool kInteger = std::integral<T> && !std::same_as<T, char> && !std::same_as<T, bool>;
@@ -758,8 +755,6 @@ private:
     char* cur_ = buffer_;
     alignas(64) char buffer_[kCapacity];
 };
-
-using Writer = BasicWriter<std::size_t(1) << 16>;
 
 }  // namespace io
 // lib/ntt/ntt.hpp
@@ -3040,26 +3035,27 @@ template <int Shift>
 
 }  // namespace detail
 
-// values[0, count), count >= 1, as fixed-width fields. out: an io::BasicWriter of at least 64 KiB.
-template <class Writer>
-void write(Writer& out, const std::uint32_t* values, std::size_t count) {
-    constexpr std::size_t kChunk = 4096;  // values per buffer reservation
-    for (std::size_t i = 0; i < count; i += kChunk) {
-        const std::size_t n = std::min(kChunk, count - i);
-        out.write_with(10 * n + 96, [&](char* p) {
-            const detail::Constants& k = detail::constants();
-            std::size_t j = 0;
-            for (; j + 8 <= n; j += 8, p += 80)
-                detail::format8(p, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(values + i + j)), k);
-            if (j < n) {
-                alignas(32) std::uint32_t tail[8] = {};
-                std::memcpy(tail, values + i + j, (n - j) * sizeof(std::uint32_t));
-                detail::format8(p, _mm256_load_si256(reinterpret_cast<const __m256i*>(tail)), k);
-                p += 10 * (n - j);
-            }
-            if (i + n == count) p[-1] = '\n';
-            return p;
-        });
+// values[0, count), count >= 1, as fixed-width fields. They are formatted in blocks of 250 KB,
+// longer than the Writer's buffer, so the Writer hands each block to write(2) directly: on a
+// 331 MB output 3% faster than 64 KiB writes.
+inline void write(io::Writer& out, const std::uint32_t* values, std::size_t count) {
+    constexpr std::size_t kBlock = 25600;  // values
+    alignas(64) static char text[10 * kBlock + 96];
+    const detail::Constants& k = detail::constants();
+    for (std::size_t i = 0; i < count; i += kBlock) {
+        const std::size_t n = std::min(kBlock, count - i);
+        char* p = text;
+        std::size_t j = 0;
+        for (; j + 8 <= n; j += 8, p += 80)
+            detail::format8(p, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(values + i + j)), k);
+        if (j < n) {
+            alignas(32) std::uint32_t tail[8] = {};
+            std::memcpy(tail, values + i + j, (n - j) * sizeof(std::uint32_t));
+            detail::format8(p, _mm256_load_si256(reinterpret_cast<const __m256i*>(tail)), k);
+            p += 10 * (n - j);
+        }
+        if (i + n == count) p[-1] = '\n';
+        out.write(std::string_view(text, std::size_t(p - text)));
     }
 }
 
@@ -3072,6 +3068,6 @@ int main() {
     in.read(conv.a(), n);
     in.read(conv.b(), m);
     const std::uint32_t* c = conv.multiply();
-    io::BasicWriter<std::size_t(1) << 18> out;  // 256 KiB per write(2): faster for large outputs
+    io::Writer out;
     fixed_width::write(out, c, n + m - 1);
 }

@@ -11,6 +11,6 @@ int main() {
     in.read(conv.a(), n);
     in.read(conv.b(), m);
     const std::uint32_t* c = conv.multiply();
-    io::BasicWriter<std::size_t(1) << 18> out;  // 256 KiB per write(2): faster for large outputs
+    io::Writer out;
     fixed_width::write(out, c, n + m - 1);
 }

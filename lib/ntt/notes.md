@@ -56,13 +56,13 @@ records:
 
 | Problem | QPoly program | ms | This | ms | Ratio |
 |---|---|---|---|---|---|
-| convolution_mod (21 rounds) | exploration 011 (408716, judged 14 ms) | 14.54 | lib/ntt + lib/io | 14.41 | 0.992 |
-| convolution_mod_large (9 rounds) | exploration 014 (408888, judged 452 ms) | 426.5 | lib/ntt + lib/io | 429.4 | 1.006 |
+| convolution_mod (31 rounds) | exploration 011 (408716, judged 14 ms) | 14.73 | lib/ntt + lib/io | 14.44 | 0.979 |
+| convolution_mod_large (11 rounds) | exploration 014 (408888, judged 452 ms) | 426.7 | lib/ntt + lib/io | 424.6 | 0.994 |
 
-Phases on fft_killer_04 of convolution_mod_large (ms, from `main`, median of 3): parse 65.6 → 65.0,
-transform 202.5 → 200.8, output 142.5 → 151.1, exit 16 (both). The transform matches; the output
-gap is the formatter (`problems/convolution/fixed_width.hpp`, 34.7 vs 32.3 ms in memory for 2^25
-values: GCC's code against QPoly's hand-written asm).
+Phases on fft_killer_04 of convolution_mod_large (ms, from `main`, 3 of 4 runs): parse 64.9 → 64.4,
+transform 202.6 → 201.4, output 142.7 → 144.3, exit 15 (QPoly's not measured separately). The
+transform matches QPoly's; the output's formatter is GCC's code (34.7 ms in memory for 2^25
+values, QPoly's hand-written asm 32.3).
 
 ## Log
 

@@ -9,7 +9,7 @@ Record when opened: 25 ms.
 ## Design
 
 - c = H (H a . H b) / 2^N, H the Walsh-Hadamard transform: 3 transforms of 20 levels.
-- Signed 64-bit lanes, no reduction inside a transform: |x| <= 2^20 * 1.6 P < 2^51.
+- Signed 64-bit lanes, no reduction inside a transform: |x| <= 2^20 P < 2^50.
   Zen 3 runs `vpaddq`/`vpsubq` 4 per cycle; lazily reduced 32-bit lanes need ~3.5 ops per vector
   per level (0.44 per value) against 1 op per 4 values here.
 - Rows of 2^12 values (32 KiB of int64), 2^(N-12) rows, rows padded by 64 bytes so a column's rows
@@ -20,13 +20,21 @@ Record when opened: 25 ms.
   17 stores, one spill, scheduled so that 16 registers are live only at the end.
 - x mod P for |x| < 2^51: the bits of x + 0x4338... are the double 1.5 2^52 + x; one FMA with
   1/P and the offset M - M/P rounds the quotient into the low mantissa (error < 0.9, so |r| < 0.9 P).
-  Products: two Montgomery reductions, the second by 2^(64-N) mod P.
+- a / 2^N mod P (round 2): Montgomery with R = 2^N. k = -a / P mod 2^N (one `vpmuludq`, an
+  and), (a + k P) / 2^N lies in (-P, 2P); its bits N to N + 31 are the signed dword.
+- Products in doubles (round 2): h = x y, l = fma(x, y, -h) exact, q = round(h / P) by the magic
+  constant (|h / P| < 2^51), r = h - q P exact by FMA; r + l, |r + l| < 0.9 P. No reduction of
+  y (|y| < 2^20 P) first; 4 FMA-pipe and 4 add-pipe ops per vector, against 7 multiplies before.
 - Order: a's rows while it is parsed (chunks of 2^16 tokens: smaller bulk reads leave ~1000
-  tokens per call to the scalar path), a's columns, a mod P kept as dwords (4 MiB); b reuses the
+  tokens per call to the scalar path), a's columns, a / 2^N kept as dwords (4 MiB); b reuses the
   int64 array: rows, columns with the products, inverse columns; inverse rows, printed per chunk.
+- Each chunk is parsed into the last 256 KiB of its own 16 rows and widened in place (round 2):
+  a row's int64 vectors end before input values not yet read. No separate input buffer.
 - Output: `../fixed_width.hpp` per chunk of 2^16 values, so a newline ends every chunk
   (judge-specific; the checker compares tokens).
-- Memory: 8.4 MiB int64 + 4.2 MiB dwords + 256 KiB, one mapping in 2 MiB pages.
+- Memory: 8 MiB + 16 KiB int64 + 4 MiB dwords: 6 huge pages and 4 small ones below them. a's
+  dwords are stored strip after strip (8 KiB each, no padding); output chunks reuse a's space.
+- Runs from `.preinit_array` and ends with `_exit` (as `convolution_mod`).
 
 ## Measurements
 
@@ -85,12 +93,36 @@ per MiB of huge pages.
   [409198](https://judge.yosupo.jp/submission/409198), AC, 15 ms, 23.4 MiB (1/5). Previous
   record 25 ms.
 
+2026-10-09, claude, round 2 (`lc-amd`, judge image and flags). "Probe": whole-process wall time
+and in-process `CLOCK_MONOTONIC` phase stamps, max_random_00, programs interleaved, medians of
+21-31 runs. Phases of round 1 (ms): start 1.09, parse 3.77, rows 1.26 (incl. 0.4 of x's page
+faults), columns a 0.59, columns b 1.05, inverse rows 0.75, print 4.63, exit 0.94; total 14.13.
+- `.preinit_array` start: start 1.23 -> 1.12, total ratio 0.990. Kept.
+- Products in doubles with a scaled by 2^-N in doubles too: columns b 1.04 -> 0.92, columns a
+  0.60 -> 0.70; total ratio 1.001. Scale by Montgomery with R = 2^N instead (5 integer ops, as
+  cheap as the old reduction): columns a 0.59, columns b 0.92; ratio 0.990. Kept.
+- In-place parse, a stored strip after strip, 6 huge pages instead of 7: rows a 2.74 -> 2.56,
+  columns b 0.92 -> 0.85 (a read sequentially); ratio 0.976. Kept.
+- Reduction keeps only the low dword (no `vpsubq` of the magic bits), `vinserti128` for two of
+  the four 128-bit permutes in the transpose: inverse rows 0.76 -> 0.73; total ratio 1.0005. Kept.
+- No gain: row pieces of 64 vectors (lanes and 4 vector bits per 2 KiB piece, then the rest of
+  the row; 14.18 vs 14.13); chunks of 2^17, 2^18, 2^20 tokens (ratios 0.997, 1.010, 0.999);
+  prefetching the next row in the inverse rows, T0 or T1 (inverse 0.73 -> 0.78).
+- Probe totals: round 1 14.13 -> 13.45 ms. `judge.py bench`, 21 rounds, worst of the 3 max
+  cases: round 1 15.68, round 2 15.06, ratio 0.960.
+- Checks: 13/13 official tests (`lc-intel`); `stress.py` 200 rounds plus the three N = 20
+  known-answer cases (judge image on `lc-amd`); ASan/UBSan on all 13 official tests and a pipe.
+- Compute left (probe): rows ~0.48 per array, columns a 0.57 (0.18 of it page faults), columns
+  b 0.85, inverse rows 0.73. Transforms run ~1.4 instructions per vector-level against a floor of
+  ~1.25 for radix-16 in 16 registers; the rest is the I/O floor and process start/exit.
+
 ## Next
 
 - Compute left over the floor: ~4 ms of ~15.3. Largest: column pass 1.6 ms (products 0.56),
   inverse rows ~0.8, row transposes (~2.6 core cycles per vector forward, ~6 with the reduction
   in the inverse; `vperm2i128`/`vpermq` are slow on Zen 3).
-- Products: 7 multiplies per vector. Folding 2^(32-N) into a's dwords moves work, not removes it.
+- The inverse rows' last pass (transpose, reduction, pack) costs ~0.25 ms more than the forward
+  first pass; not explained by its op count (guess: latency of the reduction chain).
 - The floor itself (parse 3.7 ms, `write(2)` ~4.5 ms) belongs to `lib/io`.
 
 ## Sources
@@ -99,4 +131,7 @@ per MiB of huge pages.
 - Montgomery reduction: P. L. Montgomery, Modular multiplication without trial division, Math.
   Comp. 44 (1985).
 - int64/double conversion with the 1.5 * 2^52 constant: https://stackoverflow.com/questions/41144668
+- Exact product as h + l with FMA (error-free transformation): standard; e.g. Ogita, Rump, Oishi,
+  Accurate sum and dot product, SIAM J. Sci. Comput. 26 (2005).
+- `.preinit_array` start: taken from `../convolution_mod/solution.cpp`.
 - Zen 3 costs: measured here; see AGENTS.md for uops.info.

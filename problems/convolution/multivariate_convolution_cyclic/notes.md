@@ -80,6 +80,9 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
     case now dim2_01 (11.3); dim1 10.9.
   - Checks: 24/24 official tests; `stress.py` 400 rounds plus 40 large (lc-intel, gcc 15.2,
     x86-64-v3); ASan/UBSan: stress 60 rounds and 9 official cases, file and pipe input.
+  - Submitted the merged `main.cpp` (#150): [409317](https://judge.yosupo.jp/submission/409317)
+    AC 17 ms; [409318](https://judge.yosupo.jp/submission/409318) AC 19 ms. Both above round 1's
+    15 ms despite `lc-amd` 11.4 vs 11.8: judge jitter (see `tools/spikes.md`). Best stays 409314.
 - Next: dim2_01 still pays ~0.5 ms for gather and scatter over dim1. The transforms (about
   6.5 ms) are the floor of this method; a gain there needs faster lib/ntt kernels.
 

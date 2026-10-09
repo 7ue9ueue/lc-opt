@@ -1059,13 +1059,25 @@ using Vec = __m256i;
 
 inline Vec load(const u64* p) { return _mm256_load_si256(reinterpret_cast<const Vec*>(p)); }
 inline void store(u64* p, Vec v) { _mm256_store_si256(reinterpret_cast<Vec*>(p), v); }
+inline Vec broadcast(u64 x) { return _mm256_set1_epi64x(std::int64_t(x)); }
 
+// (high, low) mod P, as reduce_scalar: low ^ (high * (x^4 + x^3 + x + 1) mod x^64) ^ g(high >> 60),
+// where g(n) < 256 folds the bits above x^63; looked up by vpshufb.
 inline Vec reduce(Vec low, Vec high) {
-    const Vec q = _mm256_xor_si256(_mm256_xor_si256(high, _mm256_srli_epi64(high, 60)),
-                                   _mm256_xor_si256(_mm256_srli_epi64(high, 61), _mm256_srli_epi64(high, 63)));
-    return _mm256_xor_si256(_mm256_xor_si256(low, q),
-                            _mm256_xor_si256(_mm256_xor_si256(_mm256_slli_epi64(q, 1), _mm256_slli_epi64(q, 3)),
-                                             _mm256_slli_epi64(q, 4)));
+    constexpr auto kFold = [] {
+        std::array<std::int8_t, 16> t{};
+        for (u64 n = 0; n < 16; ++n) t[n] = std::int8_t(reduce_scalar(0, n << 60));
+        return t;
+    }();
+    const Vec fold = _mm256_setr_epi8(kFold[0], kFold[1], kFold[2], kFold[3], kFold[4], kFold[5], kFold[6], kFold[7],
+                                      kFold[8], kFold[9], kFold[10], kFold[11], kFold[12], kFold[13], kFold[14],
+                                      kFold[15], kFold[0], kFold[1], kFold[2], kFold[3], kFold[4], kFold[5], kFold[6],
+                                      kFold[7], kFold[8], kFold[9], kFold[10], kFold[11], kFold[12], kFold[13],
+                                      kFold[14], kFold[15]);
+    const Vec s = _mm256_xor_si256(high, _mm256_slli_epi64(high, 1));
+    const Vec times_r = _mm256_xor_si256(s, _mm256_slli_epi64(s, 3));  // high * (x^4 + x^3 + x + 1) mod x^64
+    const Vec top = _mm256_shuffle_epi8(fold, _mm256_srli_epi64(high, 60));
+    return _mm256_xor_si256(_mm256_xor_si256(low, times_r), top);
 }
 
 // Lane-wise products a * b in F.
@@ -1093,74 +1105,103 @@ inline Vec multiply(Vec a, Vec b) {
 #endif
 }
 
-// Change of basis between monomials and X, on rows of W words that are xored as units.
+// Change of basis between monomials and X. A sequence's element e spans the W words at f + e * S
+// (W <= S); elements are xored as units. Forward passes take size: elements [size, length) are zero.
 
-// dst[0, count) ^= src[0, count), in rows of W words.
-template <std::size_t W>
+template <std::size_t W, std::size_t S>
 inline void xor_rows(u64* dst, const u64* src, std::size_t count) {
-    for (std::size_t k = 0; k < count * W; ++k) dst[k] ^= src[k];
+    if constexpr (W == S) {
+        for (std::size_t k = 0; k < count * W; ++k) dst[k] ^= src[k];
+    } else {
+        for (std::size_t e = 0; e < count; ++e) {
+            for (std::size_t k = 0; k < W; ++k) dst[e * S + k] ^= src[e * S + k];
+        }
+    }
 }
 
 // f[0, Len) = sum_m g_m(x) t^m with t = x^Tau + x, deg g_m < Tau: g_m in f[m * Tau, (m + 1) * Tau).
 // With A, B the halves and d = Len / 2 / Tau: x^(Len/2) = t^d + x^d, so
 // f = (A + x^d B_low + x^d B_high) + t^d (B + B_high), B_high the top d entries of B.
-template <std::size_t Len, std::size_t Tau, std::size_t W, bool Inverse>
-void taylor(u64* f) {
+template <std::size_t Len, std::size_t Tau, std::size_t W, std::size_t S, bool Inverse>
+void taylor(u64* f, std::size_t size) {
     if constexpr (Len > Tau) {
         constexpr std::size_t half = Len / 2, d = half / Tau;
         u64* a = f;
-        u64* b = f + half * W;
+        u64* b = f + half * S;
         if constexpr (Inverse) {
-            taylor<half, Tau, W, true>(a);
-            taylor<half, Tau, W, true>(b);
-            xor_rows<W>(b, b + (half - d) * W, d);
-            xor_rows<W>(a + d * W, b, half - d);
-            xor_rows<W>(a + d * W, b + (half - d) * W, d);
+            taylor<half, Tau, W, S, true>(a, half);
+            taylor<half, Tau, W, S, true>(b, half);
+            xor_rows<W, S>(b, b + (half - d) * S, d);
+            xor_rows<W, S>(a + d * S, b, half - d);
+            xor_rows<W, S>(a + d * S, b + (half - d) * S, d);
         } else {
-            xor_rows<W>(a + d * W, b, half - d);
-            xor_rows<W>(a + d * W, b + (half - d) * W, d);
-            xor_rows<W>(b, b + (half - d) * W, d);
-            taylor<half, Tau, W, false>(a);
-            taylor<half, Tau, W, false>(b);
+            if (size <= half) return taylor<half, Tau, W, S, false>(a, size);
+            xor_rows<W, S>(a + d * S, b, half - d);
+            xor_rows<W, S>(a + d * S, b + (half - d) * S, d);
+            xor_rows<W, S>(b, b + (half - d) * S, d);
+            taylor<half, Tau, W, S, false>(a, half);
+            taylor<half, Tau, W, S, false>(b, size - half);
         }
+    }
+}
+
+constexpr std::size_t kColumnWords = 8192;  // column passes run on blocks of at most 64 KiB
+
+template <int L, std::size_t W, std::size_t S, bool Inverse>
+void change_basis(u64* f, std::size_t size);
+
+// The column step of change_basis<L>: rows [0, used) of 2^(L-K) rows, each Tau elements.
+// Contiguous rows are cut into column blocks that fit L1/L2; all column stages run per block.
+template <int L, int K, std::size_t W, std::size_t S, bool Inverse>
+void change_columns(u64* f, std::size_t used) {
+    constexpr std::size_t tau = std::size_t(1) << K;
+    if constexpr (W == S) {
+        constexpr std::size_t width = tau * W, rows = std::size_t(1) << (L - K);
+        constexpr std::size_t chunk = std::min(width, std::max<std::size_t>(kColumnWords / rows, 4));
+        for (std::size_t p = 0; p < width; p += chunk) change_basis<L - K, chunk, width, Inverse>(f + p, used);
+    } else {
+        for (std::size_t p = 0; p < tau; ++p) change_basis<L - K, W, tau * S, Inverse>(f + p * S, used);
     }
 }
 
 // Monomial coefficients of f[0, 2^L) to X coefficients (or back). With K = 2^k the largest power
 // of two below L: expand in t = s_K = x^(2^K) + x, convert each row g_m (length 2^K), then each
 // column (a polynomial in t, whose basis s_i(t) = s_{K + i}(x) for i < L - K <= K).
-template <int L, std::size_t W, bool Inverse>
-void change_basis(u64* f) {
+template <int L, std::size_t W, std::size_t S, bool Inverse>
+void change_basis(u64* f, std::size_t size) {
     if constexpr (L >= 2) {
         constexpr int K = 1 << (std::bit_width(unsigned(L - 1)) - 1);
         constexpr std::size_t tau = std::size_t(1) << K, rows = std::size_t(1) << (L - K);
         if constexpr (Inverse) {
-            change_basis<L - K, W * tau, true>(f);
-            for (std::size_t m = 0; m < rows; ++m) change_basis<K, W, true>(f + m * tau * W);
-            taylor<(std::size_t(1) << L), tau, W, true>(f);
+            change_columns<L, K, W, S, true>(f, rows);
+            for (std::size_t m = 0; m < rows; ++m) change_basis<K, W, S, true>(f + m * tau * S, tau);
+            taylor<(std::size_t(1) << L), tau, W, S, true>(f, std::size_t(1) << L);
         } else {
-            taylor<(std::size_t(1) << L), tau, W, false>(f);
-            for (std::size_t m = 0; m < rows; ++m) change_basis<K, W, false>(f + m * tau * W);
-            change_basis<L - K, W * tau, false>(f);
+            taylor<(std::size_t(1) << L), tau, W, S, false>(f, size);
+            const std::size_t used = (size + tau - 1) / tau;  // deg f < size: g_m = 0 for m >= used
+            for (std::size_t m = 0; m < used; ++m) change_basis<K, W, S, false>(f + m * tau * S, tau);
+            change_columns<L, K, W, S, false>(f, used);
         }
     }
 }
 
+// f[0, 2^l), of which [size, 2^l) is zero for the forward change.
 template <bool Inverse, int L = kMaxLog>
-void change_basis(u64* f, int l) {
+void change_basis(u64* f, int l, std::size_t size) {
     if constexpr (L >= kMinLog) {
-        if (l == L) return change_basis<L, 1, Inverse>(f);
-        change_basis<Inverse, L - 1>(f, l);
+        if (l == L) return change_basis<L, 1, 1, Inverse>(f, size);
+        change_basis<Inverse, L - 1>(f, l, size);
     }
 }
 
 // The transform. Stage i maps the halves (u, v) of each block of 2^(i+1) at c to
 // (u + w v, u + w v + v), w = omega_{c >> i}; the inverse undoes the stages in reverse order.
+// Blocks of 2^kBlockLog words (32 KiB) run stage by stage; above, two stages share a pass.
 
-constexpr std::size_t kBlockLog = 12;  // blocks of 2^12 words (32 KiB) run stage by stage
+constexpr int kBlockLog = 12;
 
 inline void stage_forward(u64* u, std::size_t half, u64 w) {
-    const Vec tw = _mm256_set1_epi64x(std::int64_t(w));
+    const Vec tw = broadcast(w);
     u64* v = u + half;
     for (std::size_t j = 0; j < half; j += 4) {
         const Vec x = _mm256_xor_si256(load(u + j), multiply(load(v + j), tw));
@@ -1170,12 +1211,58 @@ inline void stage_forward(u64* u, std::size_t half, u64 w) {
 }
 
 inline void stage_inverse(u64* u, std::size_t half, u64 w) {
-    const Vec tw = _mm256_set1_epi64x(std::int64_t(w));
+    const Vec tw = broadcast(w);
     u64* v = u + half;
     for (std::size_t j = 0; j < half; j += 4) {
         const Vec y = _mm256_xor_si256(load(u + j), load(v + j));
         store(v + j, y);
         store(u + j, _mm256_xor_si256(load(u + j), multiply(y, tw)));
+    }
+}
+
+// Stages i and i - 1 of the block p = d + c of 2^(i+1) words, in quarters x0..x3.
+struct PairTwiddles {
+    Vec outer, low, high;  // stage i; stage i - 1 on (x0, x1) and on (x2, x3)
+};
+
+inline PairTwiddles pair_twiddles(std::size_t c, int i) {
+    const std::size_t q = std::size_t(1) << (i - 1);
+    return {broadcast(omega(c >> i)), broadcast(omega(c >> (i - 1))), broadcast(omega((c + 2 * q) >> (i - 1)))};
+}
+
+void stages_forward(u64* p, std::size_t c, int i) {
+    const std::size_t q = std::size_t(1) << (i - 1);
+    const PairTwiddles t = pair_twiddles(c, i);
+    for (std::size_t j = 0; j < q; j += 4) {
+        Vec x0 = load(p + j), x1 = load(p + q + j), x2 = load(p + 2 * q + j), x3 = load(p + 3 * q + j);
+        x0 = _mm256_xor_si256(x0, multiply(x2, t.outer));
+        x1 = _mm256_xor_si256(x1, multiply(x3, t.outer));
+        x2 = _mm256_xor_si256(x2, x0);
+        x3 = _mm256_xor_si256(x3, x1);
+        x0 = _mm256_xor_si256(x0, multiply(x1, t.low));
+        x2 = _mm256_xor_si256(x2, multiply(x3, t.high));
+        store(p + j, x0);
+        store(p + q + j, _mm256_xor_si256(x1, x0));
+        store(p + 2 * q + j, x2);
+        store(p + 3 * q + j, _mm256_xor_si256(x3, x2));
+    }
+}
+
+void stages_inverse(u64* p, std::size_t c, int i) {
+    const std::size_t q = std::size_t(1) << (i - 1);
+    const PairTwiddles t = pair_twiddles(c, i);
+    for (std::size_t j = 0; j < q; j += 4) {
+        Vec x0 = load(p + j), x1 = load(p + q + j), x2 = load(p + 2 * q + j), x3 = load(p + 3 * q + j);
+        x1 = _mm256_xor_si256(x1, x0);
+        x3 = _mm256_xor_si256(x3, x2);
+        x0 = _mm256_xor_si256(x0, multiply(x1, t.low));
+        x2 = _mm256_xor_si256(x2, multiply(x3, t.high));
+        x2 = _mm256_xor_si256(x2, x0);
+        x3 = _mm256_xor_si256(x3, x1);
+        store(p + j, _mm256_xor_si256(x0, multiply(x2, t.outer)));
+        store(p + q + j, _mm256_xor_si256(x1, multiply(x3, t.outer)));
+        store(p + 2 * q + j, x2);
+        store(p + 3 * q + j, x3);
     }
 }
 
@@ -1187,13 +1274,11 @@ struct Twiddles8 {
 };
 
 inline Twiddles8 twiddles8(std::size_t c) {
-    const Vec b1 = _mm256_set1_epi64x(std::int64_t(kBeta[1])), b2 = _mm256_set1_epi64x(std::int64_t(kBeta[2]));
-    const Vec w1 = _mm256_xor_si256(_mm256_set1_epi64x(std::int64_t(omega(c >> 1))),
-                                    _mm256_blend_epi32(_mm256_setzero_si256(), b1, 0xF0));
-    const Vec w0 = _mm256_xor_si256(_mm256_set1_epi64x(std::int64_t(omega(c))),
-                                    _mm256_xor_si256(_mm256_blend_epi32(_mm256_setzero_si256(), b1, 0xCC),
-                                                     _mm256_blend_epi32(_mm256_setzero_si256(), b2, 0xF0)));
-    return {_mm256_set1_epi64x(std::int64_t(omega(c >> 2))), w1, w0};
+    const Vec b1 = broadcast(kBeta[1]), b2 = broadcast(kBeta[2]), zero = _mm256_setzero_si256();
+    const Vec w1 = _mm256_xor_si256(broadcast(omega(c >> 1)), _mm256_blend_epi32(zero, b1, 0xF0));
+    const Vec w0 = _mm256_xor_si256(broadcast(omega(c)), _mm256_xor_si256(_mm256_blend_epi32(zero, b1, 0xCC),
+                                                                           _mm256_blend_epi32(zero, b2, 0xF0)));
+    return {broadcast(omega(c >> 2)), w1, w0};
 }
 
 inline void kernel8_forward(u64* p, std::size_t c) {
@@ -1229,35 +1314,59 @@ inline void kernel8_inverse(u64* p, std::size_t c) {
     store(p + 4, y);
 }
 
-// Block d[c, c + 2^(i+1)), stages i down to 0.
-void forward(u64* d, std::size_t c, int i) {
-    if (i < int(kBlockLog)) {
-        for (int s = i; s >= kMinLog; --s) {
-            const std::size_t half = std::size_t(1) << s;
-            for (std::size_t b = c; b < c + (half << (i + 1 - s)); b += 2 * half) stage_forward(d + b, half, omega(b >> s));
-        }
-        for (std::size_t b = c; b < c + (std::size_t(2) << i); b += 8) kernel8_forward(d + b, b);
-        return;
+// Block d[c, c + 2^(i+1)), i < kBlockLog: stages i down to 0 (or back), one at a time.
+void forward_block(u64* d, std::size_t c, int i) {
+    const std::size_t end = c + (std::size_t(2) << i);
+    for (int s = i; s >= kMinLog; --s) {
+        const std::size_t half = std::size_t(1) << s;
+        for (std::size_t b = c; b < end; b += 2 * half) stage_forward(d + b, half, omega(b >> s));
     }
-    const std::size_t half = std::size_t(1) << i;
-    stage_forward(d + c, half, omega(c >> i));
-    forward(d, c, i - 1);
-    forward(d, c + half, i - 1);
+    for (std::size_t b = c; b < end; b += 8) kernel8_forward(d + b, b);
 }
 
-void inverse(u64* d, std::size_t c, int i) {
-    if (i < int(kBlockLog)) {
-        for (std::size_t b = c; b < c + (std::size_t(2) << i); b += 8) kernel8_inverse(d + b, b);
-        for (int s = kMinLog; s <= i; ++s) {
-            const std::size_t half = std::size_t(1) << s;
-            for (std::size_t b = c; b < c + (half << (i + 1 - s)); b += 2 * half) stage_inverse(d + b, half, omega(b >> s));
-        }
-        return;
+void inverse_block(u64* d, std::size_t c, int i) {
+    const std::size_t end = c + (std::size_t(2) << i);
+    for (std::size_t b = c; b < end; b += 8) kernel8_inverse(d + b, b);
+    for (int s = kMinLog; s <= i; ++s) {
+        const std::size_t half = std::size_t(1) << s;
+        for (std::size_t b = c; b < end; b += 2 * half) stage_inverse(d + b, half, omega(b >> s));
     }
+}
+
+// Block d[c, c + 2^(i+1)), stages i down to 0.
+void forward(u64* d, std::size_t c, int i) {
     const std::size_t half = std::size_t(1) << i;
-    inverse(d, c, i - 1);
-    inverse(d, c + half, i - 1);
-    stage_inverse(d + c, half, omega(c >> i));
+    if (i < kBlockLog) {
+        forward_block(d, c, i);
+    } else if (i == kBlockLog) {
+        stage_forward(d + c, half, omega(c >> i));
+        forward(d, c, i - 1);
+        forward(d, c + half, i - 1);
+    } else {
+        stages_forward(d + c, c, i);
+        for (std::size_t k = 0; k < 4; ++k) forward(d, c + k * half / 2, i - 2);
+    }
+}
+
+// a[c, c + 2^(i+1)) holds the transform of a; b the X coefficients of b. Transforms b's block,
+// multiplies it into a's and transforms a's back, depth first: each block of 2^kBlockLog words
+// does all three while in L1.
+void multiply_transformed(u64* a, u64* b, std::size_t c, int i) {
+    const std::size_t half = std::size_t(1) << i;
+    if (i < kBlockLog) {
+        forward_block(b, c, i);
+        for (std::size_t k = c; k < c + 2 * half; k += 4) store(a + k, multiply(load(a + k), load(b + k)));
+        inverse_block(a, c, i);
+    } else if (i == kBlockLog) {
+        stage_forward(b + c, half, omega(c >> i));
+        multiply_transformed(a, b, c, i - 1);
+        multiply_transformed(a, b, c + half, i - 1);
+        stage_inverse(a + c, half, omega(c >> i));
+    } else {
+        stages_forward(b + c, c, i);
+        for (std::size_t k = 0; k < 4; ++k) multiply_transformed(a, b, c + k * half / 2, i - 2);
+        stages_inverse(a + c, c, i);
+    }
 }
 
 // words u64 words, 2 MiB aligned and zeroed, in huge pages where the kernel allows.
@@ -1273,22 +1382,39 @@ u64* allocate(std::size_t words) {
     return reinterpret_cast<u64*>(start);
 }
 
+// a * b, the product left in a[0, n + m - 1). a and b hold 2^l words each, zero past n and m.
+void convolve(u64* a, std::size_t n, u64* b, std::size_t m, int l) {
+    const std::size_t half = std::size_t(1) << (l - 1);
+    change_basis<false>(a, l, n);
+    change_basis<false>(b, l, m);
+    // The top stage has twiddle omega_0 = 0: (u, v) -> (u, u + v). With v = 0 it copies u.
+    if (l - 1 > kBlockLog && n <= half) {
+        std::memcpy(a + half, a, half * sizeof(u64));
+        forward(a, 0, l - 2);
+        forward(a, half, l - 2);
+    } else {
+        forward(a, 0, l - 1);
+    }
+    if (l - 1 > kBlockLog && m <= half) {
+        std::memcpy(b + half, b, half * sizeof(u64));
+        multiply_transformed(a, b, 0, l - 2);
+        multiply_transformed(a, b, half, l - 2);
+        stage_inverse(a, half, 0);
+    } else {
+        multiply_transformed(a, b, 0, l - 1);
+    }
+    change_basis<true>(a, l, std::size_t(1) << l);
+}
+
 void solve() {
     io::Reader in;
     const std::size_t n = in.read<std::uint32_t>(), m = in.read<std::uint32_t>();
     const int l = std::max(kMinLog, int(std::bit_width(n + m - 2)));
-    const std::size_t len = std::size_t(1) << l;
-    u64* a = allocate(2 * len);
-    u64* b = a + len;
+    u64* a = allocate(std::size_t(2) << l);
+    u64* b = a + (std::size_t(1) << l);
     io::read_bulk(in, a, n);
     io::read_bulk(in, b, m);
-    change_basis<false>(a, l);
-    change_basis<false>(b, l);
-    forward(a, 0, l - 1);
-    forward(b, 0, l - 1);
-    for (std::size_t k = 0; k < len; k += 4) store(a + k, multiply(load(a + k), load(b + k)));
-    inverse(a, 0, l - 1);
-    change_basis<true>(a, l);
+    convolve(a, n, b, m, l);
     io::Writer out;
     out.write_array(a, n + m - 1, ' ');
     out.write('\n');

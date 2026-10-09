@@ -780,6 +780,21 @@ private:
 #include <cstdlib>
 #include <span>
 
+// lib/poly/exp.hpp
+// Exponential of a power series modulo 998244353: g = exp(f) mod x^n, f[0] = 0.
+// Design: lib/poly/notes.md.
+//
+//   const std::size_t n = ...;
+//   poly::Arena arena(poly::Transform::words(poly::exp_log(n)) + poly::exp_scratch(n) + ...);
+//   poly::Transform t(arena, poly::exp_log(n));
+//   poly::exp(t, f, g, arena.take(poly::exp_scratch(n)));  // g.size() == n; g may be f
+
+#include <algorithm>
+#include <bit>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+
 // lib/poly/calculus.hpp
 // Coefficient-wise operations on power series modulo 998244353: derivative and division by
 // consecutive integers (integration). x86-64 with AVX2. Log: lib/poly/notes.md.
@@ -3731,21 +3746,6 @@ inline void divide_by_index(std::span<const std::uint32_t> a, std::size_t first,
 }
 
 }  // namespace poly
-// lib/poly/exp.hpp
-// Exponential of a power series modulo 998244353: g = exp(f) mod x^n, f[0] = 0.
-// Design: lib/poly/notes.md.
-//
-//   const std::size_t n = ...;
-//   poly::Arena arena(poly::Transform::words(poly::exp_log(n)) + poly::exp_scratch(n) + ...);
-//   poly::Transform t(arena, poly::exp_log(n));
-//   poly::exp(t, f, g, arena.take(poly::exp_scratch(n)));  // g.size() == n; g may be f
-
-#include <algorithm>
-#include <bit>
-#include <cstddef>
-#include <cstdint>
-#include <span>
-
 // lib/poly/inverse.hpp
 // Inverse of a power series modulo 998244353: g = 1 / f mod x^n. Design: lib/poly/notes.md.
 //
@@ -3849,39 +3849,20 @@ inline int exp_log(std::size_t n) {
     return std::max(Transform::kMinLog + 1, int(std::bit_width(std::max<std::size_t>(n, 2) - 1)));
 }
 
-// Scratch words for exp() of n coefficients.
-inline std::size_t exp_scratch(std::size_t n) {
-    const std::size_t len = std::size_t(1) << exp_log(n);
-    return 4 * Arena::footprint(len) + Arena::footprint(len / 2);
-}
+namespace detail {
 
-// g = exp(f) mod x^n for n = g.size() >= 1. f[0] = 0; coefficients of f past f.size() are zero.
-// g may be f (f is read first). scratch: exp_scratch(n) words, 32-byte aligned (from an Arena).
-// t: lg_max >= exp_log(n).
-//
-// Newton steps double the known prefix g = exp(f) mod x^m, keeping h = 1 / g mod x^(m/2) and
-// its transform of length m. With d = f' and q = d mod x^(m-1), by transforms of length m and 2m:
-//   h = h - x^(m/2) (h (g h)[m/2, m) mod x^(m/2))   now h = 1 / g mod x^m
-//   r = x q g mod (x^m - 1)                        = (g q - g') / x^(m-1) + x g'
-//   t = h r mod x^m                                = h (g q - g') / x^(m-1) + x q mod x^m
-//   s = (f - log g)[m, 2m) = (d[m-1, 2m-1) + t - x q) / (m + i)
-//   g[m, 2m) = g s mod x^m
-// since g'/g = q - h (g q - g') mod x^(2m-1). T_m(r) = T_m(x q) T_m(g) is the lower half of
-// T_2m(r). Per step: 8 transforms of length 2m and 3.5 leaf products of that length.
-inline void exp(const Transform& t, std::span<const std::uint32_t> f, std::span<std::uint32_t> g,
-                std::span<std::uint32_t> scratch) {
-    using namespace detail;
-    const std::size_t n = g.size(), len = std::size_t(1) << exp_log(n);
+// The Newton steps of exp() below, from g mod x^kExpBase (given) to g mod x^n, n = g.size() >
+// kExpBase, for g' = d g: d has 2^exp_log(n) words, d[i] = 0 for i >= n - 1. Each step is
+// invariant under scaling g, so g[0] may be any nonzero constant. scratch: exp_newton_scratch(n).
+[[gnu::always_inline]] inline void exp_newton(const Transform& t, std::span<const std::uint32_t> d, std::span<std::uint32_t> g,
+                                              std::span<std::uint32_t> scratch) {
+    const std::size_t n = g.size(), len = d.size();
     const auto take = [&scratch](std::size_t words) {
         const std::span<std::uint32_t> s = scratch.first(words);
         scratch = scratch.subspan(Arena::footprint(words));
         return s;
     };
-    const std::span<std::uint32_t> d = take(len), h = take(len / 2), gt = take(len), ht = take(len), w = take(len);
-    derivative(f.first(std::min(f.size(), n)), d);  // d[i] = 0 for i >= n - 1
-    exp_direct(d, g.first(std::min(n, kExpBase)));
-    if (n <= kExpBase) return;
-
+    const std::span<std::uint32_t> h = take(len / 2), gt = take(len), ht = take(len), w = take(len);
     std::size_t m = kExpBase;
     inverse_direct(g, h.first(m / 2));
     t.forward(h.first(m / 2), 0, ht.first(m));
@@ -3912,6 +3893,41 @@ inline void exp(const Transform& t, std::span<const std::uint32_t> f, std::span<
         t.cyclic_product(w.subspan(m, m), m, w.first(2 * m), gt.first(2 * m), Half::kUpper);
         std::copy_n(w.begin() + m, std::min(m, n - m), g.begin() + m);
     }
+}
+
+inline std::size_t exp_newton_scratch(std::size_t n) {
+    const std::size_t len = std::size_t(1) << exp_log(n);
+    return 3 * Arena::footprint(len) + Arena::footprint(len / 2);
+}
+
+}  // namespace detail
+
+// Scratch words for exp() of n coefficients.
+inline std::size_t exp_scratch(std::size_t n) {
+    return Arena::footprint(std::size_t(1) << exp_log(n)) + detail::exp_newton_scratch(n);
+}
+
+// g = exp(f) mod x^n for n = g.size() >= 1. f[0] = 0; coefficients of f past f.size() are zero.
+// g may be f (f is read first). scratch: exp_scratch(n) words, 32-byte aligned (from an Arena).
+// t: lg_max >= exp_log(n).
+//
+// Newton steps double the known prefix g = exp(f) mod x^m, keeping h = 1 / g mod x^(m/2) and
+// its transform of length m. With d = f' and q = d mod x^(m-1), by transforms of length m and 2m:
+//   h = h - x^(m/2) (h (g h)[m/2, m) mod x^(m/2))   now h = 1 / g mod x^m
+//   r = x q g mod (x^m - 1)                        = (g q - g') / x^(m-1) + x g'
+//   t = h r mod x^m                                = h (g q - g') / x^(m-1) + x q mod x^m
+//   s = (f - log g)[m, 2m) = (d[m-1, 2m-1) + t - x q) / (m + i)
+//   g[m, 2m) = g s mod x^m
+// since g'/g = q - h (g q - g') mod x^(2m-1). T_m(r) = T_m(x q) T_m(g) is the lower half of
+// T_2m(r). Per step: 8 transforms of length 2m and 3.5 leaf products of that length.
+inline void exp(const Transform& t, std::span<const std::uint32_t> f, std::span<std::uint32_t> g,
+                std::span<std::uint32_t> scratch) {
+    using namespace detail;
+    const std::size_t n = g.size(), len = std::size_t(1) << exp_log(n);
+    const std::span<std::uint32_t> d = scratch.first(len);
+    derivative(f.first(std::min(f.size(), n)), d);  // d[i] = 0 for i >= n - 1
+    exp_direct(d, g.first(std::min(n, kExpBase)));
+    if (n > kExpBase) exp_newton(t, d, g, scratch.subspan(Arena::footprint(len)));
 }
 
 }  // namespace poly
@@ -3981,6 +3997,55 @@ inline void subtract_from_derivative(std::span<const std::uint32_t> f, std::size
     }
 }
 
+// q = f'/f mod x^(n-1) for n >= 2, f[0] != 0, in blocks q_j of k coefficients (k = log_block(n))
+// from h = 1 / f mod x^k, with transforms of length 2k: for d = f' and Q = q mod x^(jk),
+// (d - f Q) is divisible by x^(jk), and
+//   q_j = h (d - f Q)[jk, (j+1)k) mod x^k,
+//   (f Q)[jk, (j+1)k) = sum_(i<j) (W_(j-i) q_i)[k, 2k),  W_t = f[(t-1)k, (t+1)k).
+// The sum is one inverse transform of the products of the stored transforms of W_t and q_i.
+// Cost for 4 blocks: the inverse to k, then 23 transforms of length 2k and 12 leaf products.
+// sink(first, q) receives q[first, first + q.size()), block by block, as an aligned span
+// readable to the next multiple of 8. After it returns, f is read only at indices
+// > first + q.size(). scratch: log_derivative_scratch(n) words; t: lg_max >= log_derivative_log(n).
+template <class Sink>
+[[gnu::always_inline]] inline void log_derivative(const Transform& t, std::span<const std::uint32_t> f, std::size_t n,
+                                                  std::span<std::uint32_t> scratch, const Sink& sink) {
+    const std::size_t k = log_block(n), len = 2 * k, blocks = log_blocks(n);
+    // Buffers: the transforms of h, W_1 .. W_(B-1), q_0 .. q_(B-2), and work space.
+    const auto buffer = [&scratch, len](std::size_t i) { return scratch.subspan(i * Arena::footprint(len), len); };
+    const std::span<std::uint32_t> ht = buffer(0), work = buffer(2 * blocks - 1);
+    const auto window = [&buffer](std::size_t t) { return buffer(t); };
+    const auto q_transform = [&buffer, blocks](std::size_t i) { return buffer(blocks + i); };
+
+    inverse(t, f, ht.first(k), scratch.subspan(Arena::footprint(len), inverse_scratch(k)));
+    t.forward(ht.first(k), 0, ht);
+    for (std::size_t s = 1; s < blocks; ++s) {
+        const std::size_t from = std::min(f.size(), (s - 1) * k);
+        t.forward(f.subspan(from, std::min(f.size() - from, len)), 0, window(s));
+    }
+    for (std::size_t j = 0; j < blocks; ++j) {
+        const std::size_t first = j * k, count = std::min(k, n - 1 - first);
+        if (j == 0) {
+            derivative(f.first(std::min(f.size(), count + 1)), work.first(count));
+        } else {
+            Transform::Pair pairs[kLogBlocks - 1];
+            for (std::size_t i = 0; i < j; ++i) pairs[i] = {window(j - i), q_transform(i)};
+            t.inverse_product_sum(std::span(pairs, j), work, Half::kUpper);
+            subtract_from_derivative(f, first, count, work.data(), k);
+        }
+        t.cyclic_product(work.first(count), 0, work, ht, Half::kLower);
+        if (j + 1 < blocks) t.forward(work.first(k), 0, q_transform(j));
+        sink(first, std::span<const std::uint32_t>(work.first(count)));
+    }
+}
+
+inline int log_derivative_log(std::size_t n) { return std::countr_zero(2 * log_block(n)); }
+
+// 2 B buffers, at least 3 (for B = 1: the inverse's scratch, 2 buffers, follows T(h)).
+inline std::size_t log_derivative_scratch(std::size_t n) {
+    return std::max<std::size_t>(2 * log_blocks(n), 3) * Arena::footprint(2 * log_block(n));
+}
+
 }  // namespace detail
 
 // Transform length log uses for n coefficients: the Transform needs lg_max >= this.
@@ -3997,46 +4062,17 @@ inline std::size_t log_scratch(std::size_t n) {
 // g may be f; otherwise the two must not overlap. scratch: log_scratch(n) words, 32-byte aligned
 // (from an Arena). t: lg_max >= log_log(n).
 //
-// log f is the integral of q = f'/f mod x^(n-1). q is computed in B <= 4 blocks q_j of k
-// coefficients from h = 1 / f mod x^k, with transforms of length 2k: for d = f' and
-// Q = q mod x^(jk), (d - f Q) is divisible by x^(jk), and
-//   q_j = h (d - f Q)[jk, (j+1)k) mod x^k,
-//   (f Q)[jk, (j+1)k) = sum_(i<j) (W_(j-i) q_i)[k, 2k),  W_t = f[(t-1)k, (t+1)k).
-// The sum is one inverse transform of the products of the stored transforms of W_t and q_i.
-// Cost for B = 4: the inverse to k, then 23 transforms of length 2k and 12 leaf products.
+// log f is the integral of q = f'/f mod x^(n-1), computed in up to 4 blocks by
+// detail::log_derivative. In place, block q[first, first + c) is integrated into
+// g[first + 1, first + c + 1), which log_derivative no longer reads.
 inline void log(const Transform& t, std::span<const std::uint32_t> f, std::span<std::uint32_t> g,
                 std::span<std::uint32_t> scratch) {
     using namespace detail;
     const std::size_t n = g.size();
     if (n <= kLogBase) return log_direct(f, g);
-    const std::size_t k = log_block(n), len = 2 * k, blocks = log_blocks(n);
-    // Buffers: the transforms of h, W_1 .. W_(B-1), q_0 .. q_(B-2), and work space.
-    const auto buffer = [&scratch, len](std::size_t i) { return scratch.subspan(i * Arena::footprint(len), len); };
-    const std::span<std::uint32_t> ht = buffer(0), work = buffer(2 * blocks - 1);
-    const auto window = [&buffer](std::size_t t) { return buffer(t); };
-    const auto q_transform = [&buffer, blocks](std::size_t i) { return buffer(blocks + i); };
-
-    inverse(t, f, ht.first(k), scratch.subspan(Arena::footprint(len), inverse_scratch(k)));
-    t.forward(ht.first(k), 0, ht);
-    for (std::size_t s = 1; s < blocks; ++s) {
-        const std::size_t from = std::min(f.size(), (s - 1) * k);
-        t.forward(f.subspan(from, std::min(f.size() - from, len)), 0, window(s));
-    }
-    // f is read below only at indices >= jk + 1, after g[1, jk + 1) is written.
-    for (std::size_t j = 0; j < blocks; ++j) {
-        const std::size_t first = j * k, count = std::min(k, n - 1 - first);
-        if (j == 0) {
-            derivative(f.first(std::min(f.size(), count + 1)), work.first(count));
-        } else {
-            Transform::Pair pairs[kLogBlocks - 1];
-            for (std::size_t i = 0; i < j; ++i) pairs[i] = {window(j - i), q_transform(i)};
-            t.inverse_product_sum(std::span(pairs, j), work, Half::kUpper);
-            subtract_from_derivative(f, first, count, work.data(), k);
-        }
-        t.cyclic_product(work.first(count), 0, work, ht, Half::kLower);
-        if (j + 1 < blocks) t.forward(work.first(k), 0, q_transform(j));
-        detail::divide_by_index(first + 1, g.subspan(first + 1, count), [&work](std::size_t i) { return load(work.data() + i); });
-    }
+    log_derivative(t, f, n, scratch, [g](std::size_t first, std::span<const std::uint32_t> q) {
+        detail::divide_by_index(first + 1, g.subspan(first + 1, q.size()), [q](std::size_t i) { return load(q.data() + i); });
+    });
     g[0] = 0;
 }
 
@@ -4044,37 +4080,36 @@ inline void log(const Transform& t, std::span<const std::uint32_t> f, std::span<
 
 namespace poly {
 
-namespace detail {
-
-// out[i] = a[i] c for i < out.size() = a.size(), any alignment; out may be a.
-inline void scale(std::span<const std::uint32_t> a, std::uint32_t c, std::span<std::uint32_t> out) {
-    const Factor factor(c);
-    const std::size_t full = a.size() / 8 * 8;
-    for (std::size_t i = 0; i < full; i += 8) store_unaligned(out.data() + i, reduce(times(load_unaligned(a.data() + i), factor), kP));
-    for (std::size_t i = full; i < a.size(); ++i) out[i] = ntt::detail::multiply_mod(a[i], c);
-}
-
-}  // namespace detail
-
 // Transform length power uses for n coefficients: the Transform needs lg_max >= this.
-inline int power_log(std::size_t n) { return std::max(log_log(n), exp_log(n)); }
+inline int power_log(std::size_t n) { return std::max(detail::log_derivative_log(n), exp_log(n)); }
 
 // Scratch words for power() of n coefficients.
-inline std::size_t power_scratch(std::size_t n) { return std::max(log_scratch(n), exp_scratch(n)); }
+inline std::size_t power_scratch(std::size_t n) {
+    return Arena::footprint(std::size_t(1) << exp_log(n)) + std::max(detail::log_derivative_scratch(n), detail::exp_newton_scratch(n));
+}
 
 // g = c exp(e log(f / f[0])) mod x^n for n = g.size() >= 1, f[0] != 0, e and c residues.
 // Coefficients of f past f.size() are zero. g may be f; otherwise the two must not overlap.
 // scratch: power_scratch(n) words, 32-byte aligned (from an Arena). t: lg_max >= power_log(n).
+//
+// g solves g' = d g with d = e f'/f and g[0] = c: d by the blocked division of log, then the
+// Newton steps of exp, which do not depend on the scale of g.
 inline void power(const Transform& t, std::span<const std::uint32_t> f, std::uint32_t e, std::uint32_t c,
                   std::span<std::uint32_t> g, std::span<std::uint32_t> scratch) {
-    const std::size_t n = g.size(), size = std::min(f.size(), n);
+    using namespace detail;
+    const std::size_t n = g.size(), len = std::size_t(1) << exp_log(n);
     if (f.empty() || f[0] == 0) std::abort();
-    detail::scale(f.first(size), detail::scalar_inverse(f[0]), g.first(size));
-    std::fill(g.begin() + size, g.end(), 0);
-    log(t, g, g, scratch);
-    detail::scale(g, e, g);
-    exp(t, g, g, scratch);
-    detail::scale(g, c, g);
+    const std::span<std::uint32_t> d = scratch.first(len), rest = scratch.subspan(Arena::footprint(len));
+    const Factor factor(e);
+    if (n >= 2)
+        log_derivative(t, f, n, rest, [&](std::size_t first, std::span<const std::uint32_t> q) {
+            for (std::size_t i = 0; i < q.size(); i += 8) store(d.data() + first + i, reduce(times(load(q.data() + i), factor), kP));
+        });
+    std::fill(d.begin() + std::ptrdiff_t(n - 1), d.end(), 0);
+    const std::span<std::uint32_t> start = g.first(std::min(n, kExpBase));
+    exp_direct(d, start);
+    for (std::uint32_t& x : start) x = ntt::detail::multiply_mod(x, c);
+    if (n > kExpBase) exp_newton(t, d, g, rest);
 }
 
 }  // namespace poly
@@ -4271,6 +4306,7 @@ void power(poly::Arena& arena, std::span<std::uint32_t> b, std::uint64_t m) {
     const poly::Transform transform(arena, poly::power_log(size));
     const std::uint32_t c = ntt::detail::power(u[0], std::uint32_t(m % (kP - 1)));
     poly::power(transform, u, std::uint32_t(m % kP), c, u, arena.take(poly::power_scratch(size)));
+    if (shift == k) return;  // M = 1 or k = 0: u is in place
     std::copy_backward(u.begin(), u.end(), b.end());  // to b[shift, n)
     std::fill_n(b.begin(), shift, 0);
 }

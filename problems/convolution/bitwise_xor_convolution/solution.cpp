@@ -1,20 +1,21 @@
 // c_k = sum of a_i b_j over i xor j = k, mod 998244353, for 2^N terms (N <= 20).
 // c = H (H a . H b) / 2^N, H the Walsh-Hadamard transform. The transforms run on signed 64-bit
-// lanes: a level at most doubles |x|, so values stay below 2^20 * 1.6 P < 2^51 and no level
-// reduces. Design and measurements: notes.md.
+// lanes: a level at most doubles |x|, so values stay below 2^20 P < 2^50 and no level reduces.
+// Design and measurements: notes.md.
 //
 // Layout: the 2^N values are 2^H rows of 2^L (L = min(N, 12)). A row is 2^(L-2) vectors of four
 // int64; rows are S = 2^(L-2) + 2 vectors apart, so the rows of a column fall in different cache
 // sets. Within each group of four vectors the forward transform leaves the values transposed
 // (vector bits 0-1 <-> lane bits); the inverse transposes back.
 //
-// Order: a's rows as it is parsed, a's columns, a mod P kept as dwords; then b in the same
+// Order: a's rows as it is parsed, a's columns, a / 2^N mod P kept as dwords; then b in the same
 // array: rows, columns, the products with a, the inverse columns; the inverse rows, printed in
 // chunks. Each int64 array is transformed while it is still in the cache.
 #include "lib/io/io.hpp"
 #include "../fixed_width.hpp"
 
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -24,18 +25,12 @@
 namespace {
 
 using Vec = __m256i;
+using VecD = __m256d;
 
 constexpr std::uint32_t kP = 998244353;
 constexpr int kMaxRowLog = 12;
 constexpr int kChunkLog = 16;            // values per bulk parse
 constexpr std::size_t kStrip = 2;        // vectors per row in a column strip: one cache line
-
-constexpr std::uint32_t power(std::uint64_t x, std::uint64_t e) {
-    std::uint64_t r = 1;
-    for (; e; e >>= 1, x = x * x % kP)
-        if (e & 1) r = r * x % kP;
-    return std::uint32_t(r);
-}
 
 // P^-1 mod 2^32 by Newton's iteration.
 constexpr std::uint32_t kPInverse = [] {
@@ -207,8 +202,8 @@ void transform(Vec* base, int lo, int hi, int rows_log, std::size_t stride, std:
 [[gnu::always_inline]] inline void transpose(Vec (&v)[4]) {
     const Vec t0 = _mm256_unpacklo_epi64(v[0], v[1]), t1 = _mm256_unpackhi_epi64(v[0], v[1]);
     const Vec t2 = _mm256_unpacklo_epi64(v[2], v[3]), t3 = _mm256_unpackhi_epi64(v[2], v[3]);
-    v[0] = _mm256_permute2x128_si256(t0, t2, 0x20);
-    v[1] = _mm256_permute2x128_si256(t1, t3, 0x20);
+    v[0] = _mm256_inserti128_si256(t0, _mm256_castsi256_si128(t2), 1);
+    v[1] = _mm256_inserti128_si256(t1, _mm256_castsi256_si128(t3), 1);
     v[2] = _mm256_permute2x128_si256(t0, t2, 0x31);
     v[3] = _mm256_permute2x128_si256(t1, t3, 0x31);
 }
@@ -233,40 +228,49 @@ template <int K>
     for (int k = 0; k < K; ++k)
         q[k] = _mm256_castpd_si256(_mm256_fmadd_pd(_mm256_castsi256_pd(q[k]), _mm256_set1_pd(kInverseP),
                                                    _mm256_set1_pd(kRoundingOffset)));
+    // The low dword of q's bits is q's, so the low dword of x - q P is r: only it is used.
 #pragma GCC unroll 8
-    for (int k = 0; k < K; ++k) q[k] = _mm256_sub_epi64(q[k], broadcast(kMagicBits));
-#pragma GCC unroll 8
-    for (int k = 0; k < K; ++k) x[k] = _mm256_sub_epi64(x[k], _mm256_mul_epi32(q[k], broadcast(kP)));
+    for (int k = 0; k < K; ++k) x[k] = _mm256_sub_epi64(x[k], _mm256_mul_epu32(q[k], broadcast(kP)));
 }
 
-// t / 2^32 mod P (Montgomery) for |t| < 2^62: a signed low dword below |t| / 2^32 + P / 2 in
-// magnitude; the high dword is zero.
-template <int K>
-[[gnu::always_inline]] inline void redc(Vec (&t)[K]) {
-    Vec m[K];
-#pragma GCC unroll 8
-    for (int k = 0; k < K; ++k) m[k] = _mm256_mul_epu32(t[k], broadcast(kPInverse));  // low dword: t / P mod 2^32
-#pragma GCC unroll 8
-    for (int k = 0; k < K; ++k) m[k] = _mm256_mul_epi32(m[k], broadcast(kP));
-#pragma GCC unroll 8
-    for (int k = 0; k < K; ++k) t[k] = _mm256_srli_epi64(_mm256_sub_epi64(t[k], m[k]), 32);
+// x y mod P in doubles, for integers |x| < 2P and |y| < 2^20 P: h + l = x y exactly (l the
+// rounding error of h, |l| < 2^27), q = round(h / P) within 0.75 (|h / P| < 2^51), r = h - q P
+// exactly. Returns the double M + r + l, exact: |r + l| < 0.9 P.
+[[gnu::always_inline]] inline VecD product_mod(VecD x, VecD y) {
+    const VecD m = _mm256_set1_pd(kMagic), p = _mm256_set1_pd(double(kP));
+    const VecD h = _mm256_mul_pd(x, y), l = _mm256_fmsub_pd(x, y, h);
+    const VecD q = _mm256_sub_pd(_mm256_fmadd_pd(h, _mm256_set1_pd(kInverseP), m), m);
+    return _mm256_add_pd(_mm256_add_pd(_mm256_fnmadd_pd(q, p, h), m), l);
 }
 
-// y = x y / 2^N mod P for reduced x (signed low dwords, |x| < 0.9 P) and transformed y
-// (|y| < 2^51), as values in (0, 1.6 P); scale holds 2^(64 - N) mod P, centered. Bounds: reduced
-// |y| < 0.9 P; redc(x y) = u, |u| < 0.2 P + P / 2; redc(u scale) below 0.1 P + P / 2; then + P.
+// |v| < 2^51 as an exact double.
+[[gnu::always_inline]] inline VecD to_double(Vec v) {
+    return _mm256_sub_pd(_mm256_castsi256_pd(_mm256_add_epi64(v, broadcast(kMagicBits))), _mm256_set1_pd(kMagic));
+}
+
+// v / 2^N mod P for |v| <= 2^N (P - 1), N <= 30 (Montgomery with R = 2^N): k = -v / P mod 2^N
+// makes v + k P divisible by 2^N, and (v + k P) / 2^N lies in (-P, 2P). Its bits N to N + 31
+// are the result as a signed dword; shift holds N.
 template <int K>
-[[gnu::always_inline]] inline void multiply(const Vec (&x)[K], Vec (&y)[K], Vec scale) {
-    reduce(y);
-#pragma GCC unroll 8
-    for (int k = 0; k < K; ++k) y[k] = _mm256_mul_epi32(x[k], y[k]);
-    redc(y);
-#pragma GCC unroll 8
-    for (int k = 0; k < K; ++k) y[k] = _mm256_mul_epi32(y[k], scale);
-    redc(y);
+[[gnu::always_inline]] inline void divide_mod(Vec (&v)[K], __m128i shift, Vec mask) {
+    Vec t[K];
 #pragma GCC unroll 8
     for (int k = 0; k < K; ++k)
-        y[k] = _mm256_add_epi32(y[k], _mm256_setr_epi32(int(kP), 0, int(kP), 0, int(kP), 0, int(kP), 0));
+        t[k] = _mm256_and_si256(_mm256_mul_epu32(v[k], broadcast(std::uint32_t(-kPInverse))), mask);
+#pragma GCC unroll 8
+    for (int k = 0; k < K; ++k) t[k] = _mm256_add_epi64(v[k], _mm256_mul_epu32(t[k], broadcast(kP)));
+#pragma GCC unroll 8
+    for (int k = 0; k < K; ++k) v[k] = _mm256_srl_epi64(t[k], shift);
+}
+
+// y = x y mod P for x as signed dwords (|x| < 2P) and transformed y: int64, |y| < 0.9 P.
+template <int K>
+[[gnu::always_inline]] inline void multiply(const __m128i (&x)[K], Vec (&y)[K]) {
+    VecD r[K];
+#pragma GCC unroll 8
+    for (int k = 0; k < K; ++k) r[k] = product_mod(_mm256_cvtepi32_pd(x[k]), to_double(y[k]));
+#pragma GCC unroll 8
+    for (int k = 0; k < K; ++k) y[k] = _mm256_sub_epi64(_mm256_castpd_si256(r[k]), broadcast(kMagicBits));
 }
 
 // The low dwords of r0 and r1, in order.
@@ -317,15 +321,17 @@ void inverse_row(Vec* row, std::uint32_t* dst, int row_log) {
     }
 }
 
-// The column pass works on strips of two vectors (one cache line) per row; a holds such a strip
-// reduced to eight dwords per row.
+// The column pass works on strips of two vectors (one cache line) per row. a holds each strip as
+// one vector of eight dwords per row, strip after strip, in the order both passes visit them.
 static_assert(kStrip == 2);
 
-// x mod P (|r| < 0.9 P) for one strip, Rows rows at a time, as signed dwords into a; a's rows
-// are stride_a vectors apart. Prefetches the next strip.
+// x / 2^N mod P for one strip, Rows rows at a time, as signed dwords into a. Prefetches the next
+// strip.
 template <int Rows>
-void reduce_strip(const Vec* x, Vec* a, std::size_t rows, std::size_t stride, std::size_t stride_a, bool last) {
-    for (std::size_t r = 0; r < rows; r += Rows, x += Rows * stride, a += Rows * stride_a) {
+void reduce_strip(const Vec* x, Vec* a, std::size_t rows, std::size_t stride, int n_log, bool last) {
+    const __m128i shift = _mm_cvtsi32_si128(n_log);
+    const Vec mask = broadcast((std::int64_t(1) << n_log) - 1);
+    for (std::size_t r = 0; r < rows; r += Rows, x += Rows * stride, a += Rows) {
         Vec v[2 * Rows];
 #pragma GCC unroll 4
         for (int i = 0; i < Rows; ++i) {
@@ -333,42 +339,39 @@ void reduce_strip(const Vec* x, Vec* a, std::size_t rows, std::size_t stride, st
             v[2 * i + 1] = x[i * stride + 1];
             if (!last) _mm_prefetch(reinterpret_cast<const char*>(x + i * stride + kStrip), _MM_HINT_T0);
         }
-        reduce(v);
+        divide_mod(v, shift, mask);
 #pragma GCC unroll 4
-        for (int i = 0; i < Rows; ++i) a[i * stride_a] = pack(v[2 * i], v[2 * i + 1]);
+        for (int i = 0; i < Rows; ++i) a[i] = pack(v[2 * i], v[2 * i + 1]);
     }
 }
 
-// The high H bits of x's transform; then x mod P, as signed dwords, into a.
-void forward_columns(Vec* x, Vec* a, int rows_log, std::size_t row_vectors, std::size_t stride, std::size_t stride_a) {
+// The high H bits of x's transform; then x / 2^N mod P, as signed dwords, into a.
+void forward_columns(Vec* x, Vec* a, int rows_log, std::size_t row_vectors, std::size_t stride, int n_log) {
     const std::size_t rows = std::size_t(1) << rows_log;
-    for (std::size_t c = 0; c < row_vectors; c += kStrip) {
+    for (std::size_t c = 0; c < row_vectors; c += kStrip, a += rows) {
         transform(x + c, 0, rows_log, rows_log, stride, kStrip);
         const bool last = c + kStrip == row_vectors;
-        if (rows >= 2) reduce_strip<2>(x + c, a + c / kStrip, rows, stride, stride_a, last);
-        else reduce_strip<1>(x + c, a + c / kStrip, rows, stride, stride_a, last);
+        if (rows >= 2) reduce_strip<2>(x + c, a, rows, stride, n_log, last);
+        else reduce_strip<1>(x + c, a, rows, stride, n_log, last);
     }
 }
 
 // y = multiply(a, y) for one strip, Rows rows at a time. Prefetches the next strip.
 template <int Rows>
-void multiply_strip(Vec* y, const Vec* a, std::size_t rows, std::size_t stride, std::size_t stride_a, Vec scale,
-                    bool last) {
-    for (std::size_t r = 0; r < rows; r += Rows, y += Rows * stride, a += Rows * stride_a) {
-        Vec x[2 * Rows], v[2 * Rows];
+void multiply_strip(Vec* y, const Vec* a, std::size_t rows, std::size_t stride, bool last) {
+    for (std::size_t r = 0; r < rows; r += Rows, y += Rows * stride, a += Rows) {
+        __m128i x[2 * Rows];
+        Vec v[2 * Rows];
 #pragma GCC unroll 4
         for (int i = 0; i < Rows; ++i) {
-            const auto* dwords = reinterpret_cast<const __m128i*>(a + i * stride_a);
-            x[2 * i] = _mm256_cvtepu32_epi64(_mm_load_si128(dwords));
-            x[2 * i + 1] = _mm256_cvtepu32_epi64(_mm_load_si128(dwords + 1));
+            const auto* dwords = reinterpret_cast<const __m128i*>(a + i);
+            x[2 * i] = _mm_load_si128(dwords);
+            x[2 * i + 1] = _mm_load_si128(dwords + 1);
             v[2 * i] = y[i * stride];
             v[2 * i + 1] = y[i * stride + 1];
-            if (!last) {
-                _mm_prefetch(reinterpret_cast<const char*>(y + i * stride + kStrip), _MM_HINT_T0);
-                _mm_prefetch(reinterpret_cast<const char*>(a + i * stride_a + 1), _MM_HINT_T0);
-            }
+            if (!last) _mm_prefetch(reinterpret_cast<const char*>(y + i * stride + kStrip), _MM_HINT_T0);
         }
-        multiply(x, v, scale);
+        multiply(x, v);
 #pragma GCC unroll 4
         for (int i = 0; i < Rows; ++i) {
             y[i * stride] = v[2 * i];
@@ -377,31 +380,33 @@ void multiply_strip(Vec* y, const Vec* a, std::size_t rows, std::size_t stride, 
     }
 }
 
-// The high H bits of y's transform, the products with a over 2^N, and the inverse transform of
-// the high bits, into y.
-void columns(Vec* y, const Vec* a, int rows_log, std::size_t row_vectors, std::size_t stride, std::size_t stride_a,
-             Vec scale) {
+// The high H bits of y's transform, the products with a, and the inverse transform of the high
+// bits, into y.
+void columns(Vec* y, const Vec* a, int rows_log, std::size_t row_vectors, std::size_t stride) {
     const std::size_t rows = std::size_t(1) << rows_log;
-    for (std::size_t c = 0; c < row_vectors; c += kStrip) {
+    for (std::size_t c = 0; c < row_vectors; c += kStrip, a += rows) {
         transform(y + c, 0, rows_log, rows_log, stride, kStrip);
         const bool last = c + kStrip == row_vectors;
-        if (rows >= 2) multiply_strip<2>(y + c, a + c / kStrip, rows, stride, stride_a, scale, last);
-        else multiply_strip<1>(y + c, a + c / kStrip, rows, stride, stride_a, scale, last);
+        if (rows >= 2) multiply_strip<2>(y + c, a, rows, stride, last);
+        else multiply_strip<1>(y + c, a, rows, stride, last);
         transform(y + c, 0, rows_log, rows_log, stride, kStrip);
     }
 }
 
-// count vectors in 2 MiB pages where the kernel allows.
+// count vectors: whole 2 MiB pages (huge where the kernel allows), and a remainder under 1 MiB in
+// small pages just below them. At N = 20, 12 MiB + 16 KiB: 6 huge pages and 4 small ones.
 Vec* allocate(std::size_t count) {
-    constexpr std::size_t kHuge = std::size_t(1) << 21;
-    const std::size_t bytes = count * sizeof(Vec) + kHuge;
-    void* region = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    constexpr std::size_t kHuge = std::size_t(1) << 21, kPage = 4096;
+    const std::size_t bytes = count * sizeof(Vec);
+    std::size_t huge = bytes / kHuge * kHuge, small = (bytes - huge + kPage - 1) / kPage * kPage;
+    if (small >= kHuge / 2) huge += kHuge, small = 0;
+    void* region = ::mmap(nullptr, small + huge + kHuge, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (region == MAP_FAILED) std::abort();
-    const std::uintptr_t start = (reinterpret_cast<std::uintptr_t>(region) + kHuge - 1) & ~(kHuge - 1);
+    const std::uintptr_t start = (reinterpret_cast<std::uintptr_t>(region) + small + kHuge - 1) & ~(kHuge - 1);
 #ifdef MADV_HUGEPAGE
-    ::madvise(reinterpret_cast<void*>(start), bytes - kHuge, MADV_HUGEPAGE);
+    ::madvise(reinterpret_cast<void*>(start), huge, MADV_HUGEPAGE);
 #endif
-    return reinterpret_cast<Vec*>(start);
+    return reinterpret_cast<Vec*>(start - small);
 }
 
 // N < 4: the definition.
@@ -415,42 +420,39 @@ void solve_small(io::Reader& in, io::Writer& out, int n_log) {
     for (std::size_t i = 0; i < n; ++i) out.write(c[i], i + 1 < n ? ' ' : '\n');
 }
 
-}  // namespace
-
-int main() {
+void solve() {
     io::Reader in;
     io::Writer out;
     const int n_log = int(in.read<std::uint32_t>());
     if (n_log < 4) {
         solve_small(in, out, n_log);
         out.flush();
-        std::_Exit(0);
+        return;
     }
     const int row_log = std::min(n_log, kMaxRowLog), rows_log = n_log - row_log;
     const std::size_t row_vectors = std::size_t(1) << (row_log - 2), stride = row_vectors + 2;
-    const std::size_t stride_a = row_vectors / 2 + 2;
     const std::size_t rows = std::size_t(1) << rows_log, row_values = std::size_t(1) << row_log;
     const std::size_t chunk = std::size_t(1) << std::min(n_log, kChunkLog), chunk_rows = chunk / row_values;
-    // x: one factor during its transform (int64); a: the transformed a, reduced (dwords);
-    // values: a chunk of input or output values.
-    Vec* const x = allocate(rows * stride + rows * stride_a + chunk / 8);
+    // x: one factor during its transform (int64); a: the transformed a, reduced (dwords); then a
+    // chunk of output values.
+    Vec* const x = allocate(rows * stride + rows * row_vectors / 2);
     Vec* const a = x + rows * stride;
-    auto* const values = reinterpret_cast<std::uint32_t*>(a + rows * stride_a);
+    auto* const values = reinterpret_cast<std::uint32_t*>(a);
 
+    // Each chunk is parsed into the end of its own rows and widened in place: the vectors of a
+    // row, and of each 64-vector piece of it, end before the input values not yet read.
     const auto forward_rows = [&] {
         for (std::size_t r = 0; r < rows; r += chunk_rows) {
-            in.read(values, chunk);
+            auto* const input = reinterpret_cast<std::uint32_t*>(x + (r + chunk_rows) * stride - chunk / 8);
+            in.read(input, chunk);
             for (std::size_t i = 0; i < chunk_rows; ++i)
-                forward_row(values + i * row_values, x + (r + i) * stride, row_log);
+                forward_row(input + i * row_values, x + (r + i) * stride, row_log);
         }
     };
     forward_rows();
-    forward_columns(x, a, rows_log, row_vectors, stride, stride_a);
+    forward_columns(x, a, rows_log, row_vectors, stride, n_log);
     forward_rows();
-    // Two Montgomery reductions divide by 2^64: scale = 2^(64 - N), centered.
-    const std::uint32_t scale = power(2, 64 - n_log);
-    columns(x, a, rows_log, row_vectors, stride, stride_a,
-            broadcast(scale > kP / 2 ? std::int64_t(scale) - kP : scale));
+    columns(x, a, rows_log, row_vectors, stride);
 
     // Each chunk ends with a newline: the checker compares tokens.
     for (std::size_t r = 0; r < rows; r += chunk_rows) {
@@ -458,5 +460,20 @@ int main() {
         fixed_width::write(out, values, chunk);
     }
     out.flush();
-    std::_Exit(0);
 }
+
+#ifdef __ELF__
+// The program runs from the executable's pre-initializers, before the C++ runtime initializes
+// iostreams and locales (unused here), and _exit skips their teardown and the input's unmapping
+// by the Reader (the kernel does it at exit).
+void run_early(int, char**, char**) {
+    solve();
+    ::_exit(0);
+}
+
+[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
+#endif
+
+}  // namespace
+
+int main() { solve(); }  // reached only without .preinit_array support

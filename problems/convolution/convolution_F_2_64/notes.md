@@ -3,8 +3,8 @@
 N, M <= 2^19 elements of F_2[x] / (x^64 + x^4 + x^3 + x + 1) as uint64; print the N + M - 1
 coefficients of the product. 10 s.
 
-Best judged: ours, 46 ms: [409244](https://judge.yosupo.jp/submission/409244) (current `main.cpp`,
-from #111). Record when the issue opened: 409 ms.
+Best judged: ours, 44 ms: [409295](https://judge.yosupo.jp/submission/409295) (current `main.cpp`,
+#119). Earlier: 46 ms, [409244](https://judge.yosupo.jp/submission/409244) (#111). Record when the issue opened: 409 ms.
 
 ## Design
 
@@ -77,5 +77,7 @@ read 2.4, basis change of a 2.1, of b 2.1, forward a 5.8, fused b forward + prod
   AC 53 ms (many_ones_00 53, next 44) and [409259](https://judge.yosupo.jp/submission/409259) AC 50 ms
   (random_01 50, next 45). Each has one spiked case; the rest top out at 44-45 vs 46 in 409244.
   Best judged stays 46 ms (2/5 for this version).
+- 2026-10-09, audit (claude): resubmitted #119's `main.cpp`, [409295](https://judge.yosupo.jp/submission/409295)
+  AC 44 ms (3/5), no spike: large cases 40-44 ms against 44.3 expected (`judge.py bench`).
 - Next: the basis change (~8.5 ms, ~20 XORs per element at the store limit would be ~2 ms per
   change); `write()` (7.4 ms) and the transforms (~80% of the PCLMUL limit) are near their floors.

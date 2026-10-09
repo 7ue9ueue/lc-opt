@@ -1320,7 +1320,7 @@ void change_basis(u64* f, int l, std::size_t size) {
 
 // The transform. Stage i maps the halves (u, v) of each block of 2^(i+1) at c to
 // (u + w v, u + w v + v), w = omega_{c >> i}; the inverse undoes the stages in reverse order.
-// Blocks of 2^kBlockLog words (32 KiB) run stage by stage; above, two stages share a pass.
+// Blocks of 2^kBlockLog words (32 KiB) run breadth first; above, depth first. Two stages share a pass.
 
 constexpr int kBlockLog = 12;
 
@@ -1438,12 +1438,16 @@ inline void kernel8_inverse(u64* p, std::size_t c) {
     store(p + 4, y);
 }
 
-// Block d[c, c + 2^(i+1)), i < kBlockLog: stages i down to 0 (or back), one at a time.
+// Block d[c, c + 2^(i+1)), i < kBlockLog: stages i down to 0 (or back), in pairs down to stage 3,
+// then the 8-word kernel.
 void forward_block(u64* d, std::size_t c, int i) {
     const std::size_t end = c + (std::size_t(2) << i);
-    for (int s = i; s >= kMinLog; --s) {
-        const std::size_t half = std::size_t(1) << s;
-        for (std::size_t b = c; b < end; b += 2 * half) stage_forward(d + b, half, omega(b >> s));
+    int s = i;
+    for (; s >= 4; s -= 2) {
+        for (std::size_t b = c; b < end; b += std::size_t(2) << s) stages_forward(d + b, b, s);
+    }
+    if (s == 3) {
+        for (std::size_t b = c; b < end; b += 16) stage_forward(d + b, 8, omega(b >> 3));
     }
     for (std::size_t b = c; b < end; b += 8) kernel8_forward(d + b, b);
 }
@@ -1451,9 +1455,11 @@ void forward_block(u64* d, std::size_t c, int i) {
 void inverse_block(u64* d, std::size_t c, int i) {
     const std::size_t end = c + (std::size_t(2) << i);
     for (std::size_t b = c; b < end; b += 8) kernel8_inverse(d + b, b);
-    for (int s = kMinLog; s <= i; ++s) {
-        const std::size_t half = std::size_t(1) << s;
-        for (std::size_t b = c; b < end; b += 2 * half) stage_inverse(d + b, half, omega(b >> s));
+    if (i % 2 == 1) {
+        for (std::size_t b = c; b < end; b += 16) stage_inverse(d + b, 8, omega(b >> 3));
+    }
+    for (int s = i % 2 == 1 ? 5 : 4; s <= i; s += 2) {
+        for (std::size_t b = c; b < end; b += std::size_t(2) << s) stages_inverse(d + b, b, s);
     }
 }
 

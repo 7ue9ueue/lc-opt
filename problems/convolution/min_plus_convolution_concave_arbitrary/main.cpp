@@ -829,7 +829,7 @@ private:
     }
 
     // Column k joins at row t, where it beats the top; every entry owns rows from t on.
-    [[gnu::noinline]] void insert(std::uint32_t k, std::uint32_t t) {
+    void insert(std::uint32_t k, std::uint32_t t) {
         while (top_) {
             Entry& q = stack_[top_ - 1];
             // Pop q if k beats it at q's last row; else q keeps rows and k loses to q from there.

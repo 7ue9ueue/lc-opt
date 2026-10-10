@@ -23,8 +23,8 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [lcm_convolution](problems/convolution/lcm_convolution) | [14 ms](https://judge.yosupo.jp/submission/409551) | 37 ms |
 | [mul_mod2n_convolution](problems/convolution/mul_mod2n_convolution) | [21 ms](https://judge.yosupo.jp/submission/409247) | 81 ms |
 | [mul_modp_convolution](problems/convolution/mul_modp_convolution) | [12 ms](https://judge.yosupo.jp/submission/409350) | 45 ms |
-| [min_plus_convolution_convex_convex](problems/convolution/min_plus_convolution_convex_convex) | [13 ms](https://judge.yosupo.jp/submission/409301) | 20 ms |
-| [min_plus_convolution_convex_arbitrary](problems/convolution/min_plus_convolution_convex_arbitrary) | [11 ms](https://judge.yosupo.jp/submission/409229) | 38 ms |
+| [min_plus_convolution_convex_convex](problems/convolution/min_plus_convolution_convex_convex) | [9 ms](https://judge.yosupo.jp/submission/409568) | 20 ms |
+| [min_plus_convolution_convex_arbitrary](problems/convolution/min_plus_convolution_convex_arbitrary) | [9 ms](https://judge.yosupo.jp/submission/409564) | 38 ms |
 | [min_plus_convolution_concave_arbitrary](problems/convolution/min_plus_convolution_concave_arbitrary) | [24 ms](https://judge.yosupo.jp/submission/409555) | 117 ms |
 | [multivariate_convolution](problems/convolution/multivariate_convolution) | [14 ms](https://judge.yosupo.jp/submission/409322) | 117 ms |
 | [multivariate_convolution_cyclic](problems/convolution/multivariate_convolution_cyclic) | [12 ms](https://judge.yosupo.jp/submission/409321) | 117 ms |
@@ -38,6 +38,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [compositional_inverse_of_formal_power_series](problems/polynomial/compositional_inverse_of_formal_power_series) | [3 ms](https://judge.yosupo.jp/submission/409399) | 14 ms |
 | [compositional_inverse_of_formal_power_series_large](problems/polynomial/compositional_inverse_of_formal_power_series_large) | [33 ms](https://judge.yosupo.jp/submission/409549) | 93 ms |
 | [inv_of_formal_power_series_sparse](problems/polynomial/inv_of_formal_power_series_sparse) | [10 ms](https://judge.yosupo.jp/submission/409351) | 24 ms |
+| [inv_of_formal_power_series_2d](problems/polynomial/inv_of_formal_power_series_2d) | [21 ms](https://judge.yosupo.jp/submission/409570) | 197 ms |
 | [exp_of_formal_power_series_sparse](problems/polynomial/exp_of_formal_power_series_sparse) | [7 ms](https://judge.yosupo.jp/submission/409367) | 39 ms |
 | [log_of_formal_power_series_sparse](problems/polynomial/log_of_formal_power_series_sparse) | [14 ms](https://judge.yosupo.jp/submission/409396) | 38 ms |
 | [pow_of_formal_power_series_sparse](problems/polynomial/pow_of_formal_power_series_sparse) | [13 ms](https://judge.yosupo.jp/submission/409426) | 43 ms |
@@ -50,6 +51,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [polynomial_taylor_shift](problems/polynomial/polynomial_taylor_shift) | [10 ms](https://judge.yosupo.jp/submission/409534) | 33 ms |
 | [shift_of_sampling_points_of_polynomial](problems/polynomial/shift_of_sampling_points_of_polynomial) | [11 ms](https://judge.yosupo.jp/submission/409556) | 41 ms |
 | [division_of_polynomials](problems/polynomial/division_of_polynomials) | [12 ms](https://judge.yosupo.jp/submission/409561) | 30 ms |
+| [prefix_sum_of_polynomial](problems/polynomial/prefix_sum_of_polynomial) | [13 ms](https://judge.yosupo.jp/submission/409571) | 143 ms |
 | [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |
 
 Times are the judge's, for the slowest test, checked against the judge's API on 2026-10-10.

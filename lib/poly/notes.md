@@ -9,7 +9,8 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
 - One header per operation on top: `inverse.hpp`, `exp.hpp` (Newton iterations), `log.hpp`
   (division f'/f), `pow.hpp` (c (f / f[0])^e as exp(e log)), `sqrt.hpp` (Newton iteration).
 - `sparse.hpp`: linear recurrences with few taps, for series with few nonzero terms (issues
-  #69-#73); independent of the transform layer.
+  #69-#73); independent of the transform layer. `holonomic.hpp` on top of it: recurrences with
+  coefficients linear in n (exp, pow, sqrt of a sparse series) and bulk `inverses`.
 - `composition.hpp`: f(g) mod x^n by Kinoshita and Li's algorithm (issue #67); its own bottoms
   and tables on top of the transform layer.
 
@@ -219,10 +220,27 @@ it (a ring, or one array). For 1/f: taps (i_k, -a_k / a_0), r = [1 / a_0].
   Without short taps the block is r' itself.
 - Costs (`lc-amd`, in memory): about 0.125 + 0.05 w ns per coefficient for w <= 12 (0.463 at w = 7);
   each column is 4 `vpmuludq` + 4 `vpaddq` per 16 values, 2.8 cycles.
-- Next, for exp, log, pow and sqrt (#70-#73): their recurrences have coefficients linear in n
-  (log's n g_n is constant-coefficient: G = n g, then a division by n); dense small-tap inputs
-  then need a different block step, and bulk inverses of 1..N (`calculus.hpp` has batch
-  inversion).
+
+`Holonomic` (`holonomic.hpp`): n g[n] = sum over taps (d, a, b) of (a + b n) g[n - d], g[0]
+given, at most 16 taps. exp: (d, d a_d, 0). pow f^e (f[0] = 1): (d, (e + 1) d f_d, -f_d); sqrt
+the same with e = 1/2. log is `Recurrence` on G = n g (taps (d, -f_d), r = n f_n) and then
+G ⊙ `inverses`. Same `next` contract as `Recurrence`; the constructor also takes the total count.
+- The jump matrix of `Recurrence` depends on n here. Block of 16 at n, G = g[n, n + 16): with
+  θ = x d/dx and A, B, B' the sums of a x^d, b x^d, b d x^d over short taps,
+  (1 - B)(n + θ) G - (A + B') G = R, R the terms reaching before the block. F (the solution for
+  n = 0, F[0] = 1) solves the n = 0 operator, so G = F U gives (1 - B) F (n + θ) U = R:
+  G = F (y ⊙ W) mod x^16, W = Q R, Q = 1 / ((1 - B) F), y[t] = 1 / (n + t) (variation of
+  constants). From the state S (last w values) W = V S, w columns, plus n V' S with slopes;
+  long taps add Q R_long (a 16 x 16 triangle). Verified first in a Python prototype.
+- Per block: W (4w `vpmuludq`, partial Montgomery step to < 4P), H = y ⊙ W (one product, step,
+  subtraction), G = F H (triangle: 46 `vpmuludq`, upper half with 16 products folded). The next
+  block's state is G's upper half, broadcast from registers.
+- Costs per coefficient (w = 7): W 7 products, H 1, triangle 8.5, against w = 7 for 1/f. About
+  260 vector ops per block; 1.975 ms for 10^6 coefficients without the dependency from block to
+  block, 2.21 ms with it (`lc-amd`, in memory, reciprocals included): mostly throughput.
+- Reciprocals 2^32 / m: odd m by `batch_inverses` per `next` call (step 2); even m from a table
+  of the first half, 2^32 / m = (2^32 / (m / 2)) / 2, with the 1/2 folded into the even lanes of
+  V, V', Q (`columns(..., true)`). The table (2 MiB at N = 10^6) is in transparent huge pages.
 
 ## Composition
 
@@ -540,6 +558,28 @@ products 1.77 and 1.69).
   `-march=native` and `-march=x86-64-v3` (`lc-intel`). Mutations of the generator (y, z block
   entries rotated in their block, the h = 4 slot of 2k, no canonical bottom outputs) fail the tests.
 
+2026-10-09, claude (issue #70, exp_of_formal_power_series_sparse):
+- New `holonomic.hpp` (`Holonomic`, `inverses`, design under Sparse); `sparse.hpp` unchanged, so
+  the inv_of_formal_power_series_sparse bundle is unchanged. Tests: `partial` and `scale` at
+  their bounds (12 (P - 1)^2 unfolded, 2^64 - 1 folded; w < 4P, y < P); `inverses` against
+  1 / i; the recurrence against its definition for 2000 random tap sets (short, long, mixed,
+  block edges, with and without slopes, coefficients P - 1), `next` in random lengths into an
+  array and a ring; each width 1..15 with and without slopes over 20000 coefficients; 15 short
+  taps at P - 1 with slopes (16 products). Mutations (no 1/2 in V's even lanes, no slope terms
+  of long taps, no fold in `partial`) fail them.
+- Steps, `lc-amd`, 10^6 coefficients in chunks of 25600, w = 7, reciprocals included, ms (in
+  memory): state and H broadcast from stores (store forwarding: 8.3 cycles) 3.19, flat in w
+  (latency-bound, ~145 cycles per block); GCC outlined the triangle and kept sums on the stack
+  (5.9) until everything was `always_inline` with index sequences; broadcasts from registers by
+  `vpermd`/`vpermq` 2.93; by `vperm2i128` + `vpshufd` and two chains of additions in the upper
+  triangle 2.74; upper half first, lower half after 2.56; even reciprocals from the table 2.24.
+  Latencies measured on `lc-amd` (cycles): `vpmuludq` 3, `vpermd` 8.3, `vpermq` 6.5,
+  `vperm2i128` 3, `vpshufd` 1, store + `vpbroadcastd` 8.3.
+- The table in 4 KiB pages: `next` 3.2 ms in a fresh process against 2.24 in a warm loop (512
+  page faults); in huge pages 2.33.
+- Not kept: H broadcast by `vpermq` (2.39 against 2.21); H for columns s >= 4 broadcast from a
+  store (2.38); two chains of additions for W (2.65, spills).
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -559,6 +599,9 @@ products 1.77 and 1.69).
   the usual blockwise division; derived and written here, no code read.
 - Linear recurrences in blocks by jump matrices (the state times A = M^t rows) and the impulse
   response of the short part: standard linear algebra, derived here; no code read.
+- `Holonomic`'s block step: variation of constants for the first-order ODE of a block
+  ((1 - B)(n + θ) - (A + B')) G = R with the n = 0 solution as integrating factor; derived here,
+  no code read. exp from g' = f' g and pow from f g' = e f' g are the standard recurrences.
 - Montgomery reduction: P. Montgomery, "Modular multiplication without trial division",
   Math. Comp. 44 (1985).
 - Composition: K. Kinoshita, B. Li, "Power Series Composition in Near-Linear Time", FOCS 2024,

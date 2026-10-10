@@ -13,6 +13,7 @@
 #include "lib/poly/calculus.hpp"
 #include "lib/poly/composition.hpp"
 #include "lib/poly/exp.hpp"
+#include "lib/poly/holonomic.hpp"
 #include "lib/poly/inverse.hpp"
 #include "lib/poly/log.hpp"
 #include "lib/poly/pow.hpp"
@@ -896,6 +897,148 @@ void test_compose() {
     }
 }
 
+using poly::sparse::Holonomic;
+using Taps = std::vector<poly::sparse::Tap>;
+
+// 1 / i mod P for i < size, by the classic recurrence.
+std::vector<u32> reciprocal_table(std::size_t size) {
+    std::vector<u32> inv(std::max<std::size_t>(size, 2), 1);
+    for (std::size_t i = 2; i < size; ++i) inv[i] = mul(P - P / u32(i), inv[P % i]);
+    return inv;
+}
+
+// holonomic's two reduction steps at their bounds: partial on sums up to 12 (P - 1)^2 unfolded and
+// 2^64 - 1 folded (a value below 4P in the low dword); scale on w < 4P and y < P.
+template <bool kFold>
+void check_holonomic_reduce() {
+    namespace detail = poly::sparse::detail;
+    const u64 max = kFold ? ~u64(0) : detail::kUnfolded * u64(P - 1) * (P - 1);
+    const u32 unscale = poly::sparse::inverse(detail::kR);  // 2^-32 mod P
+    std::vector<u64> values = {0, 1, P - 1, P, max, max - 1, max - P, max / 2, u64(P) << 32, (u64(P) << 32) - 1};
+    for (int i = 0; i < 4000; ++i) values.push_back(i % 2 ? max - rng() % (u64(1) << 40) : rng() % max);
+    for (std::size_t i = 0; i + 4 <= values.size(); i += 4) {
+        const u64* x = values.data() + i;
+        alignas(32) u64 got[4];
+        _mm256_store_si256(reinterpret_cast<__m256i*>(got), detail::partial<kFold>(_mm256_setr_epi64x(x[0], x[1], x[2], x[3])));
+        for (int k = 0; k < 4; ++k)
+            expect(got[k] < 4 * u64(P) && got[k] % P == mul(u32(x[k] % P), unscale), "holonomic partial", x[k], kFold);
+    }
+}
+
+void check_holonomic_scale() {
+    namespace detail = poly::sparse::detail;
+    const u32 unscale = poly::sparse::inverse(detail::kR);
+    const u64 edges[] = {0, 1, P - 1, P, 2 * u64(P), 4 * u64(P) - 1};
+    for (int i = 0; i < 4000; ++i) {
+        u64 w[4], y[4];
+        for (int k = 0; k < 4; ++k) {
+            w[k] = i % 3 ? rng() % (4 * u64(P)) : edges[rng() % 6];
+            y[k] = i % 5 ? rng() % P : P - 1;
+        }
+        alignas(32) u64 got[4];
+        _mm256_store_si256(reinterpret_cast<__m256i*>(got),
+                           detail::scale(_mm256_setr_epi64x(w[0], w[1], w[2], w[3]), _mm256_setr_epi64x(y[0], y[1], y[2], y[3])));
+        for (int k = 0; k < 4; ++k)
+            expect(got[k] == mul(mul(u32(w[k] % P), u32(y[k])), unscale), "holonomic scale", w[k], y[k]);
+    }
+}
+
+void test_inverses() {
+    const u32 r = u32((u64(1) << 32) % P);  // Montgomery form of 1
+    for (const auto& [first, count] : {std::pair<u32, std::size_t>{1, 0}, {1, 1}, {1, 31}, {1, 32}, {1, 33}, {2, 1000},
+                                      {999983, 4097}, {P - 2000, 1900}}) {
+        std::vector<u32> y(count + 32);
+        poly::sparse::inverses(first, count, y.data());
+        for (std::size_t i = 0; i < count; ++i)
+            expect(mul(y[i], u32(first + i)) == r, "sparse inverses", first, i);
+    }
+}
+
+// n g[n] = sum over taps (d, a, b) of (a + b n) g[n - d], g[0] = initial, n < size.
+std::vector<u32> holonomic_reference(const Taps& taps, u32 initial, std::size_t size) {
+    static const auto inv = reciprocal_table(1 << 16);
+    std::vector<u32> g(size, 0);
+    if (size) g[0] = initial;
+    for (std::size_t i = 1; i < size; ++i) {
+        u32 sum = 0;
+        for (const auto [d, a, b] : taps)
+            if (d <= i) sum = add(sum, mul(add(a, mul(b, u32(i))), g[i - d]));
+        g[i] = mul(sum, inv[i]);
+    }
+    return g;
+}
+
+// As check_recurrence: next() calls of random lengths into one array, and into a ring.
+void check_holonomic(const Taps& taps, u32 initial, std::size_t n) {
+    const auto want = holonomic_reference(taps, initial, n);
+    const std::size_t padded = (n + Holonomic::kBlock - 1) / Holonomic::kBlock * Holonomic::kBlock;
+    {
+        Holonomic recurrence(taps, initial, n);
+        std::vector<u32> g(Holonomic::kPadding + padded, 0);
+        for (std::size_t i = 0; i < n;) {
+            const std::size_t m = std::min(n - i, Holonomic::kBlock * (1 + pick(40)));
+            recurrence.next(g.data() + Holonomic::kPadding + i, m);
+            i += m;
+        }
+        expect(std::equal(want.begin(), want.end(), g.begin() + Holonomic::kPadding), "holonomic, array", n, taps.size());
+    }
+    const std::size_t chunk = Holonomic::kBlock * (1 + pick(64));
+    Holonomic recurrence(taps, initial, n);
+    const std::size_t history = recurrence.history();
+    if (history > chunk) return;
+    std::vector<u32> ring(history + chunk, 0), got;
+    for (std::size_t i = 0; i < n; i += chunk) {
+        const std::size_t m = std::min(chunk, n - i);
+        recurrence.next(ring.data() + history, m);
+        got.insert(got.end(), ring.begin() + history, ring.begin() + history + m);
+        std::copy(ring.begin() + chunk, ring.end(), ring.begin());
+    }
+    expect(got == want, "holonomic, ring", n, taps.size());
+}
+
+// count distinct distances from pool; constants and slopes random or P - 1, slopes zero if !slope.
+Taps random_holonomic_taps(std::vector<u32> pool, std::size_t count, bool worst, bool slope) {
+    Taps taps;
+    for (const auto [d, c] : random_taps(std::move(pool), count, worst))
+        taps.push_back({d, c, slope ? (worst ? P - 1 : u32(pick(P))) : 0});
+    return taps;
+}
+
+void test_holonomic() {
+    check_holonomic_reduce<false>();
+    check_holonomic_reduce<true>();
+    check_holonomic_scale();
+    test_inverses();
+    const std::vector<u32> edges = {1, 2, 7, 8, 12, 13, 14, 15, 16, 17, 31, 32, 33, 47, 48, 63, 64, 65, 100, 1000};
+    for (int round = 0; round < 2000; ++round) {
+        const std::size_t n = round < 200 ? std::size_t(round + 1) : 1 + pick(round % 10 ? 700 : 5000);
+        const std::size_t count = round % 7 == 0 ? Holonomic::kMaxTaps : 1 + pick(10);
+        const bool worst = round % 5 == 0, slope = round % 3 != 0;
+        Taps taps;
+        switch (round % 5) {
+            case 0: taps = random_holonomic_taps(range(1, 16), count, worst, slope); break;     // short only
+            case 1: taps = random_holonomic_taps(range(16, 3000), count, worst, slope); break;  // long only
+            case 2: taps = random_holonomic_taps(range(1, 200), count, worst, slope); break;    // mixed
+            case 3: taps = random_holonomic_taps(edges, count, worst, slope); break;
+            default: taps = {}; break;
+        }
+        const u32 initial = round % 11 == 0 ? 0 : worst ? P - 1 : u32(pick(P));
+        check_holonomic(taps, initial, n);
+    }
+    // Each width, 1 .. 15, with and without slopes, over a long range; the widest sums: 15 short
+    // taps at P - 1 (16 products with slopes), 16 long or mixed taps.
+    for (u32 w = 1; w < 16; ++w)
+        for (const bool slope : {false, true}) {
+            Taps taps = {{w, u32(pick(P)), slope ? u32(pick(P)) : 0}};
+            if (w > 1) taps.push_back({1, u32(pick(P)), 0});
+            check_holonomic(taps, 1, 20000);
+        }
+    check_holonomic(random_holonomic_taps(range(1, 16), 15, true, true), P - 1, 20000);
+    check_holonomic(random_holonomic_taps(range(1, 16), 15, true, false), P - 1, 20000);
+    check_holonomic(random_holonomic_taps(range(16, 40), 16, true, true), P - 1, 20000);
+    check_holonomic(random_holonomic_taps(range(1, 40), 16, true, true), P - 1, 20000);
+}
+
 }  // namespace
 
 int main() {
@@ -910,6 +1053,7 @@ int main() {
     test_power(fx);
     test_sqrt(fx);
     test_recurrence();
+    test_holonomic();
     test_compose();
     if (failures) {
         std::printf("%d failures\n", failures);

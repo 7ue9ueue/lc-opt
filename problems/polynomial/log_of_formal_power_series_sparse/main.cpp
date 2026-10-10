@@ -1695,7 +1695,7 @@ private:
 
     // Measured on Zen 3 and Intel (lib/poly/notes.md): the block kernel's cost grows with w (and
     // doubles its state part with slopes), the chained kernel's does not.
-    static bool chained_wins(std::size_t width, bool slope) {
+    static bool chained_wins(std::size_t width, [[maybe_unused]] bool slope) {
 #ifdef HOLONOMIC_CHAINED
         return HOLONOMIC_CHAINED && width <= kHalf;
 #else

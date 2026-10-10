@@ -76,3 +76,6 @@ version 7.31 (1.157). In process, small_dense_02 (10^6 coefficients, median of 2
 - Next: the division is 30 `vpmuludq` per 16 values (prefix 6, backward 12, products 12) at
   ~65% of the multiply pipes; the recurrence is inv's kernel. max_random (3 ms, not the slowest)
   divides all of its mostly zero G.
+- 2026-10-10, claude (issue #72, pow_of_formal_power_series_sparse): the bundle changed with
+  `lib/poly/holonomic.hpp` (`divider.hpp` includes it for its helpers; `Divider` itself is
+  unchanged). `judge.py bench` (`lc-amd`, 21 rounds) against main: 0.9940; 24/24 official tests.

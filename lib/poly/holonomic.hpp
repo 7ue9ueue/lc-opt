@@ -54,18 +54,33 @@ inline Vec halve(Vec x) {
     return _mm256_srli_epi32(_mm256_add_epi32(x, _mm256_and_si256(_mm256_sub_epi32(_mm256_setzero_si256(), odd), broadcast(kP))), 1);
 }
 
-// x / 2^32 mod P in [0, 4P) in the low dword of each qword. kFold: any x < 2^64, folded first as in
-// reduce(); else x < 12 P^2.
+// x = 2^32 h + l -> h (2^32 mod P) + l < 2^62, the same modulo P, for any qword x.
+[[gnu::always_inline]] inline Vec fold(Vec x) {
+    return _mm256_add_epi64(_mm256_mul_epu32(_mm256_srli_epi64(x, 32), broadcast(kR)),
+                            _mm256_blend_epi32(x, _mm256_setzero_si256(), 0xAA));
+}
+
+// x / 2^32 mod P in [0, 4P) in the low dword of each qword. kFold: any x < 2^64, folded first;
+// else x < 12 P^2.
 template <bool kFold>
 [[gnu::always_inline]] inline Vec partial(Vec x) {
-    if constexpr (kFold)
-        x = _mm256_add_epi64(_mm256_mul_epu32(_mm256_srli_epi64(x, 32), broadcast(kR)),
-                             _mm256_blend_epi32(x, _mm256_setzero_si256(), 0xAA));
+    if constexpr (kFold) x = fold(x);
     return _mm256_srli_epi64(redc(x), 32);
 }
 
-// w y / 2^32 mod P in [0, P) in the low dwords, for w < 4P and y < P in the low dwords.
-[[gnu::always_inline]] inline Vec scale(Vec w, Vec y) { return subtract(_mm256_srli_epi64(redc(_mm256_mul_epu32(w, y)), 32)); }
+// (w y + s) / 2^32 mod P in [0, P) in the low dwords, for w < 4P and y < P in the low dwords and
+// s a qword sum of kTerms products below P^2. Unfolded (kTerms <= 10), w y + s is below 14 P^2
+// and the Montgomery step leaves (14 P / 2^32 + 1) P < 4.26 P < 2^32; with s folded, below 3P.
+template <std::size_t kTerms = 0>
+[[gnu::always_inline]] inline Vec scale(Vec w, Vec y, Vec s = _mm256_setzero_si256()) {
+    constexpr bool kFold = kTerms > 10;
+    Vec x = _mm256_mul_epu32(w, y);
+    if constexpr (kTerms > 0) x = _mm256_add_epi64(x, kFold ? fold(s) : s);
+    x = _mm256_srli_epi64(redc(x), 32);
+    if constexpr (!kFold && kTerms > 8) x = _mm256_min_epu32(x, _mm256_sub_epi32(x, broadcast(4 * kP)));
+    if constexpr (kTerms > 0) x = _mm256_min_epu32(x, _mm256_sub_epi32(x, broadcast(2 * kP)));
+    return subtract(x);
+}
 
 // a b / 2^32 mod P in [0, P), dword by dword, for a, b < P.
 inline Vec montgomery(Vec a, Vec b) {
@@ -77,51 +92,101 @@ inline Vec montgomery(Vec a, Vec b) {
 // y[i] = 2^32 / (first + step i) mod P for i < count rounded up to a multiple of 32 (y holds
 // that many), all these integers in [1, P). Montgomery's batch inversion in 4 interleaved chains
 // of 8 lanes: y first holds the chains' prefix products, each step with a factor 2^-32 that the
-// backward pass cancels; one scalar inversion for the 32 lane totals.
+// backward pass cancels; the 32 lane totals by a product tree and one scalar inversion. The work
+// comes in half steps (two chains of one step), to be interleaved with other work: start(), then
+// step() until done(), or finish().
+class BatchInverter {
+public:
+    void start(std::uint32_t first, std::uint32_t step, std::size_t count, std::uint32_t* y) {
+        end_ = (count + kLanes - 1) / kLanes * kLanes;
+        if (end_ == 0) {
+            phase_ = Phase::kDone;
+            return;
+        }
+        advance_ = broadcast(std::uint32_t(kLanes) * step);
+        const Vec lane = _mm256_mullo_epi32(_mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), broadcast(step));
+        for (std::size_t c = 0; c < kChains; ++c) {
+            x_[c] = _mm256_add_epi32(broadcast(first + std::uint32_t(8 * c) * step), lane);
+            value_[c] = x_[c];
+        }
+        y_ = y;
+        i_ = kLanes;
+        chain_ = 0;
+        phase_ = Phase::kForward;
+    }
+
+    bool done() const { return phase_ == Phase::kDone; }
+
+    // Forward: prefix(i) = prefix(i - 32) x(i) / 2^32. Backward, with q(i) = 2^32 / prefix(i):
+    // y(i) = prefix(i - 32) q(i) / 2^32, q(i - 32) = q(i) x(i) / 2^32.
+    [[gnu::always_inline]] void step() {
+        if (phase_ == Phase::kForward) {
+            if (i_ == end_) {
+                invert_totals();
+                phase_ = Phase::kBackward;
+                i_ = end_ - kLanes;
+                return;
+            }
+            for (std::size_t c = chain_; c < chain_ + 2; ++c) {
+                store(y_ + i_ - kLanes + 8 * c, value_[c]);
+                x_[c] = _mm256_add_epi32(x_[c], advance_);
+                value_[c] = montgomery(value_[c], x_[c]);
+            }
+            chain_ ^= 2;
+            if (chain_ == 0) i_ += kLanes;
+        } else if (phase_ == Phase::kBackward) {
+            if (i_ == 0) {
+                for (std::size_t c = 0; c < kChains; ++c) store(y_ + 8 * c, value_[c]);
+                phase_ = Phase::kDone;
+                return;
+            }
+            for (std::size_t c = chain_; c < chain_ + 2; ++c) {
+                store(y_ + i_ + 8 * c, montgomery(load(y_ + i_ - kLanes + 8 * c), value_[c]));
+                value_[c] = montgomery(value_[c], x_[c]);
+                x_[c] = _mm256_sub_epi32(x_[c], advance_);
+            }
+            chain_ ^= 2;
+            if (chain_ == 0) i_ -= kLanes;
+        }
+    }
+
+    void finish() {
+        while (!done()) step();
+    }
+
+private:
+    static constexpr std::size_t kChains = 4, kLanes = 8 * kChains;
+    enum class Phase { kForward, kBackward, kDone };
+
+    // value_ = 2^32 / value_ lane by lane: Montgomery products keep every node of the tree a
+    // Montgomery form, so 2^32 / root at the root gives 2^32 / p at the leaves.
+    void invert_totals() {
+        const Vec a = montgomery(value_[0], value_[1]), b = montgomery(value_[2], value_[3]), c = montgomery(a, b);
+        const Vec c_swap = _mm256_permute2x128_si256(c, c, 1), d = montgomery(c, c_swap);  // lanes l, l ^ 4
+        const Vec d_swap = _mm256_shuffle_epi32(d, 0x4E), e = montgomery(d, d_swap);       // l ^ 2
+        const Vec e_swap = _mm256_shuffle_epi32(e, 0xB1), root = montgomery(e, e_swap);    // l ^ 1
+        const Vec inverse_root = broadcast(multiply(inverse(std::uint32_t(_mm256_cvtsi256_si32(root))), kR));
+        const Vec inverse_c = montgomery(montgomery(montgomery(inverse_root, e_swap), d_swap), c_swap);
+        const Vec inverse_a = montgomery(inverse_c, b), inverse_b = montgomery(inverse_c, a);
+        const Vec p0 = value_[0], p2 = value_[2];
+        value_[0] = montgomery(inverse_a, value_[1]);
+        value_[1] = montgomery(inverse_a, p0);
+        value_[2] = montgomery(inverse_b, value_[3]);
+        value_[3] = montgomery(inverse_b, p2);
+    }
+
+    Vec x_[kChains], value_[kChains];  // value: prefix products forward, their reciprocals backward
+    Vec advance_;
+    std::uint32_t* y_ = nullptr;
+    std::size_t i_ = 0, end_ = 0;
+    std::size_t chain_ = 0;  // the first of the two chains of the next half step
+    Phase phase_ = Phase::kDone;
+};
+
 inline void batch_inverses(std::uint32_t first, std::uint32_t step, std::size_t count, std::uint32_t* y) {
-    constexpr std::size_t kChains = 4, kLanes = 8 * kChains;
-    const std::size_t end = (count + kLanes - 1) / kLanes * kLanes;
-    if (end == 0) return;
-    const Vec advance = broadcast(std::uint32_t(kLanes) * step);
-    const Vec lane = _mm256_mullo_epi32(_mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), broadcast(step));
-    Vec x[kChains], prefix[kChains];
-    for (std::size_t c = 0; c < kChains; ++c) {
-        x[c] = _mm256_add_epi32(broadcast(first + std::uint32_t(8 * c) * step), lane);
-        prefix[c] = x[c];
-    }
-    // prefix(i) = prefix(i - 32) x(i) / 2^32, 8 lanes at a time.
-    for (std::size_t i = kLanes; i < end; i += kLanes) {
-        for (std::size_t c = 0; c < kChains; ++c) {
-            store(y + i - kLanes + 8 * c, prefix[c]);
-            x[c] = _mm256_add_epi32(x[c], advance);
-            prefix[c] = montgomery(prefix[c], x[c]);
-        }
-    }
-
-    alignas(32) std::uint32_t total[kLanes], reciprocal[kLanes];  // reciprocal = 2^32 / total
-    for (std::size_t c = 0; c < kChains; ++c) store(total + 8 * c, prefix[c]);
-    std::uint32_t running = 1;
-    for (std::size_t l = 0; l < kLanes; ++l) {
-        reciprocal[l] = running;
-        running = multiply(running, total[l]);
-    }
-    running = multiply(inverse(running), kR);
-    for (std::size_t l = kLanes; l-- > 0;) {
-        reciprocal[l] = multiply(reciprocal[l], running);
-        running = multiply(running, total[l]);
-    }
-
-    // With q(i) = 2^32 / prefix(i): y(i) = prefix(i - 32) q(i) / 2^32, q(i - 32) = q(i) x(i) / 2^32.
-    Vec q[kChains];
-    for (std::size_t c = 0; c < kChains; ++c) q[c] = load(reciprocal + 8 * c);
-    for (std::size_t i = end - kLanes; i > 0; i -= kLanes) {
-        for (std::size_t c = 0; c < kChains; ++c) {
-            store(y + i + 8 * c, montgomery(load(y + i - kLanes + 8 * c), q[c]));
-            q[c] = montgomery(q[c], x[c]);
-            x[c] = _mm256_sub_epi32(x[c], advance);
-        }
-    }
-    for (std::size_t c = 0; c < kChains; ++c) store(y + 8 * c, q[c]);
+    BatchInverter inverter;
+    inverter.start(first, step, count, y);
+    inverter.finish();
 }
 
 // Words in transparent huge pages where available: a 2 MiB table in 4 KiB pages takes 512 page
@@ -163,10 +228,14 @@ inline void inverses(std::uint32_t first, std::size_t count, std::uint32_t* y) {
 // the terms that reach before the block: the last w = max d values (the state), and taps with
 // d >= 16 ("long"). F, the solution for n = 0 with F[0] = 1, turns it into
 // G = F (y ⊙ W) mod x^16 with W = Q R, y[t] = 1 / (n + t) and Q = 1 / ((1 - B) F) mod x^16.
-// Q R from the state is V S: w precomputed columns, plus n V' S if a short tap has b != 0.
+// From the state, R = R0 + n R1 (R1 from the slopes b), and n y[t] = 1 - t y[t] gives
+// y ⊙ W = y ⊙ (Q R0 - t Q R1) + Q R1: G = F H, H = y ⊙ (V S) + V' S with V, V' precomputed
+// (w columns each; V' only if a short tap has b != 0).
 //
-// Reciprocals: 1 / (n + t) for odd n + t by batch inversion, for even n + t as 1 / ((n + t) / 2)
-// from a table of the first half, times 1/2. That 1/2 is folded into the even lanes of W.
+// Reciprocals: 1 / (n + t) for odd n + t by batch inversion in windows of kWindow coefficients,
+// for even n + t as 1 / ((n + t) / 2) from a table of the first half, times 1/2. That 1/2 is
+// folded into the even lanes of W. The kernel loop runs the batch inversion of the next window, a
+// half step per block, in the cycles the chain from block to block leaves free.
 //
 // Products of a coefficient times 2^32 (Montgomery form) and a value are summed in 64-bit lanes
 // and reduced once per stage: W, the product with y, the product with F.
@@ -175,11 +244,12 @@ public:
     static constexpr std::size_t kBlock = 16;
     static constexpr std::size_t kPadding = 16;
     static constexpr std::size_t kMaxTaps = 16;
+    static constexpr std::size_t kWindow = 16384;  // coefficients per batch of odd reciprocals
 
     // At most kMaxTaps taps with distinct distances d >= 1; initial = g[0]; size: the number of
     // coefficients next() will produce in all, or more (size + 64 <= P).
     Holonomic(std::span<const Tap> taps, std::uint32_t initial, std::size_t size)
-        : table_end_(round_up((size + kBlock - 1) / kBlock * kBlock / 2 + 8)), reciprocals_(table_end_) {
+        : size_(round_up(size)), table_end_(round_up(size_ / 2 + 8)), reciprocals_(table_end_) {
         using detail::montgomery_form;
         std::array<Tap, kBlock> near{};  // near[d]: the short tap at distance d, or zeros
         for (const Tap& tap : taps) {
@@ -224,11 +294,16 @@ public:
                 r[t] = (tap.constant + multiply(tap.slope, std::uint32_t(t))) % kModulus;
                 r_slope[t] = tap.slope;
             }
-            v_[j] = columns(product(q, r), true);
-            if (slope_) v_slope_[j] = columns(product(q, r_slope), true);
+            const Series w = product(q, r), w_slope = product(q, r_slope);  // Q R0, Q R1 for this value
+            Series v;  // Q R0 - t Q R1
+            for (std::size_t t = 0; t < kBlock; ++t) v[t] = (w[t] + kModulus - multiply(std::uint32_t(t), w_slope[t])) % kModulus;
+            v_[j] = columns(v, true);
+            if (slope_) v_slope_[j] = columns(w_slope, false);
         }
         for (std::size_t t = 0; t < kBlock; ++t) first_[t] = multiply(initial, f[t]);
         for (std::uint32_t m = 1; m < kBlock; ++m) reciprocals_.data()[m] = montgomery_form(inverse(m));
+        if (size_ > kBlock)
+            for (auto& odd : odd_) odd.resize(kWindow / 2 + 32);
     }
 
     // Coefficients next() reads before out: kPadding, or the largest tap distance if larger.
@@ -246,26 +321,24 @@ public:
             done_ = end;
             return;
         }
-        prepare_reciprocals(end);
-        const std::uint32_t* odd = odd_.data();  // 1 / (n + t) for odd t
         while (done_ < end) {
+            if (done_ >= window_end_) begin_window();
             const std::uint32_t* const even = reciprocals_.data() + done_ / 2;  // 2 / (n + t) for even t
+            const std::uint32_t* const odd = odd_[window_ % 2].data() + (done_ + kWindow - window_end_) / 2;  // odd t
+            const std::size_t stop = std::min(end, window_end_);
             if (active_ == 0) {  // up to the first block a long tap reaches
-                std::size_t stop = end;
-                if (!far_.empty()) stop = std::min<std::size_t>(stop, far_[0].distance / kBlock * kBlock);
-                if (done_ < stop) {
-                    const std::size_t m = stop - done_;
-                    if (width_) (this->*homogeneous_kernel(width_, slope_))(out, m, even, odd, std::uint32_t(done_));
+                const std::size_t free = far_.empty() ? stop : std::min<std::size_t>(stop, far_[0].distance / kBlock * kBlock);
+                if (done_ < free) {
+                    const std::size_t m = free - done_;
+                    if (width_) (this->*homogeneous_kernel(width_, slope_))(out, m, even, odd);
                     else std::fill(out, out + m, 0);
                     out += m;
-                    odd += m / 2;
-                    done_ = stop;
+                    done_ = free;
                     continue;
                 }
             }
             forced(out, even, odd);
             out += kBlock;
-            odd += kBlock / 2;
             done_ += kBlock;
         }
     }
@@ -313,14 +386,24 @@ private:
         return c;
     }
 
-    // odd_ = 1 / m for the odd m in [done_, end); reciprocals_ filled over [done_, end) below
-    // table_end_, block by block (each block reads the table at half its indices).
-    void prepare_reciprocals(std::size_t end) {
-        const std::size_t count = (end - done_) / 2;
-        odd_.resize(count + 32);
-        detail::batch_inverses(std::uint32_t(done_ + 1), 2, count, odd_.data());
-        for (std::size_t n = done_, k = 0; n < std::min(end, table_end_); n += kBlock, k += kBlock / 2)
-            reciprocals(reciprocals_.data() + n / 2, odd_.data() + k, reciprocals_.data() + n);
+    // The next window [w kWindow, (w + 1) kWindow): its odd reciprocals in odd_[w % 2] (computed
+    // during window w - 1, finished here), the table over it below table_end_, block by block
+    // (each block reads the table at half its indices). Starts the odd reciprocals of window w + 1,
+    // which the homogeneous kernels advance by a half step per block.
+    void begin_window() {
+        if (window_end_ == 0) start_inverter(0);
+        inverter_.finish();
+        window_ = window_end_ / kWindow;
+        const std::uint32_t* const odd = odd_[window_ % 2].data();
+        for (std::size_t n = window_end_, k = 0; n < std::min(window_end_ + kWindow, table_end_); n += kBlock, k += kBlock / 2)
+            reciprocals(reciprocals_.data() + n / 2, odd + k, reciprocals_.data() + n);
+        window_end_ += kWindow;
+        if (window_end_ < size_) start_inverter(window_ + 1);
+    }
+
+    void start_inverter(std::size_t window) {
+        const std::size_t first = window * kWindow;
+        inverter_.start(std::uint32_t(first + 1), 2, std::min(kWindow, size_ - first) / 2, odd_[window % 2].data());
     }
 
     // y[t] = 1 / (n + t) for t < 16 (Montgomery forms): even t from even[t / 2] = 2 / (n + t),
@@ -343,13 +426,13 @@ private:
         return _mm256_permute2x128_si256(x, x, kHalf * 0x11);
     }
 
-    // sum over j < width of column[j] g[n - 1 - j] for kJ = 0 .. width - 1, where last = g[n - 16, n).
-    template <std::size_t... kJ>
-    [[gnu::always_inline]] static Lanes state_part(const Lanes* column, const Block& last, std::index_sequence<kJ...>) {
+    // sums = V S and, if kSlope, slope = V' S (after V S, which the chain from block to block
+    // needs first), for the state S = g[n - 1 - j], j = kJ = 0 .. w - 1, where last = g[n - 16, n).
+    template <bool kSlope, std::size_t... kJ>
+    [[gnu::always_inline]] void state_part(const Block& last, Lanes& sums, Lanes& slope, std::index_sequence<kJ...>) const {
         const Vec halves[4] = {half<1>(last.hi), half<0>(last.hi), half<1>(last.lo), half<0>(last.lo)};
-        Lanes sums{};
-        (add_state<kJ>(sums, column[kJ], halves), ...);
-        return sums;
+        (add_state<kJ>(sums, v_[kJ], halves), ...);
+        if constexpr (kSlope) (add_state<kJ>(slope, v_slope_[kJ], halves), ...);
     }
 
     // sums += column g[n - 1 - j]: dword 3 - j % 4 of halves[j / 4].
@@ -377,14 +460,16 @@ private:
         w[0] = lo, w[1] = _mm256_srli_epi64(lo, 32), w[2] = hi, w[3] = _mm256_srli_epi64(hi, 32);
     }
 
-    // The block F (y ⊙ W) mod x^16, W in the low dwords of w, below 4P, with even lanes halved;
-    // even = 2 y at even t, odd = y at odd t. The upper half, which the next block reads, comes
-    // first, with columns s even and odd in two chains of additions; the lower half follows,
-    // off the chain from block to block.
-    [[gnu::always_inline]] Block solve(const Vec (&w)[4], const std::uint32_t* even, const std::uint32_t* odd) const {
+    // The block F H mod x^16, H = y ⊙ W + V' S: W in the low dwords of w, below 4P, with even lanes
+    // halved; slope = V' S, kSlope products per lane (0: none); even = 2 y at even t, odd = y at
+    // odd t. The upper half, which the next block reads, comes first, with columns s even and odd
+    // in two chains of additions; the lower half follows, off the chain from block to block.
+    template <std::size_t kSlope>
+    [[gnu::always_inline]] Block solve(const Vec (&w)[4], const Lanes& slope, const std::uint32_t* even,
+                                       const std::uint32_t* odd) const {
         using namespace detail;
-        const Vec h[4] = {scale(w[0], widen(even)), scale(w[1], widen(odd)), scale(w[2], widen(even + 4)),
-                          scale(w[3], widen(odd + 4))};
+        const Vec h[4] = {scale<kSlope>(w[0], widen(even), slope.q[0]), scale<kSlope>(w[1], widen(odd), slope.q[1]),
+                          scale<kSlope>(w[2], widen(even + 4), slope.q[2]), scale<kSlope>(w[3], widen(odd + 4), slope.q[3])};
         Vec upper_even[2]{}, upper_odd[2]{}, lower[2]{};
         rows<2>(upper_even, upper_odd, h, std::make_index_sequence<kBlock>());
         const Vec hi = reduce<true>(_mm256_add_epi64(upper_even[0], upper_odd[0]),  // 16 products
@@ -410,42 +495,28 @@ private:
         asm("" : "+x"(sums[0]), "+x"(sums[1]));
     }
 
-    // count (a multiple of kBlock) coefficients where no long tap reaches; n = the first index.
+    // count (a multiple of kBlock) coefficients where no long tap reaches.
     template <std::size_t kWidth, bool kSlope>
-    void homogeneous(std::uint32_t* out, std::size_t count, const std::uint32_t* even, const std::uint32_t* odd,
-                     std::uint32_t n) const {
-        constexpr bool kFold = kWidth + kSlope > detail::kUnfolded;
+    void homogeneous(std::uint32_t* out, std::size_t count, const std::uint32_t* even, const std::uint32_t* odd) {
+        constexpr bool kFold = kWidth > detail::kUnfolded;
         constexpr auto kColumns = std::make_index_sequence<kWidth>();
         Block last = load_block(out - kBlock);
-        for (std::uint32_t* const end = out + count; out < end; out += kBlock, even += kBlock / 2, odd += kBlock / 2, n += kBlock) {
-            Lanes sums = state_part(v_, last, kColumns);
-            if constexpr (kSlope) add_slope<(kWidth > detail::kUnfolded)>(sums, state_part(v_slope_, last, kColumns), n);
+        for (std::uint32_t* const end = out + count; out < end; out += kBlock, even += kBlock / 2, odd += kBlock / 2) {
+            Lanes sums{}, slope{};
+            state_part<kSlope>(last, sums, slope, kColumns);
             using detail::partial;
             const Vec w[4] = {partial<kFold>(sums.q[0]), partial<kFold>(sums.q[1]), partial<kFold>(sums.q[2]),
                               partial<kFold>(sums.q[3])};
-            last = solve(w, even, odd);
+            last = solve<kSlope ? kWidth : 0>(w, slope, even, odd);
             detail::store(out, last.lo);
             detail::store(out + 8, last.hi);
+            inverter_.step();  // independent work for the cycles the chain from block to block leaves
         }
     }
 
     static Block load_block(const std::uint32_t* p) { return {detail::load(p), detail::load(p + 8)}; }
 
-    // sums += n x, x = V' S: x reduced, then one product per lane with n 2^32. sums has at most
-    // 15 products; one more keeps it below 2^64.
-    template <bool kFold>
-    [[gnu::always_inline]] static void add_slope(Lanes& sums, const Lanes& x, std::uint32_t n) {
-        using namespace detail;
-        const Vec lo = reduce<kFold>(x.q[0], x.q[1]), hi = reduce<kFold>(x.q[2], x.q[3]);
-        const Vec m = broadcast(montgomery_form(n));
-        sums.q[0] = multiply_add(sums.q[0], lo, m);
-        sums.q[1] = multiply_add(sums.q[1], _mm256_srli_epi64(lo, 32), m);
-        sums.q[2] = multiply_add(sums.q[2], hi, m);
-        sums.q[3] = multiply_add(sums.q[3], _mm256_srli_epi64(hi, 32), m);
-    }
-
-    using Kernel = void (Holonomic::*)(std::uint32_t*, std::size_t, const std::uint32_t*, const std::uint32_t*,
-                                       std::uint32_t) const;
+    using Kernel = void (Holonomic::*)(std::uint32_t*, std::size_t, const std::uint32_t*, const std::uint32_t*);
 
     static Kernel homogeneous_kernel(std::size_t width, bool slope) {
         static constexpr auto kKernels = []<std::size_t... W>(std::index_sequence<W...>) {
@@ -486,9 +557,9 @@ private:
             store(out + 8, montgomery(load(r + 8), load(y + 8)));
             return;
         }
-        // W = V S (+ n V' S) + Q R_long, each part reduced to [0, P).
-        Lanes state = state_part(v_, out, width_);
-        if (slope_) add_slope<true>(state, state_part(v_slope_, out, width_), n);
+        // W = V S + Q R_long, each part reduced to [0, P); H = y ⊙ W + V' S.
+        const Lanes state = state_part(v_, out, width_);
+        const Lanes state_slope = slope_ ? state_part(v_slope_, out, width_) : Lanes{};
         Lanes far{};
         for (std::size_t s = 0; s < kBlock; ++s) {
             const Vec x = broadcast(r[s]);
@@ -500,7 +571,7 @@ private:
                                           reduce<true>(far.q[2 * half], far.q[2 * half + 1])));
         Vec w[4];
         spread(sum, w);
-        const Block g = solve(w, even, odd);
+        const Block g = slope_ ? solve<kBlock - 1>(w, state_slope, even, odd) : solve<0>(w, state_slope, even, odd);
         store(out, g.lo);
         store(out + 8, g.hi);
     }
@@ -530,9 +601,13 @@ private:
     Lanes v_slope_[kBlock - 1];                      // V'
     Series first_;                                   // g[0, 16) = g[0] F
     std::vector<Tap> far_;                           // long taps by increasing distance, a and b times 2^32
+    std::size_t size_;                               // coefficients next() produces in all, or more
     std::size_t table_end_;                          // reciprocals_ holds [1, table_end_) once next() reaches it
     detail::HugeWords reciprocals_;                  // 2^32 / m mod P at m
-    std::vector<std::uint32_t> odd_;                 // 2^32 / (n + t) for the odd n + t of a next() call
+    std::array<std::vector<std::uint32_t>, 2> odd_;  // 2^32 / m for the odd m of window w in odd_[w % 2]
+    detail::BatchInverter inverter_;                 // fills odd_ for the window after the current one
+    std::size_t window_ = 0;                         // the current window
+    std::size_t window_end_ = 0;                     // its end; 0 before the first
     std::size_t active_ = 0;                         // far_[0, active_) reach the current block
     std::size_t done_ = 0;                           // g[0, done_) is solved
 };

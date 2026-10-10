@@ -955,21 +955,28 @@ void check_holonomic_reduce() {
     }
 }
 
+// scale<kTerms>: w y + s with w < 4P, y < P and s up to kTerms (P - 1)^2.
+template <std::size_t kTerms>
 void check_holonomic_scale() {
     namespace detail = poly::sparse::detail;
     const u32 unscale = poly::sparse::inverse(detail::kR);
     const u64 edges[] = {0, 1, P - 1, P, 2 * u64(P), 4 * u64(P) - 1};
+    const u64 max = kTerms * u64(P - 1) * (P - 1);
     for (int i = 0; i < 4000; ++i) {
-        u64 w[4], y[4];
+        u64 w[4], y[4], s[4];
         for (int k = 0; k < 4; ++k) {
             w[k] = i % 3 ? rng() % (4 * u64(P)) : edges[rng() % 6];
             y[k] = i % 5 ? rng() % P : P - 1;
+            s[k] = kTerms == 0 ? 0 : i % 4 == 0 ? max - rng() % (u64(1) << 40) : i % 7 == 0 ? max : rng() % max;
         }
         alignas(32) u64 got[4];
         _mm256_store_si256(reinterpret_cast<__m256i*>(got),
-                           detail::scale(_mm256_setr_epi64x(w[0], w[1], w[2], w[3]), _mm256_setr_epi64x(y[0], y[1], y[2], y[3])));
-        for (int k = 0; k < 4; ++k)
-            expect(got[k] == mul(mul(u32(w[k] % P), u32(y[k])), unscale), "holonomic scale", w[k], y[k]);
+                           detail::scale<kTerms>(_mm256_setr_epi64x(w[0], w[1], w[2], w[3]), _mm256_setr_epi64x(y[0], y[1], y[2], y[3]),
+                                                 _mm256_setr_epi64x(s[0], s[1], s[2], s[3])));
+        for (int k = 0; k < 4; ++k) {
+            const u32 want = mul(add(mul(u32(w[k] % P), u32(y[k])), u32(s[k] % P)), unscale);
+            expect(got[k] == want, "holonomic scale", w[k] * 100 + kTerms, s[k]);
+        }
     }
 }
 
@@ -986,7 +993,7 @@ void test_inverses() {
 
 // n g[n] = sum over taps (d, a, b) of (a + b n) g[n - d], g[0] = initial, n < size.
 std::vector<u32> holonomic_reference(const Taps& taps, u32 initial, std::size_t size) {
-    static const auto inv = reciprocal_table(1 << 16);
+    static const auto inv = reciprocal_table(1 << 17);
     std::vector<u32> g(size, 0);
     if (size) g[0] = initial;
     for (std::size_t i = 1; i < size; ++i) {
@@ -1037,7 +1044,13 @@ Taps random_holonomic_taps(std::vector<u32> pool, std::size_t count, bool worst,
 void test_holonomic() {
     check_holonomic_reduce<false>();
     check_holonomic_reduce<true>();
-    check_holonomic_scale();
+    check_holonomic_scale<0>();
+    check_holonomic_scale<1>();
+    check_holonomic_scale<8>();
+    check_holonomic_scale<9>();
+    check_holonomic_scale<10>();
+    check_holonomic_scale<11>();
+    check_holonomic_scale<15>();
     test_inverses();
     const std::vector<u32> edges = {1, 2, 7, 8, 12, 13, 14, 15, 16, 17, 31, 32, 33, 47, 48, 63, 64, 65, 100, 1000};
     for (int round = 0; round < 2000; ++round) {
@@ -1067,6 +1080,14 @@ void test_holonomic() {
     check_holonomic(random_holonomic_taps(range(1, 16), 15, true, false), P - 1, 20000);
     check_holonomic(random_holonomic_taps(range(16, 40), 16, true, true), P - 1, 20000);
     check_holonomic(random_holonomic_taps(range(1, 40), 16, true, true), P - 1, 20000);
+    // Across several windows of odd reciprocals (and the end of the table of the first half), with
+    // long taps reaching blocks at and next to window edges.
+    const u32 window = u32(Holonomic::kWindow);
+    for (const std::size_t n : {std::size_t(3 * window + 100), std::size_t(5 * window)}) {
+        check_holonomic(random_holonomic_taps(range(1, 16), 6, false, true), u32(pick(P)), n);
+        check_holonomic({{3, u32(pick(P)), u32(pick(P))}, {window - 16, u32(pick(P)), u32(pick(P))},
+                         {2 * window + 5, u32(pick(P)), 0}}, 1, n);
+    }
 }
 
 // a[k] = [x^(n-1)] g^k from the powers of g.

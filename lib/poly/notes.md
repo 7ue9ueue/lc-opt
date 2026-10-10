@@ -247,17 +247,23 @@ the same with e = 1/2. log is `Recurrence` on G = n g (taps (d, -f_d), r = n f_n
   (1 - B)(n + θ) G - (A + B') G = R, R the terms reaching before the block. F (the solution for
   n = 0, F[0] = 1) solves the n = 0 operator, so G = F U gives (1 - B) F (n + θ) U = R:
   G = F (y ⊙ W) mod x^16, W = Q R, Q = 1 / ((1 - B) F), y[t] = 1 / (n + t) (variation of
-  constants). From the state S (last w values) W = V S, w columns, plus n V' S with slopes;
-  long taps add Q R_long (a 16 x 16 triangle). Verified first in a Python prototype.
-- Per block: W (4w `vpmuludq`, partial Montgomery step to < 4P), H = y ⊙ W (one product, step,
-  subtraction), G = F H (triangle: 46 `vpmuludq`, upper half with 16 products folded). The next
-  block's state is G's upper half, broadcast from registers.
+  constants). Long taps add Q R_long (a 16 x 16 triangle). Verified first in a Python prototype.
+- Slopes: from the state S (last w values), R = R0 + n R1, and n y[t] = 1 - t y[t] gives
+  y ⊙ W = y ⊙ (Q R0 - t Q R1) + Q R1. So H = y ⊙ (V S) + V' S with V = Q R0 - t Q R1 and
+  V' = Q R1 (w columns each); V' S joins the product with y before its Montgomery step.
+- Per block: W = V S (4w `vpmuludq`, partial Montgomery step to < 4P), H = y ⊙ W + V' S (one
+  product, 4w with slopes, one step, 1 to 3 subtractions), G = F H (triangle: 46 `vpmuludq`,
+  upper half with 16 products folded). The next block's state is G's upper half, broadcast from
+  registers.
 - Costs per coefficient (w = 7): W 7 products, H 1, triangle 8.5, against w = 7 for 1/f. About
   260 vector ops per block; 1.975 ms for 10^6 coefficients without the dependency from block to
   block, 2.21 ms with it (`lc-amd`, in memory, reciprocals included): mostly throughput.
-- Reciprocals 2^32 / m: odd m by `batch_inverses` per `next` call (step 2); even m from a table
-  of the first half, 2^32 / m = (2^32 / (m / 2)) / 2, with the 1/2 folded into the even lanes of
-  V, V', Q (`columns(..., true)`). The table (2 MiB at N = 10^6) is in transparent huge pages.
+- Reciprocals 2^32 / m: odd m by batch inversion (`BatchInverter`) in windows of 16384
+  coefficients; even m from a table of the first half, 2^32 / m = (2^32 / (m / 2)) / 2, with the
+  1/2 folded into the even lanes of V, Q (`columns(..., true)`; not V', added after y). The table
+  (2 MiB at N = 10^6) is in transparent huge pages. The kernel loop runs the next window's batch
+  inversion, a half step (two chains of 8 lanes) per block: independent work for the cycles the
+  chain from block to block leaves free. The 32 lane totals by a product tree (as `Divider`).
 
 `Divider` (`divider.hpp`): g[n] = G[n] / n, called on consecutive ranges (multiples of 64 but
 the last), in place or not. For log: G from `Recurrence` in chunks, divided after the chunk's
@@ -733,6 +739,24 @@ products 1.77 and 1.69).
   compositional_inverse 1.0017; all 3 0.9830. Judged: exp
   [409402](https://judge.yosupo.jp/submission/409402) AC 16 ms (was 18; two earlier runs had
   launch spikes, clean 16).
+
+2026-10-10, claude (issue #72, pow_of_formal_power_series_sparse):
+- `holonomic.hpp`: slopes after the reciprocal scale (H = y ⊙ (V S) + V' S, above; was
+  W = V S + n V' S with V' S reduced and multiplied by n on the chain); `scale<k>` takes a sum of
+  k products into its Montgomery step (k <= 8: two subtractions, 9 and 10: three, more: the sum
+  folded first); `BatchInverter` (batch inversion in half steps) and windows of odd reciprocals
+  advanced by the kernel loop; V columns before V' columns. API unchanged. Bundles changed: exp,
+  log (`divider.hpp` includes `holonomic.hpp`), pow (new).
+- In process (`lc-amd`, 10^6 coefficients in chunks of 25600, medians, ms), pow w = 2, 6 and exp
+  w = 7: main 2.55, 2.95, 2.28; slopes 2.24, 2.52, -; reciprocals in the loop 2.00, 2.38, 2.10;
+  V first 1.98, 2.36, 2.10. Probes: main without the dependency from block to block 2.23, 2.60
+  (pow), without the reciprocals 2.19, 2.59; after this round the dependency costs nothing.
+  Windows of 32768: no change.
+- Tests: `scale<k>` for k = 0, 1, 8, 9, 10, 11, 15 at its bounds (sums up to k (P - 1)^2);
+  recurrences over 3 and 5 windows with long taps at window edges. Mutations (no t Q R1 term,
+  V' halved, one subtraction fewer, no 4P subtraction at k = 9, 10, no fold at k > 10, no finish
+  of the window's batch, a wrong offset into the odd reciprocals) fail them.
+- `judge.py bench` (`lc-amd`, 21 rounds) against main: exp 0.9627, log 0.9940.
 
 ## Sources
 

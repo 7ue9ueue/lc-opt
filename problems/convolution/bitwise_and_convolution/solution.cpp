@@ -6,8 +6,10 @@
 // ends, so equal columns of the rows of a and b spread over 4 groups of cache sets (without a skew,
 // the column pass takes 12 times as long). Each band's rows are transformed over their own bits
 // right after it is parsed; one pass over columns then does the row-bit levels of a and b, the
-// product and the inverse row-bit levels; each row then gets its inverse low levels and is printed.
+// product and the inverse row-bit levels; each row then gets its inverse low levels, and the
+// band's values are printed as they become ready.
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "lib/io/bulk32.hpp"
@@ -62,9 +64,9 @@ template <bool Inverse, int K>
             if (!(k & bit)) x[k] = step<Inverse>(x[k], x[k | bit]);
 }
 
-// x[i] lane j <-> x[j] lane i.
-[[gnu::always_inline]] inline void transpose(Vec* x) {
-    Vec t[8], u[8];
+// The 4x4 transposes of x[0, 4) and of x[4, 8) inside each 128-bit lane.
+[[gnu::always_inline]] inline void transpose_lanes(Vec* x) {
+    Vec t[8];
 #pragma GCC unroll 4
     for (int k = 0; k < 8; k += 2) {
         t[k] = _mm256_unpacklo_epi32(x[k], x[k + 1]);
@@ -72,16 +74,24 @@ template <bool Inverse, int K>
     }
 #pragma GCC unroll 2
     for (int k = 0; k < 8; k += 4) {
-        u[k] = _mm256_unpacklo_epi64(t[k], t[k + 2]);
-        u[k + 1] = _mm256_unpackhi_epi64(t[k], t[k + 2]);
-        u[k + 2] = _mm256_unpacklo_epi64(t[k + 1], t[k + 3]);
-        u[k + 3] = _mm256_unpackhi_epi64(t[k + 1], t[k + 3]);
+        x[k] = _mm256_unpacklo_epi64(t[k], t[k + 2]);
+        x[k + 1] = _mm256_unpackhi_epi64(t[k], t[k + 2]);
+        x[k + 2] = _mm256_unpacklo_epi64(t[k + 1], t[k + 3]);
+        x[k + 3] = _mm256_unpackhi_epi64(t[k + 1], t[k + 3]);
     }
+}
+
+// x[i] lane j = f[j] lane i. The loads swap the two off-diagonal 4x4 blocks with 128-bit broadcasts
+// and blends, which run on any of Zen 3's 4 vector pipes (shuffles run on 2); then each 128-bit
+// lane is transposed.
+[[gnu::always_inline]] inline void load_transposed(const Vec* f, Vec* x) {
+    const auto* half = reinterpret_cast<const __m128i*>(f);  // half[2k], half[2k + 1]: f[k] low, high
 #pragma GCC unroll 4
     for (int k = 0; k < 4; ++k) {
-        x[k] = _mm256_permute2x128_si256(u[k], u[k + 4], 0x20);
-        x[k + 4] = _mm256_permute2x128_si256(u[k], u[k + 4], 0x31);
+        x[k] = _mm256_blend_epi32(f[k], _mm256_broadcastsi128_si256(half[2 * k + 8]), 0xF0);
+        x[k + 4] = _mm256_blend_epi32(_mm256_broadcastsi128_si256(half[2 * k + 1]), f[k + 4], 0xF0);
     }
+    transpose_lanes(x);
 }
 
 // Levels of K vector-index bits from stride h (vectors) on f[0, count).
@@ -107,17 +117,21 @@ void sweeps(Vec* f, std::size_t count, int from, int to) {
     if (to - from == 1) sweep<Inverse, 1>(f, count, std::size_t(1) << from);
 }
 
-// The lane bits and the 3 vector-index bits above them, tile by tile (8 vectors): the vector bits,
-// a transpose, then the former lane bits. The transform leaves each tile transposed; the inverse
-// takes transposed tiles and restores them.
+// The lane bits and the 3 vector-index bits above them in each tile of 8 vectors: a sweep does the
+// vector bits, then each tile is transposed and its former lane bits done. The transform leaves
+// each tile transposed; the inverse takes transposed tiles and restores them. On Zen 3, one pass
+// doing both took 32 cycles per tile in L1; these two take 27.5. The transform also prefetches
+// `next` (count vectors): its first pass is light, and its pieces come from L3 right after parsing.
 template <bool Inverse>
-void tiles(Vec* f, std::size_t count) {
+void tiles(Vec* f, std::size_t count, const Vec* next) {
+    sweep<Inverse, 3>(f, count, 1);
     for (std::size_t g = 0; g < count; g += 8) {
+        if constexpr (!Inverse)
+#pragma GCC unroll 4
+            for (int line = 0; line < 4; ++line)
+                _mm_prefetch(reinterpret_cast<const char*>(next + g) + 64 * line, _MM_HINT_T0);
         Vec x[8];
-#pragma GCC unroll 8
-        for (int k = 0; k < 8; ++k) x[k] = f[g + k];
-        butterflies<Inverse, 3>(x);
-        transpose(x);
+        load_transposed(f + g, x);
         butterflies<Inverse, 3>(x);
 #pragma GCC unroll 8
         for (int k = 0; k < 8; ++k) f[g + k] = x[k];
@@ -134,7 +148,7 @@ void row_levels(std::uint32_t* row, int bits) {
     const std::size_t piece = std::size_t(1) << piece_bits;
     if constexpr (Inverse) sweeps<true>(f, count, piece_bits, bits - 3);
     for (std::size_t p = 0; p < count; p += piece) {
-        tiles<Inverse>(f + p, piece);
+        tiles<Inverse>(f + p, piece, f + p + piece);  // past the last piece: prefetches never fault
         sweeps<Inverse>(f + p, piece, 3, piece_bits);
     }
     if constexpr (!Inverse) sweeps<false>(f, count, piece_bits, bits - 3);
@@ -191,13 +205,37 @@ std::uint32_t* allocate(std::size_t words) {
     return reinterpret_cast<std::uint32_t*>(start - small);
 }
 
+// Marks a mapped input as read once, so the kernel skips marking each page accessed when the
+// Reader unmaps it (0.04 ms per 20 MB). The mapping starts at the page of the first token.
+void advise_sequential(const io::Reader& in) {
+    struct stat st;
+    if (::fstat(0, &st) != 0 || !S_ISREG(st.st_mode) || std::size_t(st.st_size) <= io::detail::kMapAbove) return;
+    const auto start = reinterpret_cast<std::uintptr_t>(in.scan().cur) & ~std::uintptr_t(4095);
+    ::madvise(reinterpret_cast<void*>(start), std::size_t(st.st_size), MADV_SEQUENTIAL);
+}
+
+// The inverse low levels of each row of a band, then its values as fixed-width text: whole blocks
+// as rows finish, the rest at the band's end, so every write(2) goes straight from text.
+void print_band(io::Writer& out, std::uint32_t* band, std::size_t rows, std::size_t block, std::size_t count,
+                int block_log, char* text) {
+    std::size_t printed = 0;
+    for (std::size_t r = 0; r < rows; ++r) {
+        row_levels<true>(band + r * block, block_log);
+        const std::size_t ready = std::min((r + 1) * block, count);
+        const std::size_t now = r + 1 < rows ? (ready - printed) / fields::kBlock * fields::kBlock : ready - printed;
+        if (now) fields::write(out, band + printed, now, text);
+        printed += now;
+    }
+}
+
 void solve() {
     io::Reader in;
     const int n = int(in.read<std::uint32_t>());
+    advise_sequential(in);
     const std::size_t total = std::size_t(1) << n;
     const int lg = std::max(n, kMinLog), block_log = std::min(lg, kBlockLog), rows_log = lg - block_log;
     const std::size_t block = std::size_t(1) << block_log, rows = std::size_t(1) << rows_log;
-    const std::size_t band_rows = std::min(rows, std::size_t(1) << kBandRowsLog), bands = rows / band_rows;
+    const std::size_t band_rows = std::min(rows, std::size_t(1) << kBandRowsLog);
     const std::size_t size = row_offset(rows - 1, block) + block + kBandSkew;  // an array, then a skew
     std::uint32_t* const a = allocate(2 * size);
     std::uint32_t* const b = a + size;
@@ -214,10 +252,8 @@ void solve() {
     }
     io::Writer out;
     char* const text = text_buffer<fields::kTextBytes>(b, size * sizeof(std::uint32_t));  // b is dead
-    for (std::size_t r = 0; r < rows; ++r) {
-        row_levels<true>(a + row_offset(r, block), block_log);
-        fields::write(out, a + row_offset(r, block), std::min(block, total), text);
-    }
+    for (std::size_t r = 0; r < rows; r += band_rows)
+        print_band(out, a + row_offset(r, block), band_rows, block, std::min(band_rows * block, total), block_log, text);
 }
 
 #ifdef __ELF__

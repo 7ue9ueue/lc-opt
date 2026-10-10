@@ -36,6 +36,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [composition_of_formal_power_series](problems/polynomial/composition_of_formal_power_series) | [3 ms](https://judge.yosupo.jp/submission/409336) | 9 ms |
 | [composition_of_formal_power_series_large](problems/polynomial/composition_of_formal_power_series_large) | [35 ms](https://judge.yosupo.jp/submission/409535) | 72 ms |
 | [compositional_inverse_of_formal_power_series](problems/polynomial/compositional_inverse_of_formal_power_series) | [3 ms](https://judge.yosupo.jp/submission/409399) | 14 ms |
+| [compositional_inverse_of_formal_power_series_large](problems/polynomial/compositional_inverse_of_formal_power_series_large) | [47 ms](https://judge.yosupo.jp/submission/409541) | 93 ms |
 | [inv_of_formal_power_series_sparse](problems/polynomial/inv_of_formal_power_series_sparse) | [10 ms](https://judge.yosupo.jp/submission/409351) | 24 ms |
 | [exp_of_formal_power_series_sparse](problems/polynomial/exp_of_formal_power_series_sparse) | [7 ms](https://judge.yosupo.jp/submission/409367) | 39 ms |
 | [log_of_formal_power_series_sparse](problems/polynomial/log_of_formal_power_series_sparse) | [14 ms](https://judge.yosupo.jp/submission/409396) | 38 ms |
@@ -45,6 +46,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |
 | [multipoint_evaluation_on_geometric_sequence](problems/polynomial/multipoint_evaluation_on_geometric_sequence) | [10 ms](https://judge.yosupo.jp/submission/409475) | 34 ms |
 | [polynomial_interpolation_on_geometric_sequence](problems/polynomial/polynomial_interpolation_on_geometric_sequence) | [15 ms](https://judge.yosupo.jp/submission/409510) | 90 ms |
+| [polynomial_interpolation](problems/polynomial/polynomial_interpolation) | [20 ms](https://judge.yosupo.jp/submission/409545) | 55 ms |
 | [polynomial_taylor_shift](problems/polynomial/polynomial_taylor_shift) | [10 ms](https://judge.yosupo.jp/submission/409534) | 33 ms |
 | [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |
 

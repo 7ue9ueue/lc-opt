@@ -1,199 +1,16 @@
-// a * b mod 998244353: one cyclic NTT of length 2^lg >= N + M - 1 (lib/ntt), output in fixed-width
-// fields (fields.hpp). For 2^lg = 2 * 4^j >= 1024 (2^20 at the maximum) the forward top level is a
-// radix-8 pass here, the bottom stage comes from bottom.hpp and the inverse top from top.hpp
-// (Product); other lengths use ntt::Convolution as is. Inputs of 9-digit or 1-digit tokens take a
+// a * b mod 998244353: one cyclic NTT of length 2^lg >= N + M - 1, output in fixed-width fields
+// (fields.hpp). Factors of at most half the length (all large tests) use ntt::Product
+// (lib/ntt/product.hpp), other sizes ntt::Convolution. Inputs of 9-digit or 1-digit tokens take a
 // fixed-width parser.
 #include <unistd.h>
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
-#include "lib/ntt/ntt.hpp"
-#include "bottom.hpp"
-#include "top.hpp"
+#include "lib/ntt/product.hpp"
 #include "fields.hpp"
 
 namespace {
 
-using ntt::detail::add;
-using ntt::detail::diff;
-using ntt::detail::Factor;
-using ntt::detail::kP;
-using ntt::detail::reduce;
-using ntt::detail::slot;
-using ntt::detail::Vec;
-
-// Shoup product, < 2P for any x < 2^32.
-Vec times(Vec x, const Factor& f) { return ntt::detail::multiply(x, f); }
-
-// x - y + P for y < P.
-Vec diff_canonical(Vec x, Vec y) {
-    return _mm256_sub_epi32(_mm256_add_epi32(x, ntt::detail::broadcast(kP)), y);
-}
-
-// First level of a factor f[0, 4q) whose upper half f[4q, 8q) is zero. Modulo x^(n/2) - 1 and
-// x^(n/2) + 1 the factor is unchanged, so one pass reads it once and writes the first radix-4
-// group of each half: group 0 to f[0, 4q), group 1 to f[4q, 8q). ntt::Convolution copies the
-// lower half up and runs the two groups as separate passes. Inputs canonical; outputs < 4P.
-void forward_radix8(Vec* f, std::size_t q, const std::uint32_t* roots) {
-    const Factor i(roots[1], roots[9]), y(roots[2], roots[10]), z(roots[3], roots[11]);
-    for (std::size_t j = 0; j < q; ++j) {
-        const Vec f0 = f[j], f1 = f[j + q], f2 = f[j + 2 * q], f3 = f[j + 3 * q];
-        // Group 0 (twiddles 1, 1, i): every term < 2P.
-        const Vec g0 = add(f0, f2), g1 = add(f1, f3);
-        const Vec h0 = diff_canonical(f0, f2), ih1 = times(diff_canonical(f1, f3), i);
-        f[j] = add(g0, g1), f[j + q] = diff(g0, g1);
-        f[j + 2 * q] = add(h0, ih1), f[j + 3 * q] = diff(h0, ih1);
-        // Group 1 (twiddles i, y, z).
-        const Vec if2 = times(f2, i), if3 = times(f3, i);
-        const Vec u0 = reduce(add(f0, if2), 2 * kP), v0 = reduce(diff(f0, if2), 2 * kP);
-        const Vec yu1 = times(add(f1, if3), y), zv1 = times(diff(f1, if3), z);
-        f[j + 4 * q] = add(u0, yu1), f[j + 5 * q] = diff(u0, yu1);
-        f[j + 6 * q] = add(v0, zv1), f[j + 7 * q] = diff(v0, zv1);
-    }
-}
-
-// ntt::detail::Recursion with the bottom stage of bottom.hpp: two groups per inlined kernel and
-// no leaf weight array (13% less time in the bottom stage on Zen 3). Subtrees of at least 16
-// vectors, so tiles start at even group indices.
-class Subtrees {
-public:
-    Subtrees(const std::uint32_t* roots, const std::uint32_t* inverse_roots) : r_(roots), ir_(inverse_roots) {}
-
-    // Forward transforms of a and b, leaf products into a, inverse transform; nv = 4^j >= 16.
-    void visit(Vec* a, Vec* b, std::size_t nv, std::size_t k) const {
-        switch (nv) {
-        case 16: return tile<16>(a, b, k);
-        case 64: return tile<64>(a, b, k);
-        case 256: return tile<256>(a, b, k);
-        }
-        const std::size_t h = nv / 4;
-        forward(a, b, h, k);
-        for (std::size_t t = 0; t < 4; ++t) visit(a + t * h, b + t * h, h, 4 * k + t);
-        inverse(a, h, k);
-    }
-
-private:
-    template <std::size_t NV>
-    [[gnu::noinline]] void tile(Vec* a, Vec* b, std::size_t k) const {
-        for (std::size_t h = NV / 4; h >= 4; h /= 4)
-            for (std::size_t j = 0, g = k * (NV / (4 * h)); j < NV; j += 4 * h, ++g) forward(a + j, b + j, h, g);
-        bottom(a, b, NV, k * (NV / 4));
-        for (std::size_t h = 4; h < NV; h *= 4)
-            for (std::size_t j = 0, g = k * (NV / (4 * h)); j < NV; j += 4 * h, ++g) inverse(a + j, h, g);
-    }
-
-    void forward(Vec* a, Vec* b, std::size_t h, std::size_t k) const {
-        if (k == 0) {
-            ntt::kernels::forward_identity(a, h, r_);
-            ntt::kernels::forward_identity(b, h, r_);
-            return;
-        }
-        const std::uint32_t *x = r_ + slot(k), *y = r_ + slot(2 * k);
-        if (h == 4) return ntt::kernels::forward_pair(a, b, h, x, y);
-        ntt::kernels::forward(a, h, x, y);
-        ntt::kernels::forward(b, h, x, y);
-    }
-
-    void inverse(Vec* a, std::size_t h, std::size_t k) const {
-        if (k == 0) return ntt::kernels::inverse_identity(a, h, ir_);
-        ntt::kernels::inverse(a, h, ir_ + slot(k), ir_ + slot(2 * k));
-    }
-
-    struct alignas(64) Leaves {
-        std::uint32_t window[4][16];  // [w A_t, A_t]: x^i A_t mod x^8 - w is a sliding window
-        std::uint32_t coefficients[4][8];
-    };
-
-    // Groups [first, first + nv / 4) with h = 1 and their leaves, two per kernel; first is even.
-    // The next two groups' forward half overlaps the current two's products and inverse.
-    void bottom(Vec* a, Vec* b, std::size_t nv, std::size_t first) const {
-        Leaves leaves[2][2];
-        bottom_kernels::first(a, b, leaves[0], r_ + slot(first), r_ + slot(2 * first));
-        for (std::size_t j = 0, k = first;; j += 8, k += 2) {
-            const std::size_t cur = j / 8 % 2, next = cur ^ 1;
-            const std::uint32_t *ix = ir_ + slot(k), *iy = ir_ + slot(2 * k);
-            if (j + 8 == nv) return bottom_kernels::last(a + j, leaves[cur], ix, iy);
-            bottom_kernels::both(a + j + 8, b + j + 8, leaves[next], r_ + slot(k + 2), r_ + slot(2 * k + 4), a + j,
-                                 leaves[cur], ix, iy);
-        }
-    }
-
-    const std::uint32_t *r_, *ir_;
-};
-
-// a * b when the transform length 2^lg is 2 * 4^j >= 1024 and each factor fills at most half of it.
-// Same memory layout as ntt::Convolution; single use.
-class Product {
-public:
-    static bool fits(std::size_t n, std::size_t m) {
-        const int lg = log_length(n, m);
-        return lg % 2 == 0 && lg >= 10 && 2 * std::max(n, m) <= std::size_t(1) << lg;
-    }
-
-    Product(std::size_t n, std::size_t m) : lg_(log_length(n, m)) {
-        const std::size_t len = length(), words = 2 * (len + kPadding) + 2 * ntt::detail::table_words(lg_);
-        constexpr std::size_t kHuge = std::size_t(1) << 21;
-        bytes_ = (words * sizeof(std::uint32_t) + fields::kTextBytes + kHuge - 1) / kHuge * kHuge + kHuge;
-        region_ = ::mmap(nullptr, bytes_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (region_ == MAP_FAILED) std::abort();
-        const std::uintptr_t aligned = (reinterpret_cast<std::uintptr_t>(region_) + kHuge - 1) & ~(kHuge - 1);
-        a_ = reinterpret_cast<std::uint32_t*>(aligned);
-#ifdef MADV_HUGEPAGE
-        ::madvise(a_, bytes_ - kHuge, MADV_HUGEPAGE);
-#endif
-        b_ = a_ + len + kPadding;  // a different cache set from a at equal offsets
-        roots_ = b_ + len + kPadding;
-        inverse_roots_ = roots_ + ntt::detail::table_words(lg_);
-        text_ = reinterpret_cast<char*>(inverse_roots_ + ntt::detail::table_words(lg_));
-    }
-
-    ~Product() { ::munmap(region_, bytes_); }
-
-    Product(const Product&) = delete;
-    Product& operator=(const Product&) = delete;
-
-    std::uint32_t* a() { return a_; }
-    std::uint32_t* b() { return b_; }
-    // fields::kTextBytes bytes for the output, 16-byte aligned, after the tables. At 2^20 it shares
-    // their huge page (9.25 of 10 MiB used), so it costs no page faults.
-    char* text() { return text_; }
-
-    // The coefficients of a * b, canonical, in a(); b() is destroyed.
-    const std::uint32_t* multiply() {
-        using namespace ntt::detail;
-        const std::size_t len = length(), nv = len / 8, q = nv / 8;
-        build_table(roots_, len / 16, kRoots[0]);
-        build_table(inverse_roots_, len / 16, kRoots[1]);
-        auto* a = reinterpret_cast<Vec*>(a_);
-        auto* b = reinterpret_cast<Vec*>(b_);
-        forward_radix8(a, q, roots_);
-        forward_radix8(b, q, roots_);
-        // As ntt::Convolution from here: each half's subtrees, then its last group, the radix-2 level
-        // and the scale in one pass.
-        const Subtrees subtrees(roots_, inverse_roots_);
-        for (std::size_t c = 0; c < 8; ++c) subtrees.visit(a + c * q, b + c * q, q, c);
-        const std::uint32_t s = multiply_mod(power(std::uint32_t(nv), kP - 2), kR);  // undoes nv / 2^32
-        const std::uint32_t *z0 = inverse_roots_ + 1, *x1 = inverse_roots_ + slot(1), *y1 = inverse_roots_ + slot(2);
-        const std::uint32_t twiddles[6] = {s, multiply_mod(s, *z0), multiply_mod(s, y1[0]), multiply_mod(s, y1[1]),
-                                           multiply_mod(s, *x1), *x1};
-        alignas(32) Vec w[12];
-        for (int i = 0; i < 6; ++i) w[2 * i] = broadcast(twiddles[i]), w[2 * i + 1] = broadcast(quotient(twiddles[i]));
-        top_kernels::inverse_top(a, q, w);
-        return a_;
-    }
-
-private:
-    static constexpr std::size_t kPadding = 16;  // words after each factor: the kernels read 4 bytes past
-
-    static int log_length(std::size_t n, std::size_t m) { return std::max(6, int(std::bit_width(n + m - 2))); }
-    std::size_t length() const { return std::size_t(1) << lg_; }
-
-    int lg_;
-    void* region_;
-    std::size_t bytes_;
-    std::uint32_t *a_, *b_, *roots_, *inverse_roots_;
-    char* text_;
-};
 
 // Input fast paths for inputs whose tokens all have 9 digits (13 of the 16 large tests) or 1 digit
 // (all_same_00), each followed by one separator: token i then starts at a fixed stride, so blocks
@@ -283,7 +100,9 @@ void read_values(io::Reader& in, std::uint32_t* dst, std::size_t count) {
     io::read_bulk(in, dst + done, count - done);
 }
 
-char* text(Product& product) { return product.text(); }
+// fields::kTextBytes for the output. Product's sit after its tables: at 2^20 they share the
+// tables' huge page (9.25 of 10 MiB used), so they cost no page faults.
+char* text(ntt::Product& product) { return static_cast<char*>(product.extra()); }
 
 char* text(ntt::Convolution&) {
     alignas(64) static char buffer[fields::kTextBytes];
@@ -291,8 +110,7 @@ char* text(ntt::Convolution&) {
 }
 
 template <class Multiplier>
-void convolve(io::Reader& in, std::size_t n, std::size_t m) {
-    Multiplier product(n, m);
+void convolve(io::Reader& in, Multiplier& product, std::size_t n, std::size_t m) {
     read_values(in, product.a(), n);
     read_values(in, product.b(), m);
     const std::uint32_t* c = product.multiply();
@@ -303,8 +121,12 @@ void convolve(io::Reader& in, std::size_t n, std::size_t m) {
 void solve() {
     io::Reader in;
     const std::size_t n = in.read<std::uint32_t>(), m = in.read<std::uint32_t>();
-    if (Product::fits(n, m)) return convolve<Product>(in, n, m);
-    convolve<ntt::Convolution>(in, n, m);
+    if (ntt::Product::fits(n, m)) {
+        ntt::Product product(n, m, fields::kTextBytes);
+        return convolve(in, product, n, m);
+    }
+    ntt::Convolution convolution(n, m);
+    convolve(in, convolution, n, m);
 }
 
 #ifdef __ELF__

@@ -1,6 +1,7 @@
 // Tests for lib/ntt: each kernel against a scalar model (residues and output ranges), products
 // against schoolbook multiplication and, for long ones, evaluation at random points.
 #include "lib/ntt/ntt.hpp"
+#include "lib/ntt/product.hpp"
 
 #include <cstdio>
 #include <random>
@@ -11,6 +12,7 @@ namespace {
 using ntt::kernels::Vec;
 using u32 = std::uint32_t;
 using u64 = std::uint64_t;
+using u8 = unsigned char;
 
 constexpr u32 P = ntt::kModulus;
 
@@ -229,8 +231,9 @@ void test_bottom() {
     }
 }
 
+template <class Multiplier>
 std::vector<u32> product(const std::vector<u32>& a, const std::vector<u32>& b) {
-    ntt::Convolution conv(a.size(), b.size());
+    Multiplier conv(a.size(), b.size());
     std::copy(a.begin(), a.end(), conv.a());
     std::copy(b.begin(), b.end(), conv.b());
     const u32* c = conv.multiply();
@@ -256,9 +259,10 @@ std::vector<u32> random_poly(std::size_t n, int kind) {
     return p;
 }
 
+template <class Multiplier = ntt::Convolution>
 void test_product(std::size_t n, std::size_t m, int kind, bool exact) {
     const auto a = random_poly(n, kind), b = random_poly(m, kind);
-    const auto c = product(a, b);
+    const auto c = product<Multiplier>(a, b);
     bool ok = c.size() == n + m - 1;
     for (const u32 x : c) ok &= x < P;
     if (exact) {
@@ -287,6 +291,39 @@ void test_products() {
     }
 }
 
+// ntt::Product: the bounds of fits(), the extra bytes, and every length it takes (both top levels:
+// radix 4 at odd lg, radix 8 and the fused inverse top at even lg).
+void test_product_class() {
+    using ntt::Product;
+    expect(Product::fits(256, 256) && !Product::fits(257, 255) && !Product::fits(128, 128), "fits: lg 9");
+    expect(Product::fits(2, 256) && !Product::fits(2, 257) && !Product::fits(1, 300) && !Product::fits(0, 300),
+           "fits: small factor");
+    const std::size_t half = std::size_t(1) << (ntt::kMaxLog - 1);
+    expect(Product::fits(half, half) && !Product::fits(half + 1, half - 1), "fits: lg 25");
+    {
+        constexpr std::size_t kExtra = 100000;
+        Product p(300, 300, kExtra);
+        auto* extra = static_cast<unsigned char*>(p.extra());
+        bool zero = reinterpret_cast<std::uintptr_t>(extra) % 64 == 0;
+        for (std::size_t i = 0; i < kExtra; ++i) zero &= extra[i] == 0, extra[i] = u8(i * 7);
+        std::fill(p.a(), p.a() + 300, 1), std::fill(p.b(), p.b() + 300, 1);
+        const u32* c = p.multiply();
+        bool kept = c[0] == 1 && c[299] == 300 && c[598] == 1;
+        for (std::size_t i = 0; i < kExtra; ++i) kept &= extra[i] == u8(i * 7);
+        expect(zero && kept, "extra bytes: aligned, zeroed, kept");
+    }
+    for (int lg = 9; lg <= ntt::kMaxLog; ++lg) {
+        const std::size_t len = std::size_t(1) << lg;
+        const bool exact = lg <= 11;
+        test_product<Product>(len / 2, len / 2, lg % 2, exact);
+        test_product<Product>(len / 2, 2, 0, exact);
+        if (lg <= 22) {
+            test_product<Product>(len / 4 + 1, len / 4 + 1, 3, exact);
+            test_product<Product>(len / 2 - 5, len / 4 + 7, 0, exact);
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -294,6 +331,7 @@ int main() {
     test_loops();
     test_bottom();
     test_products();
+    test_product_class();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

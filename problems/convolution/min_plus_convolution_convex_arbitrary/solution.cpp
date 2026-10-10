@@ -13,6 +13,7 @@
 // Wide ranges skip blocks of kBlock columns by a lower bound: the least b in the block plus the
 // least a over the two aligned kBlock-windows of a that the block reads in the row.
 #include "lib/io/io.hpp"
+#include "lib/io/sequential.hpp"
 #include "lib/mem/huge.hpp"
 #include "lib/run/early.hpp"
 #include "columns.hpp"
@@ -491,19 +492,10 @@ void block_minima(const u32* x, std::size_t blocks, u32* least) {
     }
 }
 
-// Marks a mapped input as read once, so the kernel skips marking each page accessed when the
-// Reader unmaps it (as ../bitwise_and_convolution). The mapping starts at the page of the first token.
-void advise_sequential(const io::Reader& in) {
-    struct stat st;
-    if (::fstat(0, &st) != 0 || !S_ISREG(st.st_mode) || std::size_t(st.st_size) <= io::detail::kMapAbove) return;
-    const auto start = reinterpret_cast<std::uintptr_t>(in.scan().cur) & ~std::uintptr_t(4095);
-    ::madvise(reinterpret_cast<void*>(start), std::size_t(st.st_size), MADV_SEQUENTIAL);
-}
-
 void solve() {
     io::Reader in;
     const std::size_t n = in.read<u32>(), m = in.read<u32>(), count = n + m - 1;
-    advise_sequential(in);
+    io::advise_sequential(in);
     const std::size_t groups = (count + kGroup - 1) / kGroup, nodes = std::bit_ceil(groups) + 1;
     const std::size_t a_blocks = (n + kBlock - 1) / kBlock, b_blocks = (m + kBlock - 1) / kBlock;
     mem::Arena arena(columns::kTextBytes + 4 * (kAPad + n + kTail + m + kTail + nodes + b_blocks + a_blocks + 1 +

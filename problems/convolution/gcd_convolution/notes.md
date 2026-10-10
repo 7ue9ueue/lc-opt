@@ -35,7 +35,7 @@ Record when opened: 37 ms (407011). Best judged: ours, [409380](https://judge.yo
     walks bring the piece into L1, and the tiny m then find it there.
 - Output: `../convolution_mod/fields.hpp` (10-byte fields, 16 values per step); the text buffer
   is the first 250 KB of the pair array, dead by then.
-- The input mapping is advised `MADV_SEQUENTIAL` (as `../bitwise_and_convolution`): its `munmap`
+- The input mapping is advised `MADV_SEQUENTIAL` (`io::advise_sequential`): its `munmap`
   skips marking pages accessed.
 - Runs from `.preinit_array` and ends with `_exit` (as `convolution_mod`).
 
@@ -149,6 +149,9 @@ Record when opened: 37 ms (407011). Best judged: ours, [409380](https://judge.yo
   - [409547](https://judge.yosupo.jp/submission/409547): AC 18 ms; spike on random_02, clean 14 ms.
   - Large cases: 409546 13-14 ms (6 of 8 at 13), 409547 13-14 (5 of 8 at 13); 409380 had 3 of 8
     at 13. The gain (~0.5 ms) is below the judge's 1 ms step; best judged stays 14 ms.
+- 2026-10-10, claude (lib, issue #156 round 3): `advise_sequential` comes from
+  `lib/io/sequential.hpp` (`io::advise_sequential`) instead of a local copy. Same stripped
+  executable as before (judge flags, `lc-amd`).
 
 ## Next
 

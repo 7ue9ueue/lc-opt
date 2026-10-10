@@ -38,7 +38,7 @@ Record when opened: 37 ms. Best judged: ours, [409551](https://judge.yosupo.jp/s
     the segment together in 32 KiB pieces (zeta: ascending pieces, stateless bounds).
   - Each update is 2 loads, 3 vector ops, 1 store: runs of one m go by pointers, 4 per step, the
     modulus held in a register (GCC reloaded it per update).
-- The input mapping is advised `MADV_SEQUENTIAL` (as `../bitwise_and_convolution`).
+- The input mapping is advised `MADV_SEQUENTIAL` (`io::advise_sequential`).
 - Runs from `.preinit_array`, ends with `_exit`. Output: `../convolution_mod/fields.hpp`.
 
 ## Log
@@ -163,6 +163,9 @@ Record when opened: 37 ms. Best judged: ours, [409551](https://judge.yosupo.jp/s
     (`tools/spikes.py`: max_random_01 22 against 14 in its peers). 1/5 for this version.
   - [409551](https://judge.yosupo.jp/submission/409551), same file: AC 14 ms, 20.5 MiB, no
     spike. Large cases 13-14 ms. New best judged (was 16 ms). 2/5.
+- 2026-10-10, claude (lib, issue #156 round 3): `advise_sequential` comes from
+  `lib/io/sequential.hpp` (`io::advise_sequential`) instead of a local copy. Same stripped
+  executable as before (judge flags, `lc-amd`).
 
 ## Next
 

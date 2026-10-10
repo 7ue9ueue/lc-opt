@@ -18,7 +18,6 @@
 // m <= 7 are convolved directly.
 #include <immintrin.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 
 #include <algorithm>
 #include <array>
@@ -30,6 +29,7 @@
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
+#include "lib/io/sequential.hpp"
 #include "lib/ntt/ntt.hpp"
 #include "lib/run/early.hpp"
 #include "../convolution_mod/fields.hpp"
@@ -848,19 +848,10 @@ void band_products(const Level* a, Level* b, int e, int k, std::size_t first, st
     }
 }
 
-// Marks a mapped input as read once: the kernel then skips marking each page accessed when the
-// mapping goes (as ../gcd_convolution). The mapping starts at the page of the first token.
-void advise_sequential(const io::Reader& in) {
-    struct stat st;
-    if (::fstat(0, &st) != 0 || !S_ISREG(st.st_mode) || std::size_t(st.st_size) <= io::detail::kMapAbove) return;
-    const auto start = reinterpret_cast<std::uintptr_t>(in.scan().cur) & ~std::uintptr_t(4095);
-    ::madvise(reinterpret_cast<void*>(start), std::size_t(st.st_size), MADV_SEQUENTIAL);
-}
-
 void solve() {
     io::Reader in;
     const int n = in.read<int>();
-    advise_sequential(in);
+    io::advise_sequential(in);
     const std::size_t size = std::size_t(1) << n;
     const Plan plan(n);
     // Two factors of 2^n words, tables under 2^n words, the chunk text and 64 KiB of padding.

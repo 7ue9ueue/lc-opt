@@ -3,7 +3,7 @@
 N <= 500000 coefficients of f mod 998244353, f[0] != 0; print the first N coefficients of 1/f.
 10 s. Largest tests: max_random_* (N = 500000, transforms up to 2^19).
 
-Best judged: ours, 13 ms: [409242](https://judge.yosupo.jp/submission/409242) (`main.cpp` of #107).
+Best judged: ours, 11 ms: [409370](https://judge.yosupo.jp/submission/409370) (`main.cpp` of #170).
 Record when opened (issue #62): 25 ms.
 
 ## Design
@@ -66,3 +66,12 @@ tables 0.07, inverse 8.26, format 0.32 (to /dev/null); total 9.5. Whole process 
   - Tried for the products, not kept: their bottom (forward, windows, leaf products, inverse) as
     one list-scheduled asm statement per group, 18 knob variants: tiles 52.9-55.0 against 53.0
     cycles per vector for the intrinsics.
+  - Merged as #170. CI: inv 0.9881 (Xeon 8573C 0.9847, EPYC 7763 0.9939, 0.9857); all 6
+    problems 0.9922 (composition 1.0224).
+  - Submitted the merged `main.cpp` (#170): [409369](https://judge.yosupo.jp/submission/409369)
+    AC 18 ms from one launch spike (near_262144_02 18 ms, peers 6; `tools/spikes.py`: clean 11);
+    the same file again: [409370](https://judge.yosupo.jp/submission/409370) AC 11 ms, 11.5 MiB.
+- Next: the inverse takes ~7.1 ms of ~12 (`lc-amd`); the floor (read, write) is ~5 ms. Its product
+  bottoms (~30 cycles per vector, the multiply pipes' bound ~20) are the largest part; asm
+  scheduling did not help. Smaller: the inverse top level of the first product and the forward
+  top level of the second as one pass (~0.3-0.5%, guess); exp and sqrt have the same pattern.

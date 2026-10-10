@@ -55,9 +55,6 @@ inline int exp_log(std::size_t n) { return std::countr_zero(detail::exp_length(n
 
 namespace detail {
 
-// x - y mod P for canonical x, y.
-inline Vec difference(Vec x, Vec y) { return reduce(_mm256_sub_epi32(add(x, broadcast(kP)), y), kP); }
-
 // The last Newton step of exp_newton() below, from g mod x^m to g mod x^n, m < n <= 2m, with
 // transforms of length m only. From the previous step: H = T_m(h0), h0 = 1 / g mod x^(m/2), and
 // G0 = T_m(g0), g0 = g mod x^(m/2) (computed here when there was no previous step). With the

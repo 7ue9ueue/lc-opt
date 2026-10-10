@@ -53,7 +53,9 @@ def main() -> int:
         rng = random.Random(1)
         for r in range(rounds):
             def length() -> int:
-                return rng.randint(1, 4) if rng.random() < 0.3 else rng.randint(1, 300)
+                # Above 1024: columns that far apart take the solution's other crossing search.
+                p = rng.random()
+                return rng.randint(1, 4) if p < 0.3 else rng.randint(1, 300) if p < 0.9 else rng.randint(1, 3000)
             n, m = length(), length()
             a, b = concave(rng, n), arbitrary(rng, m)
             text = f'{n} {m}\n{" ".join(map(str, a))}\n{" ".join(map(str, b))}\n'

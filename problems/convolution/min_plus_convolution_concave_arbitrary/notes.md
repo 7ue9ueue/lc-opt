@@ -15,14 +15,31 @@ Record when the issue opened: 117 ms.
   a backward sweep the rows where no column starts. In both, the envelope is a stack (newest on
   top), as in the concave 1D/1D DP (Galil and Park, "Dynamic programming with convexity,
   concavity and sparsity", TCS 1992); the idea only, no code read.
-- Crossings are lazy: each entry keeps a bracket [lo, hi) around its last winning row against the
-  entry below. An insertion narrows the bracket of the entry it meets only until it can decide pop
-  or push; the sweep moves lo up for free each row it checks the top.
-- Each stack entry caches its column's offset into a and its b value: one load per evaluation.
+- Each entry keeps its exact crossing (last winning row) with the entry below; a new column pops
+  the top while it beats it at that row (one probe each). Its crossing with the entry it lands on
+  is bracketed first, then bisected down to 8 rows, then found by one 8-row AVX2 compare:
+  - far entry (more than 1024 columns back): from below by the crossing of the entry it popped
+    last with the same entry (k beats that one there, and it beats the entry below). On
+    monotone_01 the answer is within 16 rows of it in 99% of cases.
+  - near entry (d <= 1024 columns back, b gap g): f_k <= f_q at k's offset y iff
+    a[y + d] - a[y] >= g, a sum of d slopes in [d s_{y+d-1}, d s_y]; a's slopes are sorted, so
+    with R = #{slopes >= ceil(g / d)} the crossing offset is in [R - d, R - 1]. R comes from a
+    table over slope values (32k buckets; exact when the slopes span fewer values, as in every
+    official test). Our idea.
+- The top entry lives in registers; the stack holds the entries below it. Each entry caches its
+  column's offset into a and its b value: one load per evaluation.
 - Output: `../min_plus_convolution_convex_arbitrary/columns.hpp` (ours, round 1 of #28),
   fixed-width fields (judge-specific; the checker compares tokens).
-- a, b, c, the stack and the text buffer in 2 MiB pages (`MADV_HUGEPAGE`); `.preinit_array`
-  start, `_exit` end; `lib/io` for input.
+- a (8 readable values on each side, for the 8-row compare), b, c, the text buffer, and the rank
+  table with the stack (one arena) in 2 MiB pages (`lib/mem`); `.preinit_array` start, `_exit`
+  end (`lib/run`); `lib/io` for input.
+- Literature (read, not implemented): row minima of this lower-triangular, inverse-Monge matrix
+  is the hard ("concave") case of staircase matrix searching: O(n alpha(n)) by Klawe and
+  Kleitman, "An almost linear time algorithm for generalized matrix searching", SIAM J. Discrete
+  Math. 1990. SMAWK (Aggarwal, Klawe, Moran, Shor, Wilber, Algorithmica 1987) needs a totally
+  monotone matrix, which holds for convex a; LARSCH (Larmore and Schieber, J. Algorithms 1991)
+  is for the convex online DP. Each costs several branchy evaluations per row; the stack here
+  averages about 2 probes per insertion on monotone_01, so we did not try them.
 
 ## Log
 
@@ -102,3 +119,39 @@ Record when the issue opened: 117 ms.
 - 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
   `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
   before (judge flags, `lc-amd`).
+- 2026-10-10, claude (round 3). `lc-amd` and `lc-bench`, judge flags; "sweeps" is a phase timer
+  around both sweeps (median of 3 runs, monotone_01 unless noted). Exploration files:
+  `lc-opt-explore/min_plus_convolution_concave_arbitrary/` on the Mac.
+  - Stats of the round-2 lazy sweep on monotone_01: of 942k insertions, 535k land on an entry
+    more than 1024 columns back, 404k on a nearer one. Far: the exact crossing is 0 rows from the
+    popped entry's crossing with the same entry in 189k cases, 1 row in 261k, under 16 in 99%.
+    Near: no such hint (2^8-2^18 rows away); the rank bracket has width d.
+  - Simulator (`sim.cpp`, std::vector, 7 repetitions): lazy sweep 21.9 ms; plus the popped
+    entry's hint, one probe: 20.3; plus rank brackets: 20.3 (L2-simulated misses 456k -> 95k, no
+    time gain); exact ends with rank + hint + 8-row compare: 15.3.
+  - In the program: exact ends 17.5 with rank brackets for every pair (a division per crossing),
+    15.2 with rank brackets only for d <= 1024 (kept). d <= 64: 15.6; d <= 8: 21.0.
+  - No gain (sweeps, monotone_01): division by a double reciprocal 15.5; branch-free near/far
+    choice 15.2; top entry in registers 15.3 (kept: simpler, max_random_00 2.9 vs 3.05);
+    `run()` out of line 15.8.
+  - Losses: `insert()` out of line 19.1 (monotone_00 2.9 -> 4.9: 13 cycles per call). Lazy
+    brackets with pop tests decided by rank alone for near pairs (1.34M near tests, 29 undecided):
+    20.0, as the rank test costs more than a probe (+59 instructions per insertion on
+    `lc-intel`). Exact ends with rank decisions first: 18.9. Testing the top two entries without
+    a branch: 20.3 (the insertions then form one dependency chain). Near brackets settled lazily
+    after a prefetch of their rows: 15.7.
+  - perf on `lc-intel` (whole runs, monotone_01 minus max_random_00): +80M instructions,
+    +0.49M branch misses (0.52 per insertion); of the extra slots 35% bad speculation, 33% backend
+    (L2-miss stalls are 3% of cycles), 25% retiring.
+  - Rank table and stack in one arena instead of two mappings: monotone_01 24.4 -> 24.1 ms,
+    peak RSS 29.2 -> 27.2 MB (`runner`, 5 runs).
+  - `judge.py bench`, `lc-bench`, 21 rounds, 6 slowest cases: 28.73 -> 25.35 ms (ratio 0.887).
+    Phases now (monotone_01): parse 1.7, sweeps 15.7, output to a file 4.9 ms.
+  - Checks: 41/41 official tests; `stress.py` 3000 rounds, now with lengths up to 3000 so that
+    columns more than 1024 apart occur; the far path forced (near limit 2) and the near path
+    forced with a 4-bucket rank table: 2000 stress rounds and 41/41 each; ASan/UBSan on 15
+    official cases, file and pipe input.
+- Next: monotone_01/02 (~24 ms) against ~11 ms for the rest. The insertions are bound by branch
+  misses (pop or not, near or far) and the chain through each entry's end; removing branches
+  made it slower. Untried: two independent half-sweeps interleaved (round 2's forward/backward
+  interleave lost 10%).

@@ -1,0 +1,636 @@
+{
+ "problem": "log_of_formal_power_series_sparse",
+ "host": "lc-amd",
+ "cpu": "AMD EPYC 7B13",
+ "compile": "g++ -O2 -std=c++23 -DEVAL -DONLINE_JUDGE -march=native -o main main.cpp",
+ "commit": "3740c29",
+ "main_sha": "cd831c744e4f2a55",
+ "rounds": 5,
+ "date": "2026-10-10",
+ "cases": {
+  "example_00": {
+   "input_bytes": 12,
+   "output_bytes": 18,
+   "first_line": "5 2",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.678,
+    1.404,
+    1.227,
+    1.408,
+    1.243
+   ],
+   "floor": [
+    0.752,
+    0.717,
+    0.735,
+    0.723,
+    0.739
+   ]
+  },
+  "example_01": {
+   "input_bytes": 49,
+   "output_bytes": 60,
+   "first_line": "10 5",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.241,
+    1.233,
+    1.188,
+    1.28,
+    1.194
+   ],
+   "floor": [
+    0.741,
+    0.738,
+    0.754,
+    0.738,
+    0.753
+   ]
+  },
+  "max_random_00": {
+   "input_bytes": 167,
+   "output_bytes": 2002933,
+   "first_line": "1000000 10",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    3.554,
+    3.758,
+    3.808,
+    3.513,
+    3.832
+   ],
+   "floor": [
+    1.425,
+    1.69,
+    1.411,
+    1.653,
+    1.678
+   ]
+  },
+  "max_random_01": {
+   "input_bytes": 165,
+   "output_bytes": 2005969,
+   "first_line": "1000000 10",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    3.56,
+    3.833,
+    3.778,
+    3.514,
+    3.752
+   ],
+   "floor": [
+    1.434,
+    1.638,
+    1.431,
+    1.613,
+    1.698
+   ]
+  },
+  "max_random_02": {
+   "input_bytes": 166,
+   "output_bytes": 2002076,
+   "first_line": "1000000 10",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    3.396,
+    3.715,
+    3.652,
+    3.375,
+    3.68
+   ],
+   "floor": [
+    1.447,
+    1.632,
+    1.465,
+    1.655,
+    1.446
+   ]
+  },
+  "max_random_03": {
+   "input_bytes": 167,
+   "output_bytes": 2001021,
+   "first_line": "1000000 10",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    3.402,
+    3.697,
+    3.674,
+    3.406,
+    3.62
+   ],
+   "floor": [
+    1.432,
+    1.748,
+    1.438,
+    1.622,
+    1.43
+   ]
+  },
+  "max_random_04": {
+   "input_bytes": 166,
+   "output_bytes": 2000760,
+   "first_line": "1000000 10",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    3.368,
+    3.642,
+    3.573,
+    3.342,
+    3.555
+   ],
+   "floor": [
+    1.421,
+    1.668,
+    1.435,
+    1.663,
+    1.416
+   ]
+  },
+  "min_K_00": {
+   "input_bytes": 13,
+   "output_bytes": 779626,
+   "first_line": "389813 1",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.783,
+    1.958,
+    1.857,
+    1.834,
+    1.912
+   ],
+   "floor": [
+    0.989,
+    1.071,
+    0.999,
+    1.188,
+    0.996
+   ]
+  },
+  "min_K_01": {
+   "input_bytes": 13,
+   "output_bytes": 926092,
+   "first_line": "463046 1",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.872,
+    2.027,
+    1.981,
+    1.889,
+    1.976
+   ],
+   "floor": [
+    1.031,
+    1.143,
+    1.024,
+    1.166,
+    1.039
+   ]
+  },
+  "random_00": {
+   "input_bytes": 13,
+   "output_bytes": 779626,
+   "first_line": "389813 1",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.822,
+    1.872,
+    1.852,
+    1.792,
+    1.886
+   ],
+   "floor": [
+    0.989,
+    1.091,
+    0.985,
+    1.105,
+    0.974
+   ]
+  },
+  "random_01": {
+   "input_bytes": 81,
+   "output_bytes": 926148,
+   "first_line": "463046 5",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.066,
+    2.221,
+    2.245,
+    2.072,
+    2.19
+   ],
+   "floor": [
+    1.032,
+    1.136,
+    1.023,
+    1.154,
+    1.045
+   ]
+  },
+  "random_02": {
+   "input_bytes": 97,
+   "output_bytes": 1155406,
+   "first_line": "577624 6",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.437,
+    2.558,
+    2.543,
+    2.411,
+    2.549
+   ],
+   "floor": [
+    1.195,
+    1.238,
+    1.115,
+    1.23,
+    1.187
+   ]
+  },
+  "random_03": {
+   "input_bytes": 30,
+   "output_bytes": 858514,
+   "first_line": "429249 2",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.963,
+    2.072,
+    2.096,
+    1.952,
+    2.093
+   ],
+   "floor": [
+    1.01,
+    1.134,
+    1.014,
+    1.105,
+    1.045
+   ]
+  },
+  "random_04": {
+   "input_bytes": 47,
+   "output_bytes": 1602616,
+   "first_line": "801300 3",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.502,
+    2.717,
+    2.739,
+    2.543,
+    2.695
+   ],
+   "floor": [
+    1.264,
+    1.481,
+    1.268,
+    1.476,
+    1.343
+   ]
+  },
+  "small_N_00": {
+   "input_bytes": 32,
+   "output_bytes": 41,
+   "first_line": "5 3",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.213,
+    1.181,
+    1.211,
+    1.212,
+    1.19
+   ],
+   "floor": [
+    0.702,
+    0.721,
+    0.723,
+    0.704,
+    0.758
+   ]
+  },
+  "small_N_01": {
+   "input_bytes": 32,
+   "output_bytes": 28,
+   "first_line": "6 3",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.217,
+    1.226,
+    1.191,
+    1.195,
+    1.247
+   ],
+   "floor": [
+    0.713,
+    0.706,
+    0.695,
+    0.691,
+    0.75
+   ]
+  },
+  "small_N_02": {
+   "input_bytes": 32,
+   "output_bytes": 40,
+   "first_line": "8 3",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.185,
+    1.171,
+    1.175,
+    1.212,
+    1.18
+   ],
+   "floor": [
+    0.746,
+    0.72,
+    0.735,
+    0.705,
+    0.701
+   ]
+  },
+  "small_N_03": {
+   "input_bytes": 8,
+   "output_bytes": 2,
+   "first_line": "1 1",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.177,
+    1.177,
+    1.162,
+    1.178,
+    1.175
+   ],
+   "floor": [
+    0.823,
+    0.735,
+    0.74,
+    0.738,
+    0.75
+   ]
+  },
+  "small_N_04": {
+   "input_bytes": 8,
+   "output_bytes": 8,
+   "first_line": "4 1",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.224,
+    1.166,
+    1.202,
+    1.181,
+    1.174
+   ],
+   "floor": [
+    0.725,
+    0.71,
+    0.714,
+    0.7,
+    0.72
+   ]
+  },
+  "small_dense_00": {
+   "input_bytes": 62,
+   "output_bytes": 9888785,
+   "first_line": "1000000 5",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    6.008,
+    7.377,
+    7.25,
+    6.169,
+    7.356
+   ],
+   "floor": [
+    4.564,
+    5.517,
+    5.729,
+    5.891,
+    5.055
+   ]
+  },
+  "small_dense_01": {
+   "input_bytes": 73,
+   "output_bytes": 9889528,
+   "first_line": "1000000 6",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    6.078,
+    7.289,
+    6.582,
+    7.267,
+    7.296
+   ],
+   "floor": [
+    4.491,
+    5.5,
+    4.438,
+    5.524,
+    4.544
+   ]
+  },
+  "small_dense_02": {
+   "input_bytes": 96,
+   "output_bytes": 9888238,
+   "first_line": "1000000 8",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    6.225,
+    7.455,
+    6.437,
+    7.244,
+    7.389
+   ],
+   "floor": [
+    4.361,
+    5.441,
+    4.379,
+    5.494,
+    4.675
+   ]
+  },
+  "small_dense_03": {
+   "input_bytes": 14,
+   "output_bytes": 2000000,
+   "first_line": "1000000 1",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.585,
+    2.809,
+    2.766,
+    2.786,
+    2.933
+   ],
+   "floor": [
+    1.416,
+    1.654,
+    1.438,
+    1.673,
+    1.511
+   ]
+  },
+  "small_dense_04": {
+   "input_bytes": 50,
+   "output_bytes": 9888039,
+   "first_line": "1000000 4",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    5.973,
+    7.094,
+    5.992,
+    7.151,
+    7.163
+   ],
+   "floor": [
+    4.354,
+    5.514,
+    4.423,
+    5.616,
+    4.394
+   ]
+  }
+ }
+}

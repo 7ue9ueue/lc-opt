@@ -1,0 +1,350 @@
+{
+ "problem": "bitwise_and_convolution",
+ "host": "lc-amd",
+ "cpu": "AMD EPYC 7B13",
+ "compile": "g++ -O2 -std=c++23 -DEVAL -DONLINE_JUDGE -march=native -o main main.cpp",
+ "commit": "3740c29",
+ "main_sha": "5fa896a01af2dced",
+ "rounds": 5,
+ "date": "2026-10-10",
+ "cases": {
+  "example_00": {
+   "input_bytes": 41,
+   "output_bytes": 32,
+   "first_line": "3",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.482,
+    1.255,
+    1.037,
+    1.196,
+    1.037
+   ],
+   "floor": [
+    0.764,
+    0.694,
+    0.748,
+    0.713,
+    0.765
+   ]
+  },
+  "max_random_00": {
+   "input_bytes": 20738704,
+   "output_bytes": 10369108,
+   "first_line": "20",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    11.754,
+    12.511,
+    12.481,
+    12.498,
+    11.673
+   ],
+   "floor": [
+    7.593,
+    8.501,
+    8.706,
+    8.417,
+    7.622
+   ]
+  },
+  "max_random_01": {
+   "input_bytes": 20738511,
+   "output_bytes": 10369143,
+   "first_line": "20",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    11.611,
+    12.339,
+    12.459,
+    12.473,
+    11.898
+   ],
+   "floor": [
+    7.685,
+    8.383,
+    8.683,
+    8.37,
+    7.986
+   ]
+  },
+  "max_random_02": {
+   "input_bytes": 20738089,
+   "output_bytes": 10368926,
+   "first_line": "20",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    11.314,
+    12.318,
+    12.421,
+    11.811,
+    12.496
+   ],
+   "floor": [
+    7.544,
+    8.343,
+    8.522,
+    8.378,
+    7.279
+   ]
+  },
+  "random_00": {
+   "input_bytes": 648118,
+   "output_bytes": 324086,
+   "first_line": "15",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.723,
+    1.678,
+    1.652,
+    1.795,
+    1.749
+   ],
+   "floor": [
+    0.939,
+    0.971,
+    0.956,
+    0.963,
+    0.924
+   ]
+  },
+  "random_01": {
+   "input_bytes": 1296114,
+   "output_bytes": 647915,
+   "first_line": "16",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.961,
+    2.035,
+    2.031,
+    1.954,
+    2.002
+   ],
+   "floor": [
+    1.151,
+    1.23,
+    1.219,
+    1.196,
+    1.142
+   ]
+  },
+  "random_02": {
+   "input_bytes": 5184369,
+   "output_bytes": 2592063,
+   "first_line": "18",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    3.58,
+    3.88,
+    3.93,
+    3.589,
+    3.89
+   ],
+   "floor": [
+    2.371,
+    2.607,
+    2.653,
+    2.61,
+    2.335
+   ]
+  },
+  "small_00": {
+   "input_bytes": 640,
+   "output_bytes": 319,
+   "first_line": "5",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.05,
+    1.042,
+    1.034,
+    1.059,
+    1.056
+   ],
+   "floor": [
+    0.726,
+    0.734,
+    0.708,
+    0.71,
+    0.717
+   ]
+  },
+  "small_01": {
+   "input_bytes": 1266,
+   "output_bytes": 631,
+   "first_line": "6",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.08,
+    1.045,
+    1.079,
+    1.064,
+    1.055
+   ],
+   "floor": [
+    0.732,
+    0.733,
+    0.763,
+    0.714,
+    0.753
+   ]
+  },
+  "small_02": {
+   "input_bytes": 5062,
+   "output_bytes": 2532,
+   "first_line": "8",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.06,
+    1.094,
+    1.043,
+    1.049,
+    1.062
+   ],
+   "floor": [
+    0.692,
+    0.701,
+    0.727,
+    0.734,
+    0.723
+   ]
+  },
+  "tiny_00": {
+   "input_bytes": 22,
+   "output_bytes": 10,
+   "first_line": "0",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.075,
+    1.035,
+    1.042,
+    1.026,
+    1.036
+   ],
+   "floor": [
+    0.744,
+    0.715,
+    0.705,
+    0.701,
+    0.705
+   ]
+  },
+  "tiny_01": {
+   "input_bytes": 41,
+   "output_bytes": 19,
+   "first_line": "1",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.048,
+    1.027,
+    1.044,
+    1.035,
+    1.035
+   ],
+   "floor": [
+    0.72,
+    0.708,
+    0.702,
+    0.692,
+    0.713
+   ]
+  },
+  "tiny_02": {
+   "input_bytes": 80,
+   "output_bytes": 40,
+   "first_line": "2",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.06,
+    1.03,
+    1.03,
+    1.039,
+    1.018
+   ],
+   "floor": [
+    0.779,
+    0.767,
+    0.716,
+    0.716,
+    0.757
+   ]
+  }
+ }
+}

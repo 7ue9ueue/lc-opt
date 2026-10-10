@@ -1,0 +1,662 @@
+{
+ "problem": "inv_of_formal_power_series",
+ "host": "lc-intel",
+ "cpu": "INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz",
+ "compile": "g++ -O2 -std=c++23 -DEVAL -DONLINE_JUDGE -march=x86-64-v3 -madx -mpclmul -mvpclmulqdq -maes -mvaes -o main main.cpp",
+ "commit": "3740c29",
+ "main_sha": "611eaf933f4187e5",
+ "rounds": 5,
+ "date": "2026-10-10",
+ "cases": {
+  "example_00": {
+   "input_bytes": 12,
+   "output_bytes": 50,
+   "first_line": "5",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.126,
+    0.72,
+    0.679,
+    0.819,
+    0.684
+   ],
+   "floor": [
+    0.471,
+    0.512,
+    0.45,
+    0.522,
+    0.463
+   ]
+  },
+  "max_random_00": {
+   "input_bytes": 4944850,
+   "output_bytes": 4944305,
+   "first_line": "500000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    12.52,
+    11.884,
+    11.71,
+    12.012,
+    12.123
+   ],
+   "floor": [
+    2.542,
+    2.627,
+    2.901,
+    2.407,
+    2.53
+   ]
+  },
+  "max_random_01": {
+   "input_bytes": 4944682,
+   "output_bytes": 4944184,
+   "first_line": "500000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    11.567,
+    11.641,
+    11.628,
+    11.614,
+    11.857
+   ],
+   "floor": [
+    2.448,
+    2.632,
+    2.653,
+    2.65,
+    2.491
+   ]
+  },
+  "max_random_02": {
+   "input_bytes": 4944224,
+   "output_bytes": 4944316,
+   "first_line": "500000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    11.507,
+    11.713,
+    11.582,
+    11.549,
+    11.916
+   ],
+   "floor": [
+    2.398,
+    2.617,
+    2.424,
+    2.546,
+    2.555
+   ]
+  },
+  "max_random_03": {
+   "input_bytes": 4944505,
+   "output_bytes": 4944636,
+   "first_line": "500000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    11.661,
+    11.876,
+    11.848,
+    11.561,
+    11.797
+   ],
+   "floor": [
+    2.371,
+    2.559,
+    2.372,
+    2.557,
+    2.666
+   ]
+  },
+  "max_random_04": {
+   "input_bytes": 4944131,
+   "output_bytes": 4944218,
+   "first_line": "500000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    11.732,
+    12.001,
+    11.81,
+    11.607,
+    11.795
+   ],
+   "floor": [
+    2.398,
+    2.553,
+    2.332,
+    2.509,
+    2.502
+   ]
+  },
+  "max_random_or_zero_00": {
+   "input_bytes": 4944771,
+   "output_bytes": 4943884,
+   "first_line": "500000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    11.751,
+    11.868,
+    11.877,
+    11.539,
+    11.864
+   ],
+   "floor": [
+    2.382,
+    2.692,
+    2.452,
+    2.486,
+    2.509
+   ]
+  },
+  "near_262144_00": {
+   "input_bytes": 2592616,
+   "output_bytes": 2592173,
+   "first_line": "262143",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    6.027,
+    6.048,
+    5.978,
+    5.893,
+    6.059
+   ],
+   "floor": [
+    1.489,
+    1.555,
+    1.501,
+    1.508,
+    1.541
+   ]
+  },
+  "near_262144_01": {
+   "input_bytes": 2592198,
+   "output_bytes": 2592262,
+   "first_line": "262144",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    5.948,
+    6.031,
+    6.025,
+    5.887,
+    6.003
+   ],
+   "floor": [
+    1.439,
+    1.586,
+    1.527,
+    1.649,
+    1.526
+   ]
+  },
+  "near_262144_02": {
+   "input_bytes": 2592229,
+   "output_bytes": 2592412,
+   "first_line": "262145",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    10.625,
+    10.7,
+    10.688,
+    10.534,
+    10.678
+   ],
+   "floor": [
+    1.536,
+    1.577,
+    1.549,
+    1.627,
+    1.523
+   ]
+  },
+  "random_00": {
+   "input_bytes": 3855121,
+   "output_bytes": 3854414,
+   "first_line": "389813",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    11.323,
+    11.351,
+    11.266,
+    11.152,
+    11.369
+   ],
+   "floor": [
+    2.016,
+    2.08,
+    1.921,
+    2.11,
+    2.052
+   ]
+  },
+  "random_01": {
+   "input_bytes": 4579174,
+   "output_bytes": 4579399,
+   "first_line": "463046",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    11.466,
+    11.654,
+    11.603,
+    11.532,
+    11.72
+   ],
+   "floor": [
+    2.207,
+    2.51,
+    2.186,
+    2.341,
+    2.352
+   ]
+  },
+  "random_02": {
+   "input_bytes": 527436,
+   "output_bytes": 527503,
+   "first_line": "53336",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.941,
+    1.86,
+    1.881,
+    1.88,
+    1.89
+   ],
+   "floor": [
+    0.668,
+    0.69,
+    0.641,
+    0.65,
+    0.635
+   ]
+  },
+  "random_03": {
+   "input_bytes": 4244733,
+   "output_bytes": 4244502,
+   "first_line": "429249",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    11.603,
+    11.494,
+    11.523,
+    11.422,
+    11.659
+   ],
+   "floor": [
+    2.132,
+    2.242,
+    2.157,
+    2.413,
+    2.316
+   ]
+  },
+  "random_04": {
+   "input_bytes": 2739296,
+   "output_bytes": 2739443,
+   "first_line": "277012",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    10.67,
+    10.783,
+    10.723,
+    10.726,
+    10.728
+   ],
+   "floor": [
+    1.509,
+    1.633,
+    1.591,
+    1.72,
+    1.619
+   ]
+  },
+  "small_degree_00": {
+   "input_bytes": 12,
+   "output_bytes": 10,
+   "first_line": "1",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.709,
+    0.701,
+    0.7,
+    0.71,
+    0.694
+   ],
+   "floor": [
+    0.461,
+    0.454,
+    0.444,
+    0.458,
+    0.462
+   ]
+  },
+  "small_degree_01": {
+   "input_bytes": 22,
+   "output_bytes": 20,
+   "first_line": "2",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.699,
+    0.686,
+    0.67,
+    0.709,
+    0.681
+   ],
+   "floor": [
+    0.493,
+    0.441,
+    0.454,
+    0.462,
+    0.441
+   ]
+  },
+  "small_degree_02": {
+   "input_bytes": 30,
+   "output_bytes": 30,
+   "first_line": "3",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.707,
+    0.677,
+    0.68,
+    0.723,
+    0.691
+   ],
+   "floor": [
+    0.443,
+    0.438,
+    0.456,
+    0.506,
+    0.437
+   ]
+  },
+  "small_degree_03": {
+   "input_bytes": 42,
+   "output_bytes": 40,
+   "first_line": "4",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.726,
+    0.68,
+    0.679,
+    0.71,
+    0.68
+   ],
+   "floor": [
+    0.438,
+    0.436,
+    0.475,
+    0.446,
+    0.456
+   ]
+  },
+  "small_degree_04": {
+   "input_bytes": 52,
+   "output_bytes": 49,
+   "first_line": "5",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.729,
+    0.677,
+    0.676,
+    0.712,
+    0.684
+   ],
+   "floor": [
+    0.448,
+    0.479,
+    0.458,
+    0.434,
+    0.464
+   ]
+  },
+  "small_degree_05": {
+   "input_bytes": 62,
+   "output_bytes": 59,
+   "first_line": "6",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.734,
+    0.673,
+    0.673,
+    0.709,
+    0.68
+   ],
+   "floor": [
+    0.49,
+    0.46,
+    0.44,
+    0.456,
+    0.489
+   ]
+  },
+  "small_degree_06": {
+   "input_bytes": 71,
+   "output_bytes": 69,
+   "first_line": "7",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.718,
+    0.68,
+    0.676,
+    0.708,
+    0.707
+   ],
+   "floor": [
+    0.469,
+    0.433,
+    0.448,
+    0.452,
+    0.434
+   ]
+  },
+  "small_degree_07": {
+   "input_bytes": 82,
+   "output_bytes": 80,
+   "first_line": "8",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.732,
+    0.68,
+    0.678,
+    0.715,
+    0.705
+   ],
+   "floor": [
+    0.443,
+    0.43,
+    0.471,
+    0.435,
+    0.442
+   ]
+  },
+  "small_degree_08": {
+   "input_bytes": 89,
+   "output_bytes": 88,
+   "first_line": "9",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.736,
+    0.67,
+    0.676,
+    0.707,
+    0.704
+   ],
+   "floor": [
+    0.438,
+    0.458,
+    0.478,
+    0.448,
+    0.464
+   ]
+  },
+  "small_degree_09": {
+   "input_bytes": 103,
+   "output_bytes": 100,
+   "first_line": "10",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.753,
+    0.68,
+    0.669,
+    0.711,
+    0.732
+   ],
+   "floor": [
+    0.473,
+    0.484,
+    0.465,
+    0.446,
+    0.47
+   ]
+  }
+ }
+}

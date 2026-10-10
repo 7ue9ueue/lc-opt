@@ -8,10 +8,8 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
 
 - Five NTT primes below 2^30 with 2^20 | p - 1: 998244353, 985661441, 976224257, 975175681,
   972029953. Product 2^149.35 > 2^19 (2^64 - 1)^2. One cyclic transform of length 2^lg per prime.
-- `transform.hpp`: lib/ntt's transform (recursion, tables, kernels) with the modulus a run-time
-  value. `kernels.hpp` is lib/ntt's generated kernels with P, 2P, -1/P as variables instead of
-  constants (`gen_kernels.py` imports lib's generator and rewrites 6 lines; same instructions).
-  For 2^lg = 2 * 4^j >= 256 with both factors at most half (all large tests) the first level is a
+- `lib/multimod`: lib/ntt's transform (recursion, tables, kernels) with the modulus a run-time
+  value, `Wide` (64-bit) input. For 2^lg = 2 * 4^j >= 256 with both factors at most half (all large tests) the first level is a
   radix-8 pass that reads the 64-bit input and reduces it mod p on the fly
   (hi (2^32 mod p) + lo; lo < 8p brought below 2p by two halvings).
 - CRT, not Garner: the transform for prime k returns y_k = c / M_k mod p_k (the factor is folded
@@ -78,6 +76,10 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
     AC 44 ms; [409261](https://judge.yosupo.jp/submission/409261) AC 51 ms (judge jitter).
 - 2026-10-09, audit (claude): resubmitted, [409296](https://judge.yosupo.jp/submission/409296) AC 43 ms
   (3/5), large cases 40-43 ms, no spike; `lc-amd` predicts ~41-43.
+- 2026-10-10, claude (issue #156): the local transform moved to `lib/multimod` (`Wide`). At odd
+  lg (2^7..2^19) a sparse input is now reduced and transformed in one pass; lg 20 is the same
+  logic. Transforms alone at lg 20: ratio 1.0005; at lg 19: 0.9904. `judge.py bench`,
+  31 rounds, `lc-amd`: 0.9998. 44/44 official tests. Details: `lib/multimod/notes.md`.
 - Next: transforms are ~24.7 of ~41 ms and near lib/ntt's kernel bound; `write()` 6 ms is fixed.
   Five primes are the minimum with 30-bit primes (four give 2^120 < 2^147). Left: the radix-8
   level's reduction (1.2 ms), the subtrees (lib/ntt's kernels).

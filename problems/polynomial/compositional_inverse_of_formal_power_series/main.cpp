@@ -4699,6 +4699,592 @@ inline constexpr std::uint32_t kP = 998244353, k2P = 2 * kP;
         : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
 }
 
+// Forward radix-4 butterflies, values < 4P, on the columns j < h of one group with (j & width) == 0 (inputs
+// a[j + t h], t < 4). width >= 2 a power of two, h a multiple of 2 width; x, y as for
+// lib/ntt's kernels (slots k and 2k).
+[[gnu::noinline]] inline void forward_columns(Vec* a, std::size_t h, std::size_t width, const std::uint32_t* x, const std::uint32_t* y) {
+    alignas(32) Vec w[3];  // twiddle values x, y, z; their quotients stay in ymm11-13
+    Vec* const end = a + h;
+    Vec* stop;
+    asm volatile(
+        "vpbroadcastd %[P], %%ymm15\n\t"
+        "vpbroadcastd %[P2], %%ymm14\n\t"
+        "vbroadcastss (%[x]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, (%[w])\n\t"
+        "vbroadcastss 32(%[x]), %%ymm11\n\t"
+        "vbroadcastss (%[y]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 32(%[w])\n\t"
+        "vbroadcastss 32(%[y]), %%ymm12\n\t"
+        "vbroadcastss 4(%[y]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 64(%[w])\n\t"
+        "vbroadcastss 36(%[y]), %%ymm13\n\t"
+        "1:\n\t"
+        "lea (%[a],%[width]), %[stop]\n\t"
+        ".p2align 5\n\t"
+        "2:\n\t"
+        "vmovdqa (%[a],%[h3]), %%ymm0\n\t"
+        "vmovdqa 32(%[a],%[h3]), %%ymm1\n\t"
+        "vmovdqa (%[a],%[h]), %%ymm2\n\t"
+        "vmovdqa 32(%[a],%[h]), %%ymm3\n\t"
+        "vpmuludq (%[a],%[h3]), %%ymm11, %%ymm4\n\t"
+        "vpmuludq 32(%[a],%[h3]), %%ymm11, %%ymm5\n\t"
+        "vpmuludq 4(%[a],%[h3]), %%ymm11, %%ymm6\n\t"
+        "vpmuludq 36(%[a],%[h3]), %%ymm11, %%ymm7\n\t"
+        "vmovdqa (%[a],%[h],2), %%ymm8\n\t"
+        "vpsrlq $32, %%ymm4, %%ymm4\n\t"
+        "vmovdqa 32(%[a],%[h],2), %%ymm9\n\t"
+        "vpsrlq $32, %%ymm5, %%ymm5\n\t"
+        "vpblendd $170, %%ymm6, %%ymm4, %%ymm6\n\t"
+        "vpblendd $170, %%ymm7, %%ymm5, %%ymm7\n\t"
+        "vmovdqa (%[a]), %%ymm5\n\t"
+        "vpmulld (%[w]), %%ymm0, %%ymm0\n\t"
+        "vpmulld %%ymm15, %%ymm6, %%ymm6\n\t"
+        "vmovdqa 32(%[a]), %%ymm4\n\t"
+        "vpmulld (%[w]), %%ymm1, %%ymm1\n\t"
+        "vpmulld %%ymm15, %%ymm7, %%ymm7\n\t"
+        "vpsubd %%ymm14, %%ymm2, %%ymm10\n\t"
+        "vpminud %%ymm10, %%ymm2, %%ymm10\n\t"
+        "vpmuludq (%[a],%[h],2), %%ymm11, %%ymm2\n\t"
+        "vpsubd %%ymm6, %%ymm0, %%ymm6\n\t"
+        "vpsubd %%ymm14, %%ymm3, %%ymm0\n\t"
+        "vpminud %%ymm0, %%ymm3, %%ymm0\n\t"
+        "vpsubd %%ymm7, %%ymm1, %%ymm7\n\t"
+        "vpmuludq 32(%[a],%[h],2), %%ymm11, %%ymm1\n\t"
+        "vpmuludq 4(%[a],%[h],2), %%ymm11, %%ymm3\n\t"
+        "vpsrlq $32, %%ymm2, %%ymm2\n\t"
+        "vpmulld (%[w]), %%ymm8, %%ymm8\n\t"
+        "vpmulld (%[w]), %%ymm9, %%ymm9\n\t"
+        "vpsrlq $32, %%ymm1, %%ymm1\n\t"
+        "vpblendd $170, %%ymm3, %%ymm2, %%ymm3\n\t"
+        "vpmuludq 36(%[a],%[h],2), %%ymm11, %%ymm2\n\t"
+        "vpmulld %%ymm15, %%ymm3, %%ymm3\n\t"
+        "vpblendd $170, %%ymm2, %%ymm1, %%ymm2\n\t"
+        "vpaddd %%ymm14, %%ymm10, %%ymm1\n\t"
+        "vpaddd %%ymm6, %%ymm10, %%ymm10\n\t"
+        "vpsubd %%ymm6, %%ymm1, %%ymm6\n\t"
+        "vpmulld %%ymm15, %%ymm2, %%ymm2\n\t"
+        "vpsubd %%ymm3, %%ymm8, %%ymm3\n\t"
+        "vpaddd %%ymm14, %%ymm0, %%ymm8\n\t"
+        "vpaddd %%ymm7, %%ymm0, %%ymm0\n\t"
+        "vpsubd %%ymm7, %%ymm8, %%ymm7\n\t"
+        "vpsrlq $32, %%ymm10, %%ymm8\n\t"
+        "vpmuludq %%ymm12, %%ymm10, %%ymm1\n\t"
+        "vpmuludq %%ymm12, %%ymm8, %%ymm8\n\t"
+        "vpmulld 32(%[w]), %%ymm10, %%ymm10\n\t"
+        "vpsubd %%ymm2, %%ymm9, %%ymm2\n\t"
+        "vpsrlq $32, %%ymm6, %%ymm9\n\t"
+        "vpmuludq %%ymm13, %%ymm9, %%ymm9\n\t"
+        "vpsrlq $32, %%ymm1, %%ymm1\n\t"
+        "vpblendd $170, %%ymm8, %%ymm1, %%ymm8\n\t"
+        "vpmuludq %%ymm13, %%ymm6, %%ymm1\n\t"
+        "vpmulld 64(%[w]), %%ymm6, %%ymm6\n\t"
+        "vpmulld %%ymm15, %%ymm8, %%ymm8\n\t"
+        "vpsrlq $32, %%ymm1, %%ymm1\n\t"
+        "vpblendd $170, %%ymm9, %%ymm1, %%ymm9\n\t"
+        "vpsubd %%ymm8, %%ymm10, %%ymm8\n\t"
+        "vpsrlq $32, %%ymm0, %%ymm10\n\t"
+        "vpmuludq %%ymm12, %%ymm0, %%ymm1\n\t"
+        "vpmuludq %%ymm12, %%ymm10, %%ymm10\n\t"
+        "vpmulld %%ymm15, %%ymm9, %%ymm9\n\t"
+        "vpmulld 32(%[w]), %%ymm0, %%ymm0\n\t"
+        "vpsrlq $32, %%ymm1, %%ymm1\n\t"
+        "vpblendd $170, %%ymm10, %%ymm1, %%ymm10\n\t"
+        "vpsubd %%ymm9, %%ymm6, %%ymm9\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm6\n\t"
+        "vpmuludq %%ymm13, %%ymm7, %%ymm1\n\t"
+        "vpmuludq %%ymm13, %%ymm6, %%ymm6\n\t"
+        "vpmulld %%ymm15, %%ymm10, %%ymm10\n\t"
+        "vpmulld 64(%[w]), %%ymm7, %%ymm7\n\t"
+        "vpsrlq $32, %%ymm1, %%ymm1\n\t"
+        "vpblendd $170, %%ymm6, %%ymm1, %%ymm6\n\t"
+        "vpsubd %%ymm10, %%ymm0, %%ymm10\n\t"
+        "vpsubd %%ymm14, %%ymm5, %%ymm0\n\t"
+        "vpsubd %%ymm14, %%ymm4, %%ymm1\n\t"
+        "vpminud %%ymm0, %%ymm5, %%ymm0\n\t"
+        "vpminud %%ymm1, %%ymm4, %%ymm1\n\t"
+        "vpmulld %%ymm15, %%ymm6, %%ymm6\n\t"
+        "vpaddd %%ymm3, %%ymm0, %%ymm4\n\t"
+        "vpsubd %%ymm3, %%ymm0, %%ymm3\n\t"
+        "vpaddd %%ymm2, %%ymm1, %%ymm0\n\t"
+        "vpsubd %%ymm2, %%ymm1, %%ymm2\n\t"
+        "vpsubd %%ymm14, %%ymm4, %%ymm1\n\t"
+        "vpaddd %%ymm14, %%ymm3, %%ymm5\n\t"
+        "vpminud %%ymm1, %%ymm4, %%ymm1\n\t"
+        "vpminud %%ymm5, %%ymm3, %%ymm5\n\t"
+        "vpsubd %%ymm6, %%ymm7, %%ymm6\n\t"
+        "vpsubd %%ymm14, %%ymm0, %%ymm7\n\t"
+        "vpaddd %%ymm14, %%ymm2, %%ymm3\n\t"
+        "vpminud %%ymm7, %%ymm0, %%ymm7\n\t"
+        "vpaddd %%ymm14, %%ymm1, %%ymm0\n\t"
+        "vpaddd %%ymm14, %%ymm5, %%ymm4\n\t"
+        "vpminud %%ymm3, %%ymm2, %%ymm3\n\t"
+        "vpaddd %%ymm8, %%ymm1, %%ymm1\n\t"
+        "vpsubd %%ymm8, %%ymm0, %%ymm8\n\t"
+        "vpaddd %%ymm9, %%ymm5, %%ymm5\n\t"
+        "vpaddd %%ymm14, %%ymm7, %%ymm0\n\t"
+        "vpaddd %%ymm14, %%ymm3, %%ymm2\n\t"
+        "vpsubd %%ymm9, %%ymm4, %%ymm9\n\t"
+        "vpaddd %%ymm10, %%ymm7, %%ymm7\n\t"
+        "vmovdqa %%ymm1, (%[a])\n\t"
+        "vpsubd %%ymm10, %%ymm0, %%ymm10\n\t"
+        "vpaddd %%ymm6, %%ymm3, %%ymm3\n\t"
+        "vpsubd %%ymm6, %%ymm2, %%ymm6\n\t"
+        "vmovdqa %%ymm8, (%[a],%[h])\n\t"
+        "vmovdqa %%ymm5, (%[a],%[h],2)\n\t"
+        "vmovdqa %%ymm9, (%[a],%[h3])\n\t"
+        "vmovdqa %%ymm7, 32(%[a])\n\t"
+        "vmovdqa %%ymm10, 32(%[a],%[h])\n\t"
+        "vmovdqa %%ymm3, 32(%[a],%[h],2)\n\t"
+        "vmovdqa %%ymm6, 32(%[a],%[h3])\n\t"
+        "add $64, %[a]\n\t"
+        "cmp %[stop], %[a]\n\t"
+        "jne 2b\n\t"
+        "add %[width], %[a]\n\t"
+        "cmp %[end], %[a]\n\t"
+        "jne 1b\n\t"
+        : [a] "+r"(a), [stop] "=&r"(stop)
+        : [end] "r"(end), [h] "r"(32 * h), [h3] "r"(96 * h), [width] "r"(32 * width), [y] "r"(y), [x] "r"(x), [w] "r"(w),
+          [P] "m"(kP), [P2] "m"(k2P)
+        : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
+}
+
+// Forward radix-4 butterflies, values < 4P, on the columns j < h of one group with j even (inputs a[j + t h],
+// t < 4). h a multiple of 4; x, y as for lib/ntt's kernels (slots k and 2k).
+[[gnu::noinline]] inline void forward_even_columns(Vec* a, std::size_t h, const std::uint32_t* x, const std::uint32_t* y) {
+    alignas(32) Vec w[3];  // twiddle values x, y, z; their quotients stay in ymm11-13
+    Vec* const end = a + h;
+    asm volatile(
+        "vpbroadcastd %[P], %%ymm15\n\t"
+        "vpbroadcastd %[P2], %%ymm14\n\t"
+        "vbroadcastss (%[x]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, (%[w])\n\t"
+        "vbroadcastss 32(%[x]), %%ymm11\n\t"
+        "vbroadcastss (%[y]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 32(%[w])\n\t"
+        "vbroadcastss 32(%[y]), %%ymm12\n\t"
+        "vbroadcastss 4(%[y]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 64(%[w])\n\t"
+        "vbroadcastss 36(%[y]), %%ymm13\n\t"
+        ".p2align 5\n\t"
+        "1:\n\t"
+        "vmovdqa (%[a],%[h3]), %%ymm0\n\t"
+        "vmovdqa 64(%[a],%[h3]), %%ymm1\n\t"
+        "vmovdqa (%[a],%[h]), %%ymm2\n\t"
+        "vmovdqa 64(%[a],%[h]), %%ymm3\n\t"
+        "vpmuludq (%[a],%[h3]), %%ymm11, %%ymm4\n\t"
+        "vpmuludq 64(%[a],%[h3]), %%ymm11, %%ymm5\n\t"
+        "vpmuludq 4(%[a],%[h3]), %%ymm11, %%ymm6\n\t"
+        "vpmuludq 68(%[a],%[h3]), %%ymm11, %%ymm7\n\t"
+        "vmovdqa (%[a],%[h],2), %%ymm8\n\t"
+        "vpsrlq $32, %%ymm4, %%ymm4\n\t"
+        "vmovdqa 64(%[a],%[h],2), %%ymm9\n\t"
+        "vpsrlq $32, %%ymm5, %%ymm5\n\t"
+        "vpblendd $170, %%ymm6, %%ymm4, %%ymm6\n\t"
+        "vpblendd $170, %%ymm7, %%ymm5, %%ymm7\n\t"
+        "vmovdqa (%[a]), %%ymm5\n\t"
+        "vpmulld (%[w]), %%ymm0, %%ymm0\n\t"
+        "vpmulld %%ymm15, %%ymm6, %%ymm6\n\t"
+        "vmovdqa 64(%[a]), %%ymm4\n\t"
+        "vpmulld (%[w]), %%ymm1, %%ymm1\n\t"
+        "vpmulld %%ymm15, %%ymm7, %%ymm7\n\t"
+        "vpsubd %%ymm14, %%ymm2, %%ymm10\n\t"
+        "vpminud %%ymm10, %%ymm2, %%ymm10\n\t"
+        "vpmuludq (%[a],%[h],2), %%ymm11, %%ymm2\n\t"
+        "vpsubd %%ymm6, %%ymm0, %%ymm6\n\t"
+        "vpsubd %%ymm14, %%ymm3, %%ymm0\n\t"
+        "vpminud %%ymm0, %%ymm3, %%ymm0\n\t"
+        "vpsubd %%ymm7, %%ymm1, %%ymm7\n\t"
+        "vpmuludq 64(%[a],%[h],2), %%ymm11, %%ymm1\n\t"
+        "vpmuludq 4(%[a],%[h],2), %%ymm11, %%ymm3\n\t"
+        "vpsrlq $32, %%ymm2, %%ymm2\n\t"
+        "vpmulld (%[w]), %%ymm8, %%ymm8\n\t"
+        "vpmulld (%[w]), %%ymm9, %%ymm9\n\t"
+        "vpsrlq $32, %%ymm1, %%ymm1\n\t"
+        "vpblendd $170, %%ymm3, %%ymm2, %%ymm3\n\t"
+        "vpmuludq 68(%[a],%[h],2), %%ymm11, %%ymm2\n\t"
+        "vpmulld %%ymm15, %%ymm3, %%ymm3\n\t"
+        "vpblendd $170, %%ymm2, %%ymm1, %%ymm2\n\t"
+        "vpaddd %%ymm14, %%ymm10, %%ymm1\n\t"
+        "vpaddd %%ymm6, %%ymm10, %%ymm10\n\t"
+        "vpsubd %%ymm6, %%ymm1, %%ymm6\n\t"
+        "vpmulld %%ymm15, %%ymm2, %%ymm2\n\t"
+        "vpsubd %%ymm3, %%ymm8, %%ymm3\n\t"
+        "vpaddd %%ymm14, %%ymm0, %%ymm8\n\t"
+        "vpaddd %%ymm7, %%ymm0, %%ymm0\n\t"
+        "vpsubd %%ymm7, %%ymm8, %%ymm7\n\t"
+        "vpsrlq $32, %%ymm10, %%ymm8\n\t"
+        "vpmuludq %%ymm12, %%ymm10, %%ymm1\n\t"
+        "vpmuludq %%ymm12, %%ymm8, %%ymm8\n\t"
+        "vpmulld 32(%[w]), %%ymm10, %%ymm10\n\t"
+        "vpsubd %%ymm2, %%ymm9, %%ymm2\n\t"
+        "vpsrlq $32, %%ymm6, %%ymm9\n\t"
+        "vpmuludq %%ymm13, %%ymm9, %%ymm9\n\t"
+        "vpsrlq $32, %%ymm1, %%ymm1\n\t"
+        "vpblendd $170, %%ymm8, %%ymm1, %%ymm8\n\t"
+        "vpmuludq %%ymm13, %%ymm6, %%ymm1\n\t"
+        "vpmulld 64(%[w]), %%ymm6, %%ymm6\n\t"
+        "vpmulld %%ymm15, %%ymm8, %%ymm8\n\t"
+        "vpsrlq $32, %%ymm1, %%ymm1\n\t"
+        "vpblendd $170, %%ymm9, %%ymm1, %%ymm9\n\t"
+        "vpsubd %%ymm8, %%ymm10, %%ymm8\n\t"
+        "vpsrlq $32, %%ymm0, %%ymm10\n\t"
+        "vpmuludq %%ymm12, %%ymm0, %%ymm1\n\t"
+        "vpmuludq %%ymm12, %%ymm10, %%ymm10\n\t"
+        "vpmulld %%ymm15, %%ymm9, %%ymm9\n\t"
+        "vpmulld 32(%[w]), %%ymm0, %%ymm0\n\t"
+        "vpsrlq $32, %%ymm1, %%ymm1\n\t"
+        "vpblendd $170, %%ymm10, %%ymm1, %%ymm10\n\t"
+        "vpsubd %%ymm9, %%ymm6, %%ymm9\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm6\n\t"
+        "vpmuludq %%ymm13, %%ymm7, %%ymm1\n\t"
+        "vpmuludq %%ymm13, %%ymm6, %%ymm6\n\t"
+        "vpmulld %%ymm15, %%ymm10, %%ymm10\n\t"
+        "vpmulld 64(%[w]), %%ymm7, %%ymm7\n\t"
+        "vpsrlq $32, %%ymm1, %%ymm1\n\t"
+        "vpblendd $170, %%ymm6, %%ymm1, %%ymm6\n\t"
+        "vpsubd %%ymm10, %%ymm0, %%ymm10\n\t"
+        "vpsubd %%ymm14, %%ymm5, %%ymm0\n\t"
+        "vpsubd %%ymm14, %%ymm4, %%ymm1\n\t"
+        "vpminud %%ymm0, %%ymm5, %%ymm0\n\t"
+        "vpminud %%ymm1, %%ymm4, %%ymm1\n\t"
+        "vpmulld %%ymm15, %%ymm6, %%ymm6\n\t"
+        "vpaddd %%ymm3, %%ymm0, %%ymm4\n\t"
+        "vpsubd %%ymm3, %%ymm0, %%ymm3\n\t"
+        "vpaddd %%ymm2, %%ymm1, %%ymm0\n\t"
+        "vpsubd %%ymm2, %%ymm1, %%ymm2\n\t"
+        "vpsubd %%ymm14, %%ymm4, %%ymm1\n\t"
+        "vpaddd %%ymm14, %%ymm3, %%ymm5\n\t"
+        "vpminud %%ymm1, %%ymm4, %%ymm1\n\t"
+        "vpminud %%ymm5, %%ymm3, %%ymm5\n\t"
+        "vpsubd %%ymm6, %%ymm7, %%ymm6\n\t"
+        "vpsubd %%ymm14, %%ymm0, %%ymm7\n\t"
+        "vpaddd %%ymm14, %%ymm2, %%ymm3\n\t"
+        "vpminud %%ymm7, %%ymm0, %%ymm7\n\t"
+        "vpaddd %%ymm14, %%ymm1, %%ymm0\n\t"
+        "vpaddd %%ymm14, %%ymm5, %%ymm4\n\t"
+        "vpminud %%ymm3, %%ymm2, %%ymm3\n\t"
+        "vpaddd %%ymm8, %%ymm1, %%ymm1\n\t"
+        "vpsubd %%ymm8, %%ymm0, %%ymm8\n\t"
+        "vpaddd %%ymm9, %%ymm5, %%ymm5\n\t"
+        "vpaddd %%ymm14, %%ymm7, %%ymm0\n\t"
+        "vpaddd %%ymm14, %%ymm3, %%ymm2\n\t"
+        "vpsubd %%ymm9, %%ymm4, %%ymm9\n\t"
+        "vpaddd %%ymm10, %%ymm7, %%ymm7\n\t"
+        "vmovdqa %%ymm1, (%[a])\n\t"
+        "vpsubd %%ymm10, %%ymm0, %%ymm10\n\t"
+        "vpaddd %%ymm6, %%ymm3, %%ymm3\n\t"
+        "vpsubd %%ymm6, %%ymm2, %%ymm6\n\t"
+        "vmovdqa %%ymm8, (%[a],%[h])\n\t"
+        "vmovdqa %%ymm5, (%[a],%[h],2)\n\t"
+        "vmovdqa %%ymm9, (%[a],%[h3])\n\t"
+        "vmovdqa %%ymm7, 64(%[a])\n\t"
+        "vmovdqa %%ymm10, 64(%[a],%[h])\n\t"
+        "vmovdqa %%ymm3, 64(%[a],%[h],2)\n\t"
+        "vmovdqa %%ymm6, 64(%[a],%[h3])\n\t"
+        "add $128, %[a]\n\t"
+        "cmp %[end], %[a]\n\t"
+        "jne 1b\n\t"
+        : [a] "+r"(a)
+        : [end] "r"(end), [h] "r"(32 * h), [h3] "r"(96 * h), [y] "r"(y), [x] "r"(x), [w] "r"(w),
+          [P] "m"(kP), [P2] "m"(k2P)
+        : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
+}
+
+// Inverse radix-4 butterflies, values < 2P, on the columns j < h of one group with (j & width) == 0 (inputs
+// a[j + t h], t < 4). width >= 2 a power of two, h a multiple of 2 width; x, y as for
+// lib/ntt's kernels (slots k and 2k).
+[[gnu::noinline]] inline void inverse_columns(Vec* a, std::size_t h, std::size_t width, const std::uint32_t* x, const std::uint32_t* y) {
+    alignas(32) Vec w[3];  // twiddle values x, y, z; their quotients stay in ymm11-13
+    Vec* const end = a + h;
+    Vec* stop;
+    asm volatile(
+        "vpbroadcastd %[P], %%ymm15\n\t"
+        "vpbroadcastd %[P2], %%ymm14\n\t"
+        "vbroadcastss (%[x]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, (%[w])\n\t"
+        "vbroadcastss 32(%[x]), %%ymm11\n\t"
+        "vbroadcastss (%[y]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 32(%[w])\n\t"
+        "vbroadcastss 32(%[y]), %%ymm12\n\t"
+        "vbroadcastss 4(%[y]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 64(%[w])\n\t"
+        "vbroadcastss 36(%[y]), %%ymm13\n\t"
+        "1:\n\t"
+        "lea (%[a],%[width]), %[stop]\n\t"
+        ".p2align 5\n\t"
+        "2:\n\t"
+        "vmovdqa (%[a]), %%ymm0\n\t"
+        "vmovdqa 32(%[a]), %%ymm1\n\t"
+        "vmovdqa (%[a],%[h],2), %%ymm2\n\t"
+        "vmovdqa 32(%[a],%[h],2), %%ymm3\n\t"
+        "vpaddd %%ymm14, %%ymm0, %%ymm4\n\t"
+        "vpaddd (%[a],%[h]), %%ymm0, %%ymm0\n\t"
+        "vpaddd %%ymm14, %%ymm1, %%ymm5\n\t"
+        "vpsubd (%[a],%[h]), %%ymm4, %%ymm4\n\t"
+        "vpaddd 32(%[a],%[h]), %%ymm1, %%ymm1\n\t"
+        "vpsubd %%ymm14, %%ymm0, %%ymm6\n\t"
+        "vpaddd %%ymm14, %%ymm2, %%ymm7\n\t"
+        "vpsubd 32(%[a],%[h]), %%ymm5, %%ymm5\n\t"
+        "vpsrlq $32, %%ymm4, %%ymm8\n\t"
+        "vpmuludq %%ymm12, %%ymm4, %%ymm9\n\t"
+        "vpaddd %%ymm14, %%ymm3, %%ymm10\n\t"
+        "vpsubd (%[a],%[h3]), %%ymm7, %%ymm7\n\t"
+        "vpmuludq %%ymm12, %%ymm8, %%ymm8\n\t"
+        "vpmulld 32(%[w]), %%ymm4, %%ymm4\n\t"
+        "vpsubd 32(%[a],%[h3]), %%ymm10, %%ymm10\n\t"
+        "vpaddd (%[a],%[h3]), %%ymm2, %%ymm2\n\t"
+        "vpminud %%ymm6, %%ymm0, %%ymm6\n\t"
+        "vpsrlq $32, %%ymm5, %%ymm0\n\t"
+        "vpmuludq %%ymm12, %%ymm0, %%ymm0\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm9\n\t"
+        "vpaddd 32(%[a],%[h3]), %%ymm3, %%ymm3\n\t"
+        "vpblendd $170, %%ymm8, %%ymm9, %%ymm8\n\t"
+        "vpmuludq %%ymm12, %%ymm5, %%ymm9\n\t"
+        "vpmulld 32(%[w]), %%ymm5, %%ymm5\n\t"
+        "vpmulld %%ymm15, %%ymm8, %%ymm8\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm9\n\t"
+        "vpblendd $170, %%ymm0, %%ymm9, %%ymm0\n\t"
+        "vpsubd %%ymm8, %%ymm4, %%ymm8\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm4\n\t"
+        "vpmuludq %%ymm13, %%ymm7, %%ymm9\n\t"
+        "vpmuludq %%ymm13, %%ymm4, %%ymm4\n\t"
+        "vpmulld %%ymm15, %%ymm0, %%ymm0\n\t"
+        "vpmulld 64(%[w]), %%ymm7, %%ymm7\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm9\n\t"
+        "vpblendd $170, %%ymm4, %%ymm9, %%ymm4\n\t"
+        "vpsubd %%ymm0, %%ymm5, %%ymm0\n\t"
+        "vpsrlq $32, %%ymm10, %%ymm5\n\t"
+        "vpmuludq %%ymm13, %%ymm10, %%ymm9\n\t"
+        "vpmuludq %%ymm13, %%ymm5, %%ymm5\n\t"
+        "vpmulld %%ymm15, %%ymm4, %%ymm4\n\t"
+        "vpmulld 64(%[w]), %%ymm10, %%ymm10\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm9\n\t"
+        "vpblendd $170, %%ymm5, %%ymm9, %%ymm5\n\t"
+        "vpsubd %%ymm4, %%ymm7, %%ymm4\n\t"
+        "vpsubd %%ymm14, %%ymm1, %%ymm7\n\t"
+        "vpsubd %%ymm14, %%ymm2, %%ymm9\n\t"
+        "vpmulld %%ymm15, %%ymm5, %%ymm5\n\t"
+        "vpminud %%ymm7, %%ymm1, %%ymm7\n\t"
+        "vpminud %%ymm9, %%ymm2, %%ymm9\n\t"
+        "vpsubd %%ymm14, %%ymm3, %%ymm2\n\t"
+        "vpaddd %%ymm14, %%ymm6, %%ymm1\n\t"
+        "vpminud %%ymm2, %%ymm3, %%ymm2\n\t"
+        "vpaddd %%ymm14, %%ymm7, %%ymm3\n\t"
+        "vpaddd %%ymm9, %%ymm6, %%ymm6\n\t"
+        "vpsubd %%ymm9, %%ymm1, %%ymm9\n\t"
+        "vpsubd %%ymm2, %%ymm3, %%ymm3\n\t"
+        "vpaddd %%ymm2, %%ymm7, %%ymm2\n\t"
+        "vpaddd %%ymm14, %%ymm8, %%ymm7\n\t"
+        "vpsubd %%ymm5, %%ymm10, %%ymm5\n\t"
+        "vpaddd %%ymm14, %%ymm0, %%ymm10\n\t"
+        "vpsubd %%ymm4, %%ymm7, %%ymm7\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm1\n\t"
+        "vpsubd %%ymm5, %%ymm10, %%ymm10\n\t"
+        "vpmuludq %%ymm11, %%ymm1, %%ymm1\n\t"
+        "vpaddd %%ymm4, %%ymm8, %%ymm4\n\t"
+        "vpaddd %%ymm5, %%ymm0, %%ymm5\n\t"
+        "vpmuludq %%ymm11, %%ymm9, %%ymm0\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm8\n\t"
+        "vpmulld (%[w]), %%ymm9, %%ymm9\n\t"
+        "vpmuludq %%ymm11, %%ymm8, %%ymm8\n\t"
+        "vpsrlq $32, %%ymm0, %%ymm0\n\t"
+        "vpblendd $170, %%ymm1, %%ymm0, %%ymm1\n\t"
+        "vpmuludq %%ymm11, %%ymm7, %%ymm0\n\t"
+        "vpmulld (%[w]), %%ymm7, %%ymm7\n\t"
+        "vpmulld %%ymm15, %%ymm1, %%ymm1\n\t"
+        "vpsrlq $32, %%ymm0, %%ymm0\n\t"
+        "vpblendd $170, %%ymm8, %%ymm0, %%ymm8\n\t"
+        "vpsubd %%ymm1, %%ymm9, %%ymm1\n\t"
+        "vpsrlq $32, %%ymm3, %%ymm9\n\t"
+        "vpmuludq %%ymm11, %%ymm3, %%ymm0\n\t"
+        "vpmuludq %%ymm11, %%ymm9, %%ymm9\n\t"
+        "vpmulld %%ymm15, %%ymm8, %%ymm8\n\t"
+        "vmovdqa %%ymm1, (%[a],%[h],2)\n\t"
+        "vpsrlq $32, %%ymm10, %%ymm1\n\t"
+        "vpmuludq %%ymm11, %%ymm1, %%ymm1\n\t"
+        "vpmulld (%[w]), %%ymm3, %%ymm3\n\t"
+        "vpsrlq $32, %%ymm0, %%ymm0\n\t"
+        "vpblendd $170, %%ymm9, %%ymm0, %%ymm9\n\t"
+        "vpsubd %%ymm8, %%ymm7, %%ymm8\n\t"
+        "vpmuludq %%ymm11, %%ymm10, %%ymm7\n\t"
+        "vpmulld (%[w]), %%ymm10, %%ymm10\n\t"
+        "vpmulld %%ymm15, %%ymm9, %%ymm9\n\t"
+        "vpsubd %%ymm14, %%ymm6, %%ymm0\n\t"
+        "vmovdqa %%ymm8, (%[a],%[h3])\n\t"
+        "vpsubd %%ymm14, %%ymm4, %%ymm8\n\t"
+        "vpminud %%ymm0, %%ymm6, %%ymm0\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm7\n\t"
+        "vpsubd %%ymm14, %%ymm2, %%ymm6\n\t"
+        "vpminud %%ymm8, %%ymm4, %%ymm8\n\t"
+        "vmovdqa %%ymm0, (%[a])\n\t"
+        "vpblendd $170, %%ymm1, %%ymm7, %%ymm1\n\t"
+        "vpsubd %%ymm14, %%ymm5, %%ymm7\n\t"
+        "vpminud %%ymm6, %%ymm2, %%ymm6\n\t"
+        "vpsubd %%ymm9, %%ymm3, %%ymm9\n\t"
+        "vmovdqa %%ymm8, (%[a],%[h])\n\t"
+        "vpmulld %%ymm15, %%ymm1, %%ymm1\n\t"
+        "vpminud %%ymm7, %%ymm5, %%ymm7\n\t"
+        "vmovdqa %%ymm6, 32(%[a])\n\t"
+        "vmovdqa %%ymm7, 32(%[a],%[h])\n\t"
+        "vmovdqa %%ymm9, 32(%[a],%[h],2)\n\t"
+        "vpsubd %%ymm1, %%ymm10, %%ymm1\n\t"
+        "vmovdqa %%ymm1, 32(%[a],%[h3])\n\t"
+        "add $64, %[a]\n\t"
+        "cmp %[stop], %[a]\n\t"
+        "jne 2b\n\t"
+        "add %[width], %[a]\n\t"
+        "cmp %[end], %[a]\n\t"
+        "jne 1b\n\t"
+        : [a] "+r"(a), [stop] "=&r"(stop)
+        : [end] "r"(end), [h] "r"(32 * h), [h3] "r"(96 * h), [width] "r"(32 * width), [y] "r"(y), [x] "r"(x), [w] "r"(w),
+          [P] "m"(kP), [P2] "m"(k2P)
+        : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
+}
+
+// Inverse radix-4 butterflies, values < 2P, on the columns j < h of one group with j even (inputs a[j + t h],
+// t < 4). h a multiple of 4; x, y as for lib/ntt's kernels (slots k and 2k).
+[[gnu::noinline]] inline void inverse_even_columns(Vec* a, std::size_t h, const std::uint32_t* x, const std::uint32_t* y) {
+    alignas(32) Vec w[3];  // twiddle values x, y, z; their quotients stay in ymm11-13
+    Vec* const end = a + h;
+    asm volatile(
+        "vpbroadcastd %[P], %%ymm15\n\t"
+        "vpbroadcastd %[P2], %%ymm14\n\t"
+        "vbroadcastss (%[x]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, (%[w])\n\t"
+        "vbroadcastss 32(%[x]), %%ymm11\n\t"
+        "vbroadcastss (%[y]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 32(%[w])\n\t"
+        "vbroadcastss 32(%[y]), %%ymm12\n\t"
+        "vbroadcastss 4(%[y]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 64(%[w])\n\t"
+        "vbroadcastss 36(%[y]), %%ymm13\n\t"
+        ".p2align 5\n\t"
+        "1:\n\t"
+        "vmovdqa (%[a]), %%ymm0\n\t"
+        "vmovdqa 64(%[a]), %%ymm1\n\t"
+        "vmovdqa (%[a],%[h],2), %%ymm2\n\t"
+        "vmovdqa 64(%[a],%[h],2), %%ymm3\n\t"
+        "vpaddd %%ymm14, %%ymm0, %%ymm4\n\t"
+        "vpaddd (%[a],%[h]), %%ymm0, %%ymm0\n\t"
+        "vpaddd %%ymm14, %%ymm1, %%ymm5\n\t"
+        "vpsubd (%[a],%[h]), %%ymm4, %%ymm4\n\t"
+        "vpaddd 64(%[a],%[h]), %%ymm1, %%ymm1\n\t"
+        "vpsubd %%ymm14, %%ymm0, %%ymm6\n\t"
+        "vpaddd %%ymm14, %%ymm2, %%ymm7\n\t"
+        "vpsubd 64(%[a],%[h]), %%ymm5, %%ymm5\n\t"
+        "vpsrlq $32, %%ymm4, %%ymm8\n\t"
+        "vpmuludq %%ymm12, %%ymm4, %%ymm9\n\t"
+        "vpaddd %%ymm14, %%ymm3, %%ymm10\n\t"
+        "vpsubd (%[a],%[h3]), %%ymm7, %%ymm7\n\t"
+        "vpmuludq %%ymm12, %%ymm8, %%ymm8\n\t"
+        "vpmulld 32(%[w]), %%ymm4, %%ymm4\n\t"
+        "vpsubd 64(%[a],%[h3]), %%ymm10, %%ymm10\n\t"
+        "vpaddd (%[a],%[h3]), %%ymm2, %%ymm2\n\t"
+        "vpminud %%ymm6, %%ymm0, %%ymm6\n\t"
+        "vpsrlq $32, %%ymm5, %%ymm0\n\t"
+        "vpmuludq %%ymm12, %%ymm0, %%ymm0\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm9\n\t"
+        "vpaddd 64(%[a],%[h3]), %%ymm3, %%ymm3\n\t"
+        "vpblendd $170, %%ymm8, %%ymm9, %%ymm8\n\t"
+        "vpmuludq %%ymm12, %%ymm5, %%ymm9\n\t"
+        "vpmulld 32(%[w]), %%ymm5, %%ymm5\n\t"
+        "vpmulld %%ymm15, %%ymm8, %%ymm8\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm9\n\t"
+        "vpblendd $170, %%ymm0, %%ymm9, %%ymm0\n\t"
+        "vpsubd %%ymm8, %%ymm4, %%ymm8\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm4\n\t"
+        "vpmuludq %%ymm13, %%ymm7, %%ymm9\n\t"
+        "vpmuludq %%ymm13, %%ymm4, %%ymm4\n\t"
+        "vpmulld %%ymm15, %%ymm0, %%ymm0\n\t"
+        "vpmulld 64(%[w]), %%ymm7, %%ymm7\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm9\n\t"
+        "vpblendd $170, %%ymm4, %%ymm9, %%ymm4\n\t"
+        "vpsubd %%ymm0, %%ymm5, %%ymm0\n\t"
+        "vpsrlq $32, %%ymm10, %%ymm5\n\t"
+        "vpmuludq %%ymm13, %%ymm10, %%ymm9\n\t"
+        "vpmuludq %%ymm13, %%ymm5, %%ymm5\n\t"
+        "vpmulld %%ymm15, %%ymm4, %%ymm4\n\t"
+        "vpmulld 64(%[w]), %%ymm10, %%ymm10\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm9\n\t"
+        "vpblendd $170, %%ymm5, %%ymm9, %%ymm5\n\t"
+        "vpsubd %%ymm4, %%ymm7, %%ymm4\n\t"
+        "vpsubd %%ymm14, %%ymm1, %%ymm7\n\t"
+        "vpsubd %%ymm14, %%ymm2, %%ymm9\n\t"
+        "vpmulld %%ymm15, %%ymm5, %%ymm5\n\t"
+        "vpminud %%ymm7, %%ymm1, %%ymm7\n\t"
+        "vpminud %%ymm9, %%ymm2, %%ymm9\n\t"
+        "vpsubd %%ymm14, %%ymm3, %%ymm2\n\t"
+        "vpaddd %%ymm14, %%ymm6, %%ymm1\n\t"
+        "vpminud %%ymm2, %%ymm3, %%ymm2\n\t"
+        "vpaddd %%ymm14, %%ymm7, %%ymm3\n\t"
+        "vpaddd %%ymm9, %%ymm6, %%ymm6\n\t"
+        "vpsubd %%ymm9, %%ymm1, %%ymm9\n\t"
+        "vpsubd %%ymm2, %%ymm3, %%ymm3\n\t"
+        "vpaddd %%ymm2, %%ymm7, %%ymm2\n\t"
+        "vpaddd %%ymm14, %%ymm8, %%ymm7\n\t"
+        "vpsubd %%ymm5, %%ymm10, %%ymm5\n\t"
+        "vpaddd %%ymm14, %%ymm0, %%ymm10\n\t"
+        "vpsubd %%ymm4, %%ymm7, %%ymm7\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm1\n\t"
+        "vpsubd %%ymm5, %%ymm10, %%ymm10\n\t"
+        "vpmuludq %%ymm11, %%ymm1, %%ymm1\n\t"
+        "vpaddd %%ymm4, %%ymm8, %%ymm4\n\t"
+        "vpaddd %%ymm5, %%ymm0, %%ymm5\n\t"
+        "vpmuludq %%ymm11, %%ymm9, %%ymm0\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm8\n\t"
+        "vpmulld (%[w]), %%ymm9, %%ymm9\n\t"
+        "vpmuludq %%ymm11, %%ymm8, %%ymm8\n\t"
+        "vpsrlq $32, %%ymm0, %%ymm0\n\t"
+        "vpblendd $170, %%ymm1, %%ymm0, %%ymm1\n\t"
+        "vpmuludq %%ymm11, %%ymm7, %%ymm0\n\t"
+        "vpmulld (%[w]), %%ymm7, %%ymm7\n\t"
+        "vpmulld %%ymm15, %%ymm1, %%ymm1\n\t"
+        "vpsrlq $32, %%ymm0, %%ymm0\n\t"
+        "vpblendd $170, %%ymm8, %%ymm0, %%ymm8\n\t"
+        "vpsubd %%ymm1, %%ymm9, %%ymm1\n\t"
+        "vpsrlq $32, %%ymm3, %%ymm9\n\t"
+        "vpmuludq %%ymm11, %%ymm3, %%ymm0\n\t"
+        "vpmuludq %%ymm11, %%ymm9, %%ymm9\n\t"
+        "vpmulld %%ymm15, %%ymm8, %%ymm8\n\t"
+        "vmovdqa %%ymm1, (%[a],%[h],2)\n\t"
+        "vpsrlq $32, %%ymm10, %%ymm1\n\t"
+        "vpmuludq %%ymm11, %%ymm1, %%ymm1\n\t"
+        "vpmulld (%[w]), %%ymm3, %%ymm3\n\t"
+        "vpsrlq $32, %%ymm0, %%ymm0\n\t"
+        "vpblendd $170, %%ymm9, %%ymm0, %%ymm9\n\t"
+        "vpsubd %%ymm8, %%ymm7, %%ymm8\n\t"
+        "vpmuludq %%ymm11, %%ymm10, %%ymm7\n\t"
+        "vpmulld (%[w]), %%ymm10, %%ymm10\n\t"
+        "vpmulld %%ymm15, %%ymm9, %%ymm9\n\t"
+        "vpsubd %%ymm14, %%ymm6, %%ymm0\n\t"
+        "vmovdqa %%ymm8, (%[a],%[h3])\n\t"
+        "vpsubd %%ymm14, %%ymm4, %%ymm8\n\t"
+        "vpminud %%ymm0, %%ymm6, %%ymm0\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm7\n\t"
+        "vpsubd %%ymm14, %%ymm2, %%ymm6\n\t"
+        "vpminud %%ymm8, %%ymm4, %%ymm8\n\t"
+        "vmovdqa %%ymm0, (%[a])\n\t"
+        "vpblendd $170, %%ymm1, %%ymm7, %%ymm1\n\t"
+        "vpsubd %%ymm14, %%ymm5, %%ymm7\n\t"
+        "vpminud %%ymm6, %%ymm2, %%ymm6\n\t"
+        "vpsubd %%ymm9, %%ymm3, %%ymm9\n\t"
+        "vmovdqa %%ymm8, (%[a],%[h])\n\t"
+        "vpmulld %%ymm15, %%ymm1, %%ymm1\n\t"
+        "vpminud %%ymm7, %%ymm5, %%ymm7\n\t"
+        "vmovdqa %%ymm6, 64(%[a])\n\t"
+        "vmovdqa %%ymm7, 64(%[a],%[h])\n\t"
+        "vmovdqa %%ymm9, 64(%[a],%[h],2)\n\t"
+        "vpsubd %%ymm1, %%ymm10, %%ymm1\n\t"
+        "vmovdqa %%ymm1, 64(%[a],%[h3])\n\t"
+        "add $128, %[a]\n\t"
+        "cmp %[end], %[a]\n\t"
+        "jne 1b\n\t"
+        : [a] "+r"(a)
+        : [end] "r"(end), [h] "r"(32 * h), [h3] "r"(96 * h), [y] "r"(y), [x] "r"(x), [w] "r"(w),
+          [P] "m"(kP), [P2] "m"(k2P)
+        : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
+}
+
 }  // namespace poly::kernels
 
 namespace poly {
@@ -4773,13 +5359,44 @@ inline Vec low_difference(Vec x, Vec y) {
 // x - y mod P for canonical x, y.
 inline Vec difference(Vec x, Vec y) { return reduce(_mm256_sub_epi32(add(x, broadcast(kP)), y), kP); }
 
-// x w mod P in [0, 2P), any x < 2^32.
+// x w mod P in [0, 2P), any x < 2^32, w the same in every lane: the odd lanes use the even lanes'
+// quotient. Factors that differ by lane are Factors, not a Factor with its fields overwritten.
 inline Vec times(Vec x, const Factor& w) { return ntt::detail::multiply(x, w); }
+
+// A factor per lane and its Shoup quotients.
+struct Factors {
+    Vec w, q;
+};
+
+// x w mod P in [0, 2P), any x < 2^32, w per lane.
+inline Vec times(Vec x, const Factors& w) {
+    const Vec even = _mm256_srli_epi64(_mm256_mul_epu32(x, w.q), 32);
+    const Vec odd = _mm256_mul_epu32(_mm256_srli_epi64(x, 32), _mm256_srli_epi64(w.q, 32));
+    const Vec q = _mm256_blend_epi32(even, odd, 0xAA);
+    return _mm256_sub_epi32(_mm256_mullo_epi32(x, w.w), _mm256_mullo_epi32(q, broadcast(kP)));
+}
+
+// (n / 8)^-1 mod P for n = 2^lg, 3 <= lg <= kMaxLog: undoes a transform's factor n / 8. Row 1:
+// times 2^32, which also undoes the 2^-32 of leaf products.
+inline constexpr auto kInverseScales = [] {
+    std::array<std::array<std::uint32_t, ntt::kMaxLog + 1>, 2> s{};
+    for (int lg = 3; lg <= ntt::kMaxLog; ++lg) {
+        s[0][lg] = ntt::detail::power(std::uint32_t(1) << (lg - 3), kP - 2);
+        s[1][lg] = ntt::detail::multiply_mod(s[0][lg], kR);
+    }
+    return s;
+}();
 
 // Entry k of a twiddle table with its Shoup quotient.
 inline Factor entry(const std::uint32_t* table, std::size_t k) {
     const std::uint32_t* e = table + slot(k);
     return Factor(e[0], e[8]);
+}
+
+// Entries k .. k + 7 of a twiddle table, one per lane, k a multiple of 8.
+inline Factors entries(const std::uint32_t* table, std::size_t k) {
+    const std::uint32_t* e = table + slot(k);
+    return {load(e), load(e + 8)};
 }
 
 // w_p and its quotient; the quotient of P - w is ~quotient(w).
@@ -5291,9 +5908,8 @@ public:
     // out = the coefficients in [0, P) of the transform in, both of length n = out.size(). in may
     // be out; otherwise the two must not overlap.
     void inverse(std::span<const std::uint32_t> in, std::span<std::uint32_t> out, Half output = Half::kBoth) const {
-        using namespace ntt::detail;
-        const std::uint32_t scale = power(std::uint32_t(out.size() / 8), kP - 2);  // undoes the factor n / 8
-        run(out, detail::Source(nullptr, 0, 0), detail::InverseBottom{inverse_roots_, in.data()}, scale, output);
+        run(out, detail::Source(nullptr, 0, 0), detail::InverseBottom{inverse_roots_, in.data()}, inverse_scale(out.size(), false),
+            output);
     }
 
     // In place: transform -> coefficients in [0, P).
@@ -5303,8 +5919,7 @@ public:
     // as for forward(). Only the output half of out is computed.
     void cyclic_product(std::span<const std::uint32_t> in, std::size_t shift, std::span<std::uint32_t> out,
                         std::span<const std::uint32_t> b, Half output = Half::kBoth, std::uint32_t c = 1) const {
-        using namespace ntt::detail;
-        const std::uint32_t scale = multiply_mod(multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR), c);  // and 2^-32
+        const std::uint32_t scale = ntt::detail::multiply_mod(inverse_scale(out.size(), true), c);
         run(out, source(in, shift, out.size()), detail::ProductBottom{roots_, inverse_roots_, b.data()}, scale, output);
     }
 
@@ -5315,10 +5930,9 @@ public:
     // Only the output half of out is computed. out may be a or b; otherwise none may overlap.
     void inverse_product(std::span<const std::uint32_t> a, std::span<const std::uint32_t> b, std::span<std::uint32_t> out,
                          Half output = Half::kBoth) const {
-        using namespace ntt::detail;
-        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
         const detail::ProductBottom product{roots_, inverse_roots_, b.data()};
-        run(out, detail::Source(nullptr, 0, 0), detail::InverseProductBottom{product, a.data()}, scale, output);
+        run(out, detail::Source(nullptr, 0, 0), detail::InverseProductBottom{product, a.data()}, inverse_scale(out.size(), true),
+            output);
     }
 
     // Two transforms of the same length.
@@ -5343,9 +5957,7 @@ public:
     // InverseProductBottom does for a b. Only the output half of out is computed.
     template <class Bottom>
     void inverse_with(const Bottom& bottom, std::span<std::uint32_t> out, Half output = Half::kBoth) const {
-        using namespace ntt::detail;
-        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
-        run(out, detail::Source(nullptr, 0, 0), bottom, scale, output);
+        run(out, detail::Source(nullptr, 0, 0), bottom, inverse_scale(out.size(), true), output);
     }
 
     // out = the transform of (x^shift in) b mod (x^n - 1) for b a transform of length
@@ -5373,13 +5985,17 @@ private:
         if (!std::has_single_bit(n) || lg < kMinLog || lg > lg_max_) std::abort();
     }
 
+    // The scale of an inverse transform of length n (kInverseScales), with 2^32 if montgomery.
+    std::uint32_t inverse_scale(std::size_t n, bool montgomery) const {
+        check_length(n);
+        return detail::kInverseScales[montgomery][std::countr_zero(n)];
+    }
+
     template <std::size_t K>
     void inverse_products(std::span<const Pair> pairs, std::span<std::uint32_t> out, Half output) const {
-        using namespace ntt::detail;
-        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
         detail::InverseProductSumBottom<K> bottom{};
         for (std::size_t k = 0; k < K; ++k) bottom.terms[k] = {{roots_, inverse_roots_, pairs[k].b.data()}, pairs[k].a.data()};
-        run(out, detail::Source(nullptr, 0, 0), bottom, scale, output);
+        run(out, detail::Source(nullptr, 0, 0), bottom, inverse_scale(out.size(), true), output);
     }
 
     static detail::Source source(std::span<const std::uint32_t> in, std::size_t shift, std::size_t n) {
@@ -6203,14 +6819,6 @@ inline Vec negate(Vec x) {
     return _mm256_min_epu32(_mm256_sub_epi32(broadcast(kP), x), _mm256_sub_epi32(_mm256_setzero_si256(), x));
 }
 
-// x w mod P in [0, 2P) for any x < 2^32 and a factor per lane (times() needs one factor).
-inline Vec times_lanes(Vec x, const Factor& f) {
-    const Vec even = _mm256_srli_epi64(_mm256_mul_epu32(x, f.q), 32);
-    const Vec odd = _mm256_mul_epu32(_mm256_srli_epi64(x, 32), _mm256_srli_epi64(f.q, 32));
-    const Vec q = _mm256_blend_epi32(even, odd, 0xAA);
-    return _mm256_sub_epi32(_mm256_mullo_epi32(x, f.w), _mm256_mullo_epi32(q, broadcast(kP)));
-}
-
 // Lane j of r[i] <-> lane i of r[j].
 inline void transpose(Vec (&r)[8]) {
     Vec t[8], u[8];
@@ -6386,14 +6994,13 @@ struct CompositionBottom {
 #pragma GCC unroll 8
         for (int i = 0; i < 8; ++i) x[i] = load(f + 8 * (p + i)), a[i] = load(q + 16 * (p + i)), b[i] = load(q + 16 * (p + i) + 8);
         transpose(x), transpose(a), transpose(b);
-        Factor s(0);  // r[p + lane]
-        s.w = load(tables->roots + slot(p)), s.q = load(tables->roots + slot(p) + 8);
+        const Factors s = entries(tables->roots, p);  // r[p + lane]
         Vec pa[4], pb[4], spa[4], spb[4];
 #pragma GCC unroll 4
         for (int i = 0; i < 4; ++i) {
-            const Vec t = times_lanes(x[i + 4], s);
+            const Vec t = times(x[i + 4], s);
             pa[i] = canonical(add(x[i], t)), pb[i] = canonical(diff(x[i], t));
-            spa[i] = reduce(times_lanes(pa[i], s), kP), spb[i] = negate(reduce(times_lanes(pb[i], s), kP));
+            spa[i] = reduce(times(pa[i], s), kP), spb[i] = negate(reduce(times(pb[i], s), kP));
         }
         Vec ra[8], rb[8];
         leaf(pa, spa, a, ra);
@@ -6452,6 +7059,171 @@ void inverse_with(std::span<std::uint32_t> a, const Tables& tables, const Bottom
         recursion.visit(a.data(), h, 0);
         recursion.visit(a.data() + 8 * h, h, 1);
         inverse_top2(v, h, output, scale);
+    }
+}
+
+// Pruned transforms for the Kronecker layouts, in vectors of 8 coefficients. In a forward
+// transform, vector bit b of the index (x = L, the padding bit) is zero in the input; the levels
+// above b (y) act on each column separately, so they skip the columns with bit b set, and the
+// level with bit b has half its inputs. In an inverse transform whose output is used only on the
+// columns with bit b clear, the y levels compute those, the level with bit b half its outputs.
+// Levels below b are full (Recursion), and so are small groups (kForwardFull, kInverseFull): the
+// bottoms take at least 16 vectors, and narrow columns gain little.
+
+// Butterflies j < h of radix-4 group k (inputs at j + t h) on the columns with bit b of j clear:
+// kernels.hpp's loops (lib/ntt's butterflies), h >= 4 and h > 2^b.
+inline void forward_columns(std::uint32_t* a, std::size_t h, std::size_t b, const std::uint32_t* roots, std::size_t k) {
+    Vec* const v = reinterpret_cast<Vec*>(a);
+    if (b == 0) return kernels::forward_even_columns(v, h, roots + slot(k), roots + slot(2 * k));
+    kernels::forward_columns(v, h, std::size_t(1) << b, roots + slot(k), roots + slot(2 * k));
+}
+
+// The same with inverse butterflies.
+inline void inverse_columns(std::uint32_t* a, std::size_t h, std::size_t b, const std::uint32_t* inverse_roots,
+                            std::size_t k) {
+    Vec* const v = reinterpret_cast<Vec*>(a);
+    if (b == 0) return kernels::inverse_even_columns(v, h, inverse_roots + slot(k), inverse_roots + slot(2 * k));
+    kernels::inverse_columns(v, h, std::size_t(1) << b, inverse_roots + slot(k), inverse_roots + slot(2 * k));
+}
+
+// forward_h1 with the inputs at 2h and 3h zero (high = true) or at h and 3h (high = false).
+inline void forward_half(std::uint32_t* a, std::size_t h, bool high, const Group& w) {
+    for (std::uint32_t* x = a; x < a + 8 * h; x += 8) {
+        const Vec u = low(load(x));
+        if (high) {
+            const Vec b = load(x + 8 * h), yb = times(b, w.y), zb = times(b, w.z);
+            store(x, add(u, yb)), store(x + 8 * h, diff(u, yb));
+            store(x + 16 * h, add(u, zb)), store(x + 24 * h, diff(u, zb));
+        } else {
+            const Vec xc = times(load(x + 16 * h), w.x), sum = low(add(u, xc)), difference = low_difference(u, xc);
+            store(x, sum), store(x + 8 * h, sum), store(x + 16 * h, difference), store(x + 24 * h, difference);
+        }
+    }
+}
+
+// inverse_h1 computing only the outputs at 0 and h (high = true: 2h and 3h unused) or at 0 and 2h.
+inline void inverse_half(std::uint32_t* a, std::size_t h, bool high, const Group& w) {
+    for (std::uint32_t* x = a; x < a + 8 * h; x += 8) {
+        const Vec f0 = load(x), f1 = load(x + 8 * h), f2 = load(x + 16 * h), f3 = load(x + 24 * h);
+        const Vec ab = low(add(f0, f1)), cd = low(add(f2, f3));
+        store(x, low(add(ab, cd)));
+        if (high) store(x + 8 * h, low(add(times(diff(f0, f1), w.y), times(diff(f2, f3), w.z))));
+        else store(x + 16 * h, times(diff(ab, cd), w.x));
+    }
+}
+
+// The pruned forward and inverse below the top level: group k of nv vectors at a.
+template <class Bottom>
+class Pruned {
+public:
+    Pruned(const Tables& tables, const Bottom& bottom, std::size_t b)
+        : recursion_(tables.roots, tables.inverse_roots, bottom), tables_(tables), b_(b) {}
+
+    void forward(std::uint32_t* a, std::size_t nv, std::size_t k) const {
+        const std::size_t h = nv / 4, low = std::size_t(std::countr_zero(h));
+        if (nv <= kForwardFull || low + 1 < b_) return recursion_.visit(a, nv, k);
+        if (low > b_) {
+            forward_columns(a, h, b_, tables_.roots, k);
+            for (std::size_t t = 0; t < 4; ++t) forward(a + 8 * t * h, h, 4 * k + t);
+            return;
+        }
+        forward_half(a, h, low + 1 == b_, Group(tables_.roots, k));
+        for (std::size_t t = 0; t < 4; ++t) recursion_.visit(a + 8 * t * h, h, 4 * k + t);
+    }
+
+    void inverse(std::uint32_t* a, std::size_t nv, std::size_t k) const {
+        const std::size_t h = nv / 4, low = std::size_t(std::countr_zero(h));
+        if (nv <= kInverseFull || low + 1 < b_) return recursion_.visit(a, nv, k);
+        if (low > b_) {
+            for (std::size_t t = 0; t < 4; ++t) inverse(a + 8 * t * h, h, 4 * k + t);
+            return inverse_columns(a, h, b_, tables_.inverse_roots, k);
+        }
+        for (std::size_t t = 0; t < 4; ++t) recursion_.visit(a + 8 * t * h, h, 4 * k + t);
+        inverse_half(a, h, low + 1 == b_, Group(tables_.inverse_roots, k));
+    }
+
+private:
+    static constexpr std::size_t kForwardFull = 64, kInverseFull = 16;  // vectors
+
+    Recursion<Bottom> recursion_;
+    const Tables& tables_;
+    std::size_t b_;
+};
+
+// The forward transform of length a.size() of a[0, size) in place (the rest zero and not read),
+// with vector bit b of the index zero in the input; b lies below the top level's bits. The top
+// level writes zeros to the skipped columns, which the levels above b then leave alone.
+template <class Bottom>
+void forward_pruned(std::span<std::uint32_t> a, std::size_t size, std::size_t b, const Tables& tables,
+                    const Bottom& bottom) {
+    const Pruned<Bottom> pruned(tables, bottom, b);
+    const Source in(a.data(), size, 0);
+    const std::size_t nv = a.size() / 8, width = std::size_t(1) << b;
+    auto* v = reinterpret_cast<Vec*>(a.data());
+    const Vec p = broadcast(kP), zero = _mm256_setzero_si256();
+    if (std::countr_zero(nv) % 2 == 0) {  // radix-4 identity group, as forward_top4
+        const std::size_t h = nv / 4;
+        const Factor z(tables.roots[1], tables.roots[9]);
+        for (std::size_t c = 0; c < h; c += 2 * width) {
+            for (std::size_t j = c; j < c + width; ++j) {
+                const Vec x0 = in(j), x1 = in(j + h), x2 = in(j + 2 * h), x3 = in(j + 3 * h);
+                const Vec ac = add(x0, x2), amc = _mm256_sub_epi32(add(x0, p), x2);
+                const Vec bd = add(x1, x3), zbmd = times(_mm256_sub_epi32(add(x1, p), x3), z);
+                v[j] = add(ac, bd), v[j + h] = diff(ac, bd);
+                v[j + 2 * h] = add(amc, zbmd), v[j + 3 * h] = diff(amc, zbmd);
+            }
+            for (std::size_t j = c + width; j < c + 2 * width; ++j)
+                v[j] = v[j + h] = v[j + 2 * h] = v[j + 3 * h] = zero;
+        }
+        for (std::size_t t = 0; t < 4; ++t) pruned.forward(a.data() + 8 * t * h, h, t);
+    } else {  // radix 2, as forward_top2
+        const std::size_t h = nv / 2;
+        for (std::size_t c = 0; c < h; c += 2 * width) {
+            for (std::size_t j = c; j < c + width; ++j) {
+                const Vec x0 = in(j), x1 = in(j + h);
+                v[j] = add(x0, x1), v[j + h] = _mm256_sub_epi32(add(x0, p), x1);
+            }
+            for (std::size_t j = c + width; j < c + 2 * width; ++j) v[j] = v[j + h] = zero;
+        }
+        pruned.forward(a.data(), h, 0);
+        pruned.forward(a.data() + 8 * h, h, 1);
+    }
+}
+
+// The inverse transform of length a.size() in place, times scale, canonical on the columns with
+// vector bit b clear (the others are left unspecified) of the output half; b lies below the top
+// level's bits.
+template <class Bottom>
+void inverse_pruned(std::span<std::uint32_t> a, std::size_t b, const Tables& tables, const Bottom& bottom,
+                    std::uint32_t scale, Half output = Half::kBoth) {
+    const Pruned<Bottom> pruned(tables, bottom, b);
+    const std::size_t nv = a.size() / 8, width = std::size_t(1) << b;
+    auto* v = reinterpret_cast<Vec*>(a.data());
+    const Factor s(scale);
+    const auto scaled = [&s](Vec x) { return reduce(times(x, s), kP); };
+    const bool lower = output != Half::kUpper, upper = output != Half::kLower;
+    if (std::countr_zero(nv) % 2 == 0) {  // radix-4 identity group, as inverse_top4
+        const std::size_t h = nv / 4;
+        for (std::size_t t = 0; t < 4; ++t) pruned.inverse(a.data() + 8 * t * h, h, t);
+        const Factor z(tables.inverse_roots[1], tables.inverse_roots[9]);
+        for (std::size_t c = 0; c < h; c += 2 * width)
+            for (std::size_t j = c; j < c + width; ++j) {
+                const Vec x0 = v[j], x1 = v[j + h], x2 = v[j + 2 * h], x3 = v[j + 3 * h];
+                const Vec ab = low(add(x0, x1)), cd = low(add(x2, x3));
+                const Vec amb = low(diff(x0, x1)), cmd = times(diff(x2, x3), z);
+                if (lower) v[j] = scaled(add(ab, cd)), v[j + h] = scaled(add(amb, cmd));
+                if (upper) v[j + 2 * h] = scaled(diff(ab, cd)), v[j + 3 * h] = scaled(diff(amb, cmd));
+            }
+    } else {  // radix 2, as inverse_top2
+        const std::size_t h = nv / 2;
+        pruned.inverse(a.data(), h, 0);
+        pruned.inverse(a.data() + 8 * h, h, 1);
+        for (std::size_t c = 0; c < h; c += 2 * width)
+            for (std::size_t j = c; j < c + width; ++j) {
+                const Vec x0 = v[j], x1 = v[j + h];
+                if (lower) v[j] = scaled(add(x0, x1));
+                if (upper) v[j + h] = scaled(diff(x0, x1));
+            }
     }
 }
 
@@ -6517,6 +7289,8 @@ inline void next_level(std::span<std::uint32_t> a, std::size_t stride, std::size
 // The transforms of all levels of g. t: lg_max >= levels.lg + 1.
 //  - Level 0, Q_0 = 1 - y g: G = T_2m(g); with u = x^2, g(x) g(-x) = v(u) from G by LevelBottom's
 //    pairs, and Q_1 = 1 - 2y ge(u) + y^2 v(u) mod u^(m/2), g = ge(x^2) + x go(x^2).
+//  - Levels 1 .. T - 3: Q_s at stride 2L has x below L (vector bit T - s - 3 zero: pruned forward);
+//    Q_(s+1) keeps v at stride L for x below L / 2 (bit T - s - 4: pruned inverse).
 //  - Level T - 3 (stride 8): Q_(T-2) = 1 + x q1 + x^2 q2 + x^3 q3, deg q_k <= m/4, from v at stride 8:
 //    q_k[i] = v[8i + k] for 0 < i < m/4 and the wrapped q_k[m/4] = v[k]. Then Q_(T-1) = 1 + x q with
 //    q = 2 q2 - q1^2 (deg <= m/2; q1^2 has no y^0 term, so its y^(m/2) wraps onto y^0).
@@ -6532,11 +7306,13 @@ inline void build_levels(const Transform& t, std::span<const std::uint32_t> g, L
     std::fill(q1.begin(), q1.end(), 0);
     q1[0] = 1;
     for (std::size_t j = 0; j < m / 2; ++j) q1[m + j] = minus_twice(j > 0 && 2 * j < g.size() ? g[2 * j] : 0), q1[2 * m + j] = v[j];
+    const Tables& tables = levels.tables;
     for (int s = 1; s + 2 < levels.lg; ++s) {  // Q_s: rows 0 .. Y at stride 2L
-        const std::size_t stride = 2 * (m >> s);
-        forward_with(levels.level(s), ((std::size_t(1) << s) + 1) * stride, levels.tables, LevelBottom{&levels.tables, v.data()});
+        const std::size_t stride = 2 * (m >> s), pad = std::size_t(levels.lg - s - 3);
+        forward_pruned(levels.level(s), ((std::size_t(1) << s) + 1) * stride, pad, tables, LevelBottom{&tables, v.data()});
         if (s + 3 < levels.lg) {
-            t.inverse(v, levels.level(s + 1).first(2 * m));
+            const std::span<std::uint32_t> next = levels.level(s + 1).first(2 * m);
+            inverse_pruned(next, pad - 1, tables, InverseBottom{tables.inverse_roots, v.data()}, kInverseScales[0][levels.lg + 1]);
             next_level(levels.level(s + 1), stride / 2, std::size_t(2) << s);
         }
     }
@@ -6591,9 +7367,10 @@ inline std::size_t compose_scratch(std::size_t n) {
 //  - level T - 1: P = f reversed, R = p(y) (1 - x q(y)): rows y in [m/2, m) of p and -p q;
 //  - level T - 2: P = p0(y) + x^2 p1(y), R = P Q_(T-2)(-x) mod x^4 by columns;
 //  - level 0: P = p0(x) + y p1(x), R's row 1 = p1(x^2) - p0(x^2) g(-x) = h.
+// Level s's transforms are pruned (composition.hpp's levels): P_(s+1) at stride L has x below L / 2
+// (vector bit T - s - 4 zero, but level T - 3: 4 of 8 words), and of R only x below L is used.
 inline void compose(const Transform& t, std::span<const std::uint32_t> f, std::span<const std::uint32_t> g,
                     std::span<std::uint32_t> h, std::span<std::uint32_t> scratch) {
-    using ntt::detail::multiply_mod, ntt::detail::power;
     const std::size_t n = h.size();
     if (n <= detail::kComposeBase) return detail::compose_direct(f, g, h);
     detail::Levels levels(std::bit_ceil(std::max<std::size_t>(n, 128)), scratch);
@@ -6625,22 +7402,21 @@ inline void compose(const Transform& t, std::span<const std::uint32_t> f, std::s
             std::fill(row + 4, row + 8, 0);
         }
     }
-    const std::uint32_t scale = multiply_mod(power(std::uint32_t(m / 2), kModulus - 2), ntt::detail::kR);
+    const std::uint32_t scale = detail::kInverseScales[1][levels.lg + 2];
     for (int s = levels.lg - 3; s >= 1; --s) {
         const std::span<std::uint32_t> x = in.subspan(2 * m);
-        t.forward(x);
-        detail::inverse_with(out, levels.tables, detail::CompositionBottom{&levels.tables, x.data(), levels.level(s).data()},
-                             scale, Half::kUpper);
-        const std::size_t stride = 2 * (m >> s);  // rows of R; level s - 1 reads x below stride / 2
-        for (std::size_t i = 2 * m; i < 4 * m; i += stride)
-            std::fill(out.begin() + std::ptrdiff_t(i + stride / 2), out.begin() + std::ptrdiff_t(i + stride), 0);
+        const std::size_t pad = std::size_t(levels.lg - s - 3);
+        if (s == levels.lg - 3) t.forward(x);
+        else detail::forward_pruned(x, 2 * m, pad - 1, levels.tables, detail::ForwardBottom{levels.tables.roots});
+        detail::inverse_pruned(out, pad, levels.tables, detail::CompositionBottom{&levels.tables, x.data(), levels.level(s).data()},
+                               scale, Half::kUpper);
         std::swap(in, out);
     }
     // Level 0: p0 = in[2m, 3m), p1 = in[3m, 4m) (x below m/2).
     const std::span<std::uint32_t> p0 = in.subspan(2 * m, m), r = out.first(2 * m);
-    t.forward(p0);
+    t.forward(p0.first(m / 2), 0, p0);
     detail::inverse_with(r, levels.tables, detail::CompositionBottom{&levels.tables, p0.data(), levels.level(0).data()},
-                         multiply_mod(power(std::uint32_t(m / 4), kModulus - 2), ntt::detail::kR), Half::kLower);
+                         detail::kInverseScales[1][levels.lg + 1], Half::kLower);
     for (std::size_t k = 0; k < n; ++k) {
         const std::uint32_t a = k % 2 ? 0 : in[3 * m + k / 2];
         h[k] = a >= r[k] ? a - r[k] : a + kModulus - r[k];
@@ -6742,20 +7518,20 @@ template <int kParity>
 
 // tc[j] = t c[j] for j >= first (canonical), t = s per lane, or -s if kNegative; the rest zero.
 template <bool kNegative>
-[[gnu::always_inline]] inline void scaled_leaves(const Vec (&c)[8], const Factor& s, int first, Vec (&tc)[8]) {
+[[gnu::always_inline]] inline void scaled_leaves(const Vec (&c)[8], const Factors& s, int first, Vec (&tc)[8]) {
 #pragma GCC unroll 8
     for (int j = 0; j < 8; ++j) {
-        const Vec x = reduce(times_lanes(c[j], s), kP);
+        const Vec x = reduce(times(c[j], s), kP);
         tc[j] = j < first ? _mm256_setzero_si256() : kNegative ? negate(x) : x;
     }
 }
 
 // Leaves k .. k + 7 at out from x mod (u^4 - s) and y mod (u^4 + s): (x + y) + u^4 (x - y) / s,
 // twice their CRT, in [0, 2P).
-inline void combine_pairs(const Vec (&x)[4], const Vec (&y)[4], const Factor& inverse, std::uint32_t* out) {
+inline void combine_pairs(const Vec (&x)[4], const Vec (&y)[4], const Factors& inverse, std::uint32_t* out) {
     Vec r[8];
 #pragma GCC unroll 4
-    for (int i = 0; i < 4; ++i) r[i] = low(add(x[i], y[i])), r[i + 4] = times_lanes(diff(x[i], y[i]), inverse);
+    for (int i = 0; i < 4; ++i) r[i] = low(add(x[i], y[i])), r[i + 4] = times(diff(x[i], y[i]), inverse);
     transpose(r);
 #pragma GCC unroll 8
     for (int i = 0; i < 8; ++i) store(out + 8 * i, r[i]);
@@ -6763,11 +7539,8 @@ inline void combine_pairs(const Vec (&x)[4], const Vec (&y)[4], const Factor& in
 
 // s = r[k + lane] and its inverse, for 8 pairs from pair k (a multiple of 8).
 struct PairWeights {
-    Factor s{0}, inverse{0};
-    PairWeights(const Tables& tables, std::size_t k) {
-        s.w = load(tables.roots + slot(k)), s.q = load(tables.roots + slot(k) + 8);
-        inverse.w = load(tables.inverse_roots + slot(k)), inverse.q = load(tables.inverse_roots + slot(k) + 8);
-    }
+    Factors s, inverse;
+    PairWeights(const Tables& tables, std::size_t k) : s(entries(tables.roots, k)), inverse(entries(tables.inverse_roots, k)) {}
 };
 
 // The bottom of the forward transform of Q_s (length 4m): forward butterflies, then per pair of
@@ -6802,7 +7575,7 @@ struct ProjectionBottom {
 
     // V and W mod (u^4 - t) for t = s (or -s if kNegative) of the 8 leaves at q and p, times 2^-32.
     template <bool kNegative>
-    [[gnu::noinline, gnu::flatten]] static void leaves(const std::uint32_t* q, const std::uint32_t* p, const Factor& s,
+    [[gnu::noinline, gnu::flatten]] static void leaves(const std::uint32_t* q, const std::uint32_t* p, const Factors& s,
                                                        Vec (&v)[4], Vec (&w)[4]) {
         Vec c[8], a[8], tc[8];
         load_leaves(q, c), load_leaves(p, a);
@@ -6830,7 +7603,7 @@ struct FirstLevelProducts {
     }
 
     template <bool kNegative>
-    [[gnu::noinline, gnu::flatten]] void leaves(std::size_t at, const Factor& s, Vec (&r)[5][4]) const {
+    [[gnu::noinline, gnu::flatten]] void leaves(std::size_t at, const Factors& s, Vec (&r)[5][4]) const {
         Vec c1[8], c2[8], a[8], t1[8], t2[8];
         load_leaves(q1 + at, c1), load_leaves(q2 + at, c2), load_leaves(p1 + at, a);
         scaled_leaves<kNegative>(c1, s, 2, t1);
@@ -6842,176 +7615,6 @@ struct FirstLevelProducts {
         product_leaf<1>(a, c2, t2, r[4]);
     }
 };
-
-// Pruned transforms for the Kronecker layouts, in vectors of 8 coefficients. In the forward
-// transform of a level, vector bit b of the index (x = L, the padding bit) is zero in the input;
-// the levels above b (y) act on each column separately, so they skip the columns with bit b set,
-// and the level with bit b has half its inputs. In the inverse transforms of V and W only the
-// columns with bit b clear (x < L/2) are kept: the y levels compute those, the level with bit b
-// half its outputs. Levels below b are full (Recursion), and so are small groups (kForwardFull,
-// kInverseFull): the bottoms take at least 16 vectors, and narrow columns gain little.
-
-// Butterflies j < h of a radix-4 group (inputs at j + t h) on the columns with bit b of j clear.
-inline void forward_columns(std::uint32_t* a, std::size_t h, std::size_t b, const Group& w) {
-    const std::size_t width = std::size_t(1) << b;
-    for (std::size_t c = 0; c < h; c += 2 * width)
-        for (std::uint32_t* x = a + 8 * c; x < a + 8 * (c + width); x += 8) {
-            Vec f[4] = {load(x), load(x + 8 * h), load(x + 16 * h), load(x + 24 * h)};
-            forward_h1(f, w);
-            store(x, f[0]), store(x + 8 * h, f[1]), store(x + 16 * h, f[2]), store(x + 24 * h, f[3]);
-        }
-}
-
-// The same with inverse butterflies.
-inline void inverse_columns(std::uint32_t* a, std::size_t h, std::size_t b, const Group& w) {
-    const std::size_t width = std::size_t(1) << b;
-    for (std::size_t c = 0; c < h; c += 2 * width)
-        for (std::uint32_t* x = a + 8 * c; x < a + 8 * (c + width); x += 8) {
-            Vec f[4] = {load(x), load(x + 8 * h), load(x + 16 * h), load(x + 24 * h)};
-            inverse_h1(f, w);
-            store(x, f[0]), store(x + 8 * h, f[1]), store(x + 16 * h, f[2]), store(x + 24 * h, f[3]);
-        }
-}
-
-// forward_h1 with the inputs at 2h and 3h zero (high = true) or at h and 3h (high = false).
-inline void forward_half(std::uint32_t* a, std::size_t h, bool high, const Group& w) {
-    for (std::uint32_t* x = a; x < a + 8 * h; x += 8) {
-        const Vec u = low(load(x));
-        if (high) {
-            const Vec b = load(x + 8 * h), yb = times(b, w.y), zb = times(b, w.z);
-            store(x, add(u, yb)), store(x + 8 * h, diff(u, yb));
-            store(x + 16 * h, add(u, zb)), store(x + 24 * h, diff(u, zb));
-        } else {
-            const Vec xc = times(load(x + 16 * h), w.x), sum = low(add(u, xc)), difference = low_difference(u, xc);
-            store(x, sum), store(x + 8 * h, sum), store(x + 16 * h, difference), store(x + 24 * h, difference);
-        }
-    }
-}
-
-// inverse_h1 computing only the outputs at 0 and h (high = true: 2h and 3h unused) or at 0 and 2h.
-inline void inverse_half(std::uint32_t* a, std::size_t h, bool high, const Group& w) {
-    for (std::uint32_t* x = a; x < a + 8 * h; x += 8) {
-        const Vec f0 = load(x), f1 = load(x + 8 * h), f2 = load(x + 16 * h), f3 = load(x + 24 * h);
-        const Vec ab = low(add(f0, f1)), cd = low(add(f2, f3));
-        store(x, low(add(ab, cd)));
-        if (high) store(x + 8 * h, low(add(times(diff(f0, f1), w.y), times(diff(f2, f3), w.z))));
-        else store(x + 16 * h, times(diff(ab, cd), w.x));
-    }
-}
-
-// The pruned forward and inverse below the top level: group k of nv vectors at a.
-template <class Bottom>
-class Pruned {
-public:
-    Pruned(const Tables& tables, const Bottom& bottom, std::size_t b)
-        : recursion_(tables.roots, tables.inverse_roots, bottom), tables_(tables), b_(b) {}
-
-    void forward(std::uint32_t* a, std::size_t nv, std::size_t k) const {
-        const std::size_t h = nv / 4, low = std::size_t(std::countr_zero(h));
-        if (nv <= kForwardFull || low + 1 < b_) return recursion_.visit(a, nv, k);
-        const Group w(tables_.roots, k);
-        if (low > b_) {
-            forward_columns(a, h, b_, w);
-            for (std::size_t t = 0; t < 4; ++t) forward(a + 8 * t * h, h, 4 * k + t);
-            return;
-        }
-        forward_half(a, h, low + 1 == b_, w);
-        for (std::size_t t = 0; t < 4; ++t) recursion_.visit(a + 8 * t * h, h, 4 * k + t);
-    }
-
-    void inverse(std::uint32_t* a, std::size_t nv, std::size_t k) const {
-        const std::size_t h = nv / 4, low = std::size_t(std::countr_zero(h));
-        if (nv <= kInverseFull || low + 1 < b_) return recursion_.visit(a, nv, k);
-        const Group w(tables_.inverse_roots, k);
-        if (low > b_) {
-            for (std::size_t t = 0; t < 4; ++t) inverse(a + 8 * t * h, h, 4 * k + t);
-            return inverse_columns(a, h, b_, w);
-        }
-        for (std::size_t t = 0; t < 4; ++t) recursion_.visit(a + 8 * t * h, h, 4 * k + t);
-        inverse_half(a, h, low + 1 == b_, w);
-    }
-
-private:
-    static constexpr std::size_t kForwardFull = 64, kInverseFull = 16;  // vectors
-
-    Recursion<Bottom> recursion_;
-    const Tables& tables_;
-    std::size_t b_;
-};
-
-// The forward transform of length a.size() of a[0, size) in place (the rest zero and not read),
-// with vector bit b of the index zero in the input; b lies below the top level's bits. The top
-// level writes zeros to the skipped columns, which the levels above b then leave alone.
-template <class Bottom>
-void forward_pruned(std::span<std::uint32_t> a, std::size_t size, std::size_t b, const Tables& tables,
-                    const Bottom& bottom) {
-    const Pruned<Bottom> pruned(tables, bottom, b);
-    const Source in(a.data(), size, 0);
-    const std::size_t nv = a.size() / 8, width = std::size_t(1) << b;
-    auto* v = reinterpret_cast<Vec*>(a.data());
-    const Vec p = broadcast(kP), zero = _mm256_setzero_si256();
-    if (std::countr_zero(nv) % 2 == 0) {  // radix-4 identity group, as forward_top4
-        const std::size_t h = nv / 4;
-        const Factor z(tables.roots[1], tables.roots[9]);
-        for (std::size_t c = 0; c < h; c += 2 * width) {
-            for (std::size_t j = c; j < c + width; ++j) {
-                const Vec x0 = in(j), x1 = in(j + h), x2 = in(j + 2 * h), x3 = in(j + 3 * h);
-                const Vec ac = add(x0, x2), amc = _mm256_sub_epi32(add(x0, p), x2);
-                const Vec bd = add(x1, x3), zbmd = times(_mm256_sub_epi32(add(x1, p), x3), z);
-                v[j] = add(ac, bd), v[j + h] = diff(ac, bd);
-                v[j + 2 * h] = add(amc, zbmd), v[j + 3 * h] = diff(amc, zbmd);
-            }
-            for (std::size_t j = c + width; j < c + 2 * width; ++j)
-                v[j] = v[j + h] = v[j + 2 * h] = v[j + 3 * h] = zero;
-        }
-        for (std::size_t t = 0; t < 4; ++t) pruned.forward(a.data() + 8 * t * h, h, t);
-    } else {  // radix 2, as forward_top2
-        const std::size_t h = nv / 2;
-        for (std::size_t c = 0; c < h; c += 2 * width) {
-            for (std::size_t j = c; j < c + width; ++j) {
-                const Vec x0 = in(j), x1 = in(j + h);
-                v[j] = add(x0, x1), v[j + h] = _mm256_sub_epi32(add(x0, p), x1);
-            }
-            for (std::size_t j = c + width; j < c + 2 * width; ++j) v[j] = v[j + h] = zero;
-        }
-        pruned.forward(a.data(), h, 0);
-        pruned.forward(a.data() + 8 * h, h, 1);
-    }
-}
-
-// The inverse transform of length a.size() in place, times scale, canonical on the columns with
-// vector bit b clear (the others are left unspecified); b lies below the top level's bits.
-template <class Bottom>
-void inverse_pruned(std::span<std::uint32_t> a, std::size_t b, const Tables& tables, const Bottom& bottom,
-                    std::uint32_t scale) {
-    const Pruned<Bottom> pruned(tables, bottom, b);
-    const std::size_t nv = a.size() / 8, width = std::size_t(1) << b;
-    auto* v = reinterpret_cast<Vec*>(a.data());
-    const Factor s(scale);
-    const auto scaled = [&s](Vec x) { return reduce(times(x, s), kP); };
-    if (std::countr_zero(nv) % 2 == 0) {  // radix-4 identity group, as inverse_top4
-        const std::size_t h = nv / 4;
-        for (std::size_t t = 0; t < 4; ++t) pruned.inverse(a.data() + 8 * t * h, h, t);
-        const Factor z(tables.inverse_roots[1], tables.inverse_roots[9]);
-        for (std::size_t c = 0; c < h; c += 2 * width)
-            for (std::size_t j = c; j < c + width; ++j) {
-                const Vec x0 = v[j], x1 = v[j + h], x2 = v[j + 2 * h], x3 = v[j + 3 * h];
-                const Vec ab = low(add(x0, x1)), cd = low(add(x2, x3));
-                const Vec amb = low(diff(x0, x1)), cmd = times(diff(x2, x3), z);
-                v[j] = scaled(add(ab, cd)), v[j + h] = scaled(add(amb, cmd));
-                v[j + 2 * h] = scaled(diff(ab, cd)), v[j + 3 * h] = scaled(diff(amb, cmd));
-            }
-    } else {  // radix 2, as inverse_top2
-        const std::size_t h = nv / 2;
-        pruned.inverse(a.data(), h, 0);
-        pruned.inverse(a.data() + 8 * h, h, 1);
-        for (std::size_t c = 0; c < h; c += 2 * width)
-            for (std::size_t j = c; j < c + width; ++j) {
-                const Vec x0 = v[j], x1 = v[j + h];
-                v[j] = scaled(add(x0, x1)), v[j + h] = scaled(diff(x0, x1));
-            }
-    }
-}
 
 // Levels 0 and 1, one-dimensional in x, into q and p (length 4m each), ending in level 2's
 // layout (stride m/2: Q_2 rows 0 .. 4, P_2 rows 0 .. 3, x below m/4).

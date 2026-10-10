@@ -1013,6 +1013,9 @@ products 1.77 and 1.69).
   unrolled with all operands in arrays (D = 16: 1035 cycles per call against 621 for plain loops;
   GCC spilled).
 - Huge-page first touch on `lc-amd`: 0.05-0.075 ms per 2 MB (0.12 for the first); 14 pages here.
+- Merged as #231 (CI: product_of_polynomial_sequence 0.9992 on its third run; the first two,
+  with byte-identical `.text`, 1.0019 and 1.0011). Judged:
+  [409516](https://judge.yosupo.jp/submission/409516) AC 15 ms, clean 15 (record 39 ms).
 
 2026-10-10, claude (issue #95, owner-lane backlog):
 - `times()` with per-lane factors (#67): new `Factors` (a factor per lane) with its own `times`

@@ -61,6 +61,12 @@ def first_line(path: Path, limit: int = 40) -> str:
     return line if len(line) <= limit else line[:limit - 3] + '...'
 
 
+def size_names(task: Path) -> str:
+    """The names on the first line of the official input format, e.g. 'N M'."""
+    lines = task.read_text().split('## @{keyword.input}', 1)[1].split('```')[1].strip().splitlines()
+    return lines[0].replace('$', '') if lines else ''
+
+
 def bench_problem(name: str, source: Path, rounds: int) -> dict:
     import judge  # Linux only (tomllib, Docker)
     problem = judge.Problem(name)
@@ -94,7 +100,7 @@ def bench_problem(name: str, source: Path, rounds: int) -> dict:
     env = judge.environment([str(source)])
     return {'problem': name, 'host': HOST, 'cpu': env['cpu'], 'compile': judge.COMPILE,
             'commit': env['commit'], 'main_sha': digest(source), 'rounds': rounds,
-            'date': today(), 'cases': cases}
+            'date': today(), 'size_names': size_names(problem.dir / 'task.md'), 'cases': cases}
 
 
 def bench(args) -> int:
@@ -206,7 +212,8 @@ def render_speed(dirs: dict[str, Path], reports: dict, hosts: list[str]) -> str:
 def render_problem(name: str, sha: str, reports: dict, hosts: list[str]) -> str:
     present = [h for h in hosts if name in reports[h]]
     lines = [f'# {name}', '',
-             'Every official test, median over rounds, ms. Floor: start, map the input, write an output of '
+             'Every official test, median over rounds, ms. Size: the first input line, named as in the '
+             'official input format. Floor: start, map the input, write an output of '
              'the expected size, nothing else (`tools/floor.c`). Compute: total minus floor, so parsing, '
              'work and formatting.', '']
     for h in present:
@@ -216,14 +223,16 @@ def render_problem(name: str, sha: str, reports: dict, hosts: list[str]) -> str:
                      f'{r["date"]}. Score {ms(score(r))}.{stale}')
     if not present:
         return '\n'.join(lines + ['Not measured yet.']) + '\n'
-    header = ['Test', 'Input', 'Output', 'First line']
+    header = ['Test', 'Size', 'Input', 'Output']
     for h in present:
         header += [label(h), f'{label(h)} floor', f'{label(h)} compute']
-    lines += ['', '| ' + ' | '.join(header) + ' |', '|---|---:|---:|---|' + '---:|' * 3 * len(present)]
+    lines += ['', '| ' + ' | '.join(header) + ' |', '|---|---|---:|---:|' + '---:|' * 3 * len(present)]
+    names = reports[present[0]][name].get('size_names', '')
     first = reports[present[0]][name]['cases']
     for case in sorted(first, key=lambda c: -statistics.median(first[c][MAIN])):
         info = first[case]
-        cells = [case, size(info['input_bytes']), size(info['output_bytes']), f'`{info["first_line"]}`']
+        shown = f'{names} = {info["first_line"]}' if names else info['first_line']
+        cells = [case, f'`{shown}`', size(info['input_bytes']), size(info['output_bytes'])]
         for h in present:
             c = reports[h][name]['cases'].get(case)
             if c is None:

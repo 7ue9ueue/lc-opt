@@ -797,6 +797,8 @@ private:
 // next() works as Recurrence::next: values in [0, P); it writes the next count coefficients
 // (rounded up to a multiple of kBlock) to out and reads the history() coefficients before them
 // from out[-history(), 0) (zeros before g[0]).
+//
+// -DHOLONOMIC_CHAINED=0 or 1 turns the chained kernel (below) off, or on for every w <= 8 (tests).
 
 #include <immintrin.h>
 #include <sys/mman.h>
@@ -1293,6 +1295,11 @@ inline void inverses(std::uint32_t first, std::size_t count, std::uint32_t* y) {
 // y ⊙ W = y ⊙ (Q R0 - t Q R1) + Q R1: G = F H, H = y ⊙ (V S) + V' S with V, V' precomputed
 // (w columns each; V' only if a short tap has b != 0).
 //
+// Chained kernel, for w <= 8 where it is faster (from w = 5 without slopes, at w = 8 with them):
+// blocks of 8, whose state is the previous block's top w values, F H_prev at those rows. So
+// W = M H_prev and V' S = M' H_prev with M = V T, M' = V' T (8 x 8, T those rows of F): the chain
+// from block to block is two reductions and one matrix product, without the triangle F H.
+//
 // Reciprocals: 1 / (n + t) for odd n + t by batch inversion in windows of kWindow coefficients,
 // for even n + t as 1 / ((n + t) / 2) from a table of the first half, times 1/2. That 1/2 is
 // folded into the even lanes of W. The kernel loop runs the batch inversion of the next window, a
@@ -1348,6 +1355,7 @@ public:
             f_[s] = columns(shift(f, s), false);
             if (width_ && !far_.empty()) q_[s] = columns(shift(q, s), true);
         }
+        Matrix m{}, m_slope{}, f_half{};  // M, M', F mod x^8 by columns (chained kernel)
         for (std::size_t j = 0; j < width_; ++j) {  // the state value g[n - 1 - j] enters R at t < w - j
             Series r{}, r_slope{};
             for (std::size_t t = 0; t + 1 + j <= width_; ++t) {
@@ -1360,7 +1368,18 @@ public:
             for (std::size_t t = 0; t < kBlock; ++t) v[t] = (w[t] + kModulus - multiply(std::uint32_t(t), w_slope[t])) % kModulus;
             v_[j] = columns(v, true);
             if (slope_) v_slope_[j] = columns(w_slope, false);
+            if (width_ <= kHalf)  // g[n - 1 - j] = sum over s <= 7 - j of F[7 - j - s] H_prev[s]
+                for (std::size_t s = 0; s + j < kHalf; ++s)
+                    for (std::size_t t = 0; t < kHalf; ++t) {
+                        m[s][t] = (m[s][t] + multiply(v[t], f[kHalf - 1 - j - s])) % kModulus;
+                        m_slope[s][t] = (m_slope[s][t] + multiply(w_slope[t], f[kHalf - 1 - j - s])) % kModulus;
+                    }
         }
+        for (std::size_t s = 0; s < kHalf; ++s)
+            for (std::size_t t = s; t < kHalf; ++t) f_half[s][t] = f[t - s];
+        m_ = crossed(m, true);
+        m_slope_ = crossed(m_slope, false);
+        f_half_ = crossed(f_half, false);
         for (std::size_t t = 0; t < kBlock; ++t) first_[t] = multiply(initial, f[t]);
         for (std::uint32_t m = 1; m < kBlock; ++m) reciprocals_.data()[m] = montgomery_form(inverse(m));
         if (size_ > kBlock)
@@ -1407,6 +1426,17 @@ public:
 private:
     using Vec = detail::Vec;
     using Series = std::array<std::uint32_t, kBlock>;  // a series mod x^16
+
+    static constexpr std::size_t kHalf = kBlock / 2;                     // the chained kernel's block
+    using Matrix = std::array<std::array<std::uint32_t, kHalf>, kHalf>;  // 8 x 8, by columns
+
+    // An 8 x 8 matrix for products with H (8 values) broadcast within 128-bit halves: x[k] holds H[k]
+    // in its lower half and H[k ^ 4] in its upper half (no lane crossing for k < 4), and c[k][i]
+    // holds rows i, i + 2 of column k and rows i + 4, i + 6 of column k ^ 4. Sums come out as rows
+    // i, i + 2 | i + 4, i + 6 in qwords: the layout of Lanes.q[i].
+    struct Crossed {
+        Vec c[kHalf][2];
+    };
 
     // 16 values as qword lanes: q[2h] holds t = 8h + 0, 2, 4, 6 and q[2h + 1] t = 8h + 1, 3, 5, 7.
     struct Lanes {
@@ -1568,18 +1598,113 @@ private:
             using detail::partial;
             const Vec w[4] = {partial<kFold>(sums.q[0]), partial<kFold>(sums.q[1]), partial<kFold>(sums.q[2]),
                               partial<kFold>(sums.q[3])};
+            // The inverter's half step is independent work for the cycles the chain leaves free:
+            // before the triangle without slopes, after it with them (1-3% faster each way).
+            if constexpr (!kSlope) inverter_.step();
             last = solve<kSlope ? kWidth : 0>(w, slope, even, odd);
             detail::store(out, last.lo);
             detail::store(out + 8, last.hi);
-            inverter_.step();  // independent work for the cycles the chain from block to block leaves
+            if constexpr (kSlope) inverter_.step();
         }
     }
 
     static Block load_block(const std::uint32_t* p) { return {detail::load(p), detail::load(p + 8)}; }
 
+    // count (a multiple of kBlock) coefficients where no long tap reaches, for w <= 8, in blocks of
+    // 8 (class comment). w and s carry W and V' S of the next block, sums of at most 8 products.
+    template <bool kSlope>
+    void chained(std::uint32_t* out, std::size_t count, const std::uint32_t* even, const std::uint32_t* odd) {
+        Vec w[2]{}, s[2]{};  // the first block's from the state in memory: V S and V' S
+        for (std::size_t j = 0; j < width_; ++j) {
+            const Vec x = detail::broadcast(out[-1 - std::ptrdiff_t(j)]);
+            for (std::size_t i = 0; i < 2; ++i) {
+                w[i] = detail::multiply_add(w[i], v_[j].q[i], x);
+                if constexpr (kSlope) s[i] = detail::multiply_add(s[i], v_slope_[j].q[i], x);
+            }
+        }
+        Vec g[2]{};  // F H of the block at pending, reduced after the next block's chain operations
+        std::uint32_t* pending = nullptr;
+        for (std::uint32_t* const end = out + count; out < end; out += kBlock, even += kBlock / 2, odd += kBlock / 2) {
+            chained_block<kSlope>(out, w, s, g, pending, even, odd);
+            chained_block<kSlope>(out + kHalf, w, s, g, pending, even + kHalf / 2, odd + kHalf / 2);
+            inverter_.step();
+        }
+        detail::store(pending, detail::reduce<false>(g[0], g[1]));
+    }
+
+    // The block of 8 at out: H from w, s and y, then w, s for the next block, then G = F H into g
+    // (the previous block's G stored first). even and odd as in solve().
+    template <bool kSlope>
+    [[gnu::always_inline]] void chained_block(std::uint32_t* out, Vec (&w)[2], Vec (&s)[2], Vec (&g)[2], std::uint32_t*& pending,
+                                              const std::uint32_t* even, const std::uint32_t* odd) const {
+        using namespace detail;
+        constexpr std::size_t kTerms = kSlope ? kHalf : 0;
+        const Vec h[2] = {scale<kTerms>(partial<false>(w[0]), widen(even), s[0]),
+                          scale<kTerms>(partial<false>(w[1]), widen(odd), s[1])};
+        const Vec swapped[2] = {_mm256_permute2x128_si256(h[0], h[0], 1), _mm256_permute2x128_si256(h[1], h[1], 1)};
+        const Vec x[kHalf] = {_mm256_shuffle_epi32(h[0], 0x44),       _mm256_shuffle_epi32(h[1], 0x44),
+                              _mm256_shuffle_epi32(h[0], 0xEE),       _mm256_shuffle_epi32(h[1], 0xEE),
+                              _mm256_shuffle_epi32(swapped[0], 0x44), _mm256_shuffle_epi32(swapped[1], 0x44),
+                              _mm256_shuffle_epi32(swapped[0], 0xEE), _mm256_shuffle_epi32(swapped[1], 0xEE)};
+        products(w, m_, x);
+        if constexpr (kSlope) products(s, m_slope_, x);
+        if (pending) store(pending, reduce<false>(g[0], g[1]));  // after the chain's products: Zen 3
+        g[0] = g[1] = _mm256_setzero_si256();                     // issues the oldest ready first
+        products(g, f_half_, x, std::make_index_sequence<kHalf>());
+        pending = out;
+    }
+
+    // sums = a H, x[k] holding H[k] in its lower half and H[k ^ 4] in its upper half (Crossed).
+    [[gnu::always_inline]] static void products(Vec (&sums)[2], const Crossed& a, const Vec (&x)[kHalf]) {
+        sums[0] = sums[1] = _mm256_setzero_si256();
+#pragma GCC unroll 8
+        for (std::size_t k = 0; k < kHalf; ++k) {
+            sums[0] = detail::multiply_add(sums[0], a.c[k][0], x[k]);
+            sums[1] = detail::multiply_add(sums[1], a.c[k][1], x[k]);
+            asm("" : "+x"(sums[0]), "+x"(sums[1]));
+        }
+    }
+
+    // sums += a H for a lower triangular a (F), skipping the products whose four lanes are zero.
+    template <std::size_t... kK>
+    [[gnu::always_inline]] static void products(Vec (&sums)[2], const Crossed& a, const Vec (&x)[kHalf],
+                                                std::index_sequence<kK...>) {
+        const auto column = [&]<std::size_t k>() {
+#pragma GCC unroll 2
+            for (std::size_t i = 0; i < 2; ++i)  // rows i, i + 2 at column k, i + 4, i + 6 at column k ^ 4
+                if (k <= i + 2 || (k ^ 4) <= i + 6) sums[i] = detail::multiply_add(sums[i], a.c[k][i], x[k]);
+            asm("" : "+x"(sums[0]), "+x"(sums[1]));
+        };
+        (column.template operator()<kK>(), ...);
+    }
+
+    // a by columns (a[t][r]: row r, column t) as Crossed, times 2^32, even rows also times 1/2 if
+    // halve_even.
+    static Crossed crossed(const Matrix& a, bool halve_even) {
+        using detail::montgomery_form;
+        const std::uint32_t half = halve_even ? (kModulus + 1) / 2 : 1;
+        const auto form = [&](std::size_t r, std::size_t t) { return montgomery_form(multiply(a[t][r], r % 2 ? 1 : half)); };
+        Crossed c;
+        for (std::size_t k = 0; k < kHalf; ++k)
+            for (std::size_t i = 0; i < 2; ++i)
+                c.c[k][i] = _mm256_setr_epi64x(form(i, k), form(i + 2, k), form(i + 4, k ^ 4), form(i + 6, k ^ 4));
+        return c;
+    }
+
     using Kernel = void (Holonomic::*)(std::uint32_t*, std::size_t, const std::uint32_t*, const std::uint32_t*);
 
+    // Measured on Zen 3 and Intel (lib/poly/notes.md): the block kernel's cost grows with w (and
+    // doubles its state part with slopes), the chained kernel's does not.
+    static bool chained_wins(std::size_t width, [[maybe_unused]] bool slope) {
+#ifdef HOLONOMIC_CHAINED
+        return HOLONOMIC_CHAINED && width <= kHalf;
+#else
+        return width <= kHalf && width >= (slope ? 8 : 5);
+#endif
+    }
+
     static Kernel homogeneous_kernel(std::size_t width, bool slope) {
+        if (chained_wins(width, slope)) return slope ? &Holonomic::chained<true> : &Holonomic::chained<false>;
         static constexpr auto kKernels = []<std::size_t... W>(std::index_sequence<W...>) {
             return std::array<std::array<Kernel, 2>, sizeof...(W)>{
                 {{&Holonomic::homogeneous<W + 1, false>, &Holonomic::homogeneous<W + 1, true>}...}};
@@ -1660,6 +1785,9 @@ private:
     Lanes q_[kBlock];                                // q_[s][t] = Q[t - s], with long and short taps only
     Lanes v_[kBlock - 1];                            // v_[j] = V column j
     Lanes v_slope_[kBlock - 1];                      // V'
+    Crossed m_;                                      // M (w <= 8), even rows halved as in V
+    Crossed m_slope_;                                // M'
+    Crossed f_half_;                                 // F mod x^8
     Series first_;                                   // g[0, 16) = g[0] F
     std::vector<Tap> far_;                           // long taps by increasing distance, a and b times 2^32
     std::size_t size_;                               // coefficients next() produces in all, or more

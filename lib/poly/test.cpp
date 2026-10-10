@@ -1243,6 +1243,8 @@ void test_holonomic() {
         }
     check_holonomic(random_holonomic_taps(range(1, 16), 15, true, true), P - 1, 20000);
     check_holonomic(random_holonomic_taps(range(1, 16), 15, true, false), P - 1, 20000);
+    check_holonomic(random_holonomic_taps(range(1, 9), 8, true, true), P - 1, 20000);  // the chained kernel's widest
+    check_holonomic(random_holonomic_taps(range(1, 9), 8, true, false), P - 1, 20000);
     check_holonomic(random_holonomic_taps(range(16, 40), 16, true, true), P - 1, 20000);
     check_holonomic(random_holonomic_taps(range(1, 40), 16, true, true), P - 1, 20000);
     // Across several windows of odd reciprocals (and the end of the table of the first half), with

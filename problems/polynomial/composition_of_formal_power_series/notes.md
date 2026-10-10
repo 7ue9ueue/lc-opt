@@ -4,7 +4,9 @@ N <= 8000 coefficients of f and of g (g[0] = 0) mod 998244353; print f(g) mod x^
 Slowest tests: max_random, hack, hack2 and most random (N = 8000 or near; g with a run of
 leading zeros in hack). Small tests N <= 10.
 
-Best judged: none yet.
+Best judged: ours, 11 ms: [409332](https://judge.yosupo.jp/submission/409332) (`main.cpp` of #164),
+with a +9 ms launch spike on random_02 (11 ms, its peers 2; `tools/spikes.py`): clean score
+3 ms.
 Record when opened (issue #67): 9 ms.
 
 ## Design
@@ -61,6 +63,10 @@ score = slowest of max_random_00, max_random_03, hack_02, random_04): read and w
     tests at -O2 (native on `lc-intel`, x86-64-v3) and ASan/UBSan; main.cpp under ASan/UBSan.
     Mutations caught by the tests: 9 of 9 (wraps, signs, truncation, CRT factor, each special
     level).
+  - Merged as #164 (CI: correctness only, no baseline). Submitted its `main.cpp`:
+    [409332](https://judge.yosupo.jp/submission/409332) AC 11 ms, 4.8 MiB; clean score 3 ms
+    (spikes on random_02 11 ms and small_06 9 ms; P(clean run) 0.24, since all 27 cases lie
+    within 9 ms of the slowest).
 - Next: level 1 one-dimensional (Y = 2, ~50 us estimate); pruned y-levels in the transforms of
   generic levels (x-padding bit below the y-bits: y-levels need only half the columns; estimate
   up to 18% of transform time, needs radix-4 kernels whose stride differs from their count).

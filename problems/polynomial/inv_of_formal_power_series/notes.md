@@ -120,6 +120,13 @@ input map 18, tables 83 -> 78, parse 899 -> 822, inverse to 2^18 3521 -> 3471, l
   - Not pursued (counted): Newton without truncation (g~ = g - x^k e g) needs transforms of 4k;
     T(g_2k) from the second product's transform needs the truncated part's forward (no saving);
     F at length 2L from F at L needs a fresh half (no saving). The step stays 5 transforms.
+  - In the real computation (step on both sides, `lc-bench`), the two-accumulator leaf product
+    gives 0.9993 (fresh arenas, 41 rounds) and 0.9994 (warm): the L1 gain does not carry over.
+  - Merged as #306. CI: inv 0.9912 (EPYC 7763 0.9875, 0.9870; EPYC 9V74 0.9991).
+  - Not submitted. Judged case times are whole ms: in 409369 and 409370 every max_random case
+    took 11 ms, random_00 (0.8 ms faster on `lc-amd`) 10 or 11, so the judge runs about 0.7 ms
+    under `lc-amd` and rounds. The round's ~0.14 ms leaves max_random at 11; 10 ms needs ~0.65 ms
+    more. 2 of the 5 submissions for this problem remain.
 - Next: the inverse is ~7.2 ms of ~11.6; output `write()` ~1.7 ms and start/exit ~1.4 ms are the
   floor. Product bottoms run at ~2.5 vector ops per cycle (bounds: 4 ops, 2 multiplies, 2 loads per
   cycle); what holds them back is not found (not loads, not placement, not alternation).

@@ -33,7 +33,7 @@ Next other user: 26 ms (adamant, 400554).
 - Shorter inputs are padded with zeros to 2^6 values; zeros do not change c_k for k < 2^N.
 - Memory: a and b in one mapping, 4 huge pages (`MADV_HUGEPAGE`) and one 4 KiB page below them
   for the 4 KiB beyond 8 MiB.
-- Runs from `.preinit_array` and ends with `_exit` (as `convolution_mod`): libstdc++'s
+- Runs from `.preinit_array` and ends with `_exit` (`RUN_EARLY`, lib/run): libstdc++'s
   initializers and exit handlers never run.
 
 ## Measurements
@@ -238,6 +238,9 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
 - 2026-10-10, claude (lib, issue #156 round 3): `advise_sequential` comes from
   `lib/io/sequential.hpp` (`io::advise_sequential`) instead of a local copy. Same stripped
   executable as before (judge flags, `lc-amd`).
+- 2026-10-10, claude (lib, issue #156 round 3): the `.preinit_array` start and `_exit` come from
+  `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
+  before (judge flags, `lc-amd`).
 
 ## Sources
 

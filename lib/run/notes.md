@@ -24,12 +24,12 @@ program 0.55; an empty program whose `.preinit_array` entry calls `_exit` 0.96.
 
 ## Users
 
-15 convolution problems: bitwise_xor, convolution_F_2_64, convolution_mod, convolution_mod_1000000007,
-convolution_mod_2_64, convolution_mod_large, gcd, lcm, min_plus concave_arbitrary, convex_arbitrary
-and convex_convex, mul_mod2n, mul_modp, multivariate_convolution and its cyclic variant.
+16 convolution problems: bitwise_and, bitwise_xor, convolution_F_2_64, convolution_mod,
+convolution_mod_1000000007, convolution_mod_2_64, convolution_mod_large, gcd, lcm, min_plus
+concave_arbitrary, convex_arbitrary and convex_convex, mul_mod2n, mul_modp, multivariate_convolution
+and its cyclic variant.
 
-Not moved yet, with the same block: bitwise_and_convolution (its round was running) and 17
-polynomial problems (another session's lane; lib/poly #95).
+Not moved yet, with the same block: 17 polynomial problems (another session's lane; lib/poly #95).
 
 ## Log
 
@@ -39,6 +39,9 @@ apart): `run_early`, the `.preinit_array` pointer, `main`.
   moved problems (GCC 15.2 image, `lc-amd`).
 - `test.cpp` passes at -O2 and with ASan/UBSan (`lc-amd`). A version of it with a plain `main`
   fails (static constructors run first), so it checks the early start.
+
+2026-10-10, claude (issue #156, round 3): bitwise_and_convolution (its round had been running in
+round 2). Byte-identical stripped executable before and after (judge flags, `lc-amd`).
 
 ## Sources
 

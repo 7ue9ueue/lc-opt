@@ -190,6 +190,10 @@ step's transform of length 2m' = m), q = x f' (so x g' = q g), Q = q mod x^m:
   huge pages instead of 6.
 - Code: `exp` = `multiply_by_index` into q and g, `exp_direct`, then `detail::exp_newton` (the
   steps, from any q and any g[0] != 0; `power` reuses it).
+- Output halves into g and h directly: `detail::product_to` is `Transform`'s run() for a product
+  whose inverse top level writes its half to a span of the caller's (any alignment, a masked
+  last vector) instead of in place, so the steps copy nothing (g s and the h update in the full
+  steps, g_2 and g_3 in the last; block 3 then transforms g_2 from g).
 
 ## Log
 
@@ -1644,6 +1648,20 @@ product-tree lanes):
   step in blocks plus the h update and the next step's transforms: 20 transforms and 9 leaf
   products of length m against 16 and 7. Blocks need h only at their own size, but the next
   step needs h at the full precision anyway.
+- Merged as #314. CI: exp 0.9770, pow 0.9841, compositional_inverse 0.9916,
+  compositional_inverse_large 0.9970; all 4 0.9874. Judged: exp
+  [409661](https://judge.yosupo.jp/submission/409661) AC 16 ms (2 of the 9 largest cases at 16,
+  7 at 15; 409402 had 5 at 16).
+- Second change: `detail::product_to` (Exp above), the four copies into g and h replaced by
+  direct writes of the inverse's top level. Removing the copies altogether (outputs wrong) gave
+  0.9907 in process, the bound. With `product_to` (`lc-bench`, A/B against #314, 41 calls,
+  outputs equal): exp 0.9947 warm, 0.9940 fresh; power 0.9958. `judge.py bench` exp 61 rounds
+  16.05 -> 16.00 ms (0.9978). Not made in `transform.hpp`: that re-bundles every lib/poly problem
+  for 0.06 ms of exp. Mutations (full stores past the half: ASan error; the mask one lane short;
+  the upper half's difference reversed, radix 2 and radix 4) fail the tests.
+- Counted, not built: fusing an inverse's top level with the next forward's (inv's `step.hpp`)
+  at block 2's T(r_lo), block 3's T(g_2) and T(v): one pass over m words each, about 0.01 ms
+  at m = 2^18 (T of a half-zero source 0.288 against 0.299 ms for a full one).
 
 ## Sources
 

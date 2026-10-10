@@ -3,7 +3,7 @@
 N, M <= 2^19; a and b convex, 0 <= a_i, b_i <= 10^9; print c_k = min_{i+j=k} a_i + b_j
 (N + M - 1 values, each < 2^31). 5 s.
 
-Best judged: ours, 13 ms: [409294](https://judge.yosupo.jp/submission/409294) (current `main.cpp`).
+Best judged: ours, 9 ms: [409568](https://judge.yosupo.jp/submission/409568) (`main.cpp` of #280).
 Record when opened: 20 ms (issue #29).
 I/O floor (`../floor.py`, `lib/io/notes.md`): 11.31 ms on `lc-amd` (with `lib/io` output); 10.66 ms on
 `lc-bench` in round 3, against 8.70 ms for this `main.cpp` (own parser and formatter).
@@ -18,12 +18,15 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.31 ms on `lc-amd` (with `lib/io
 - Output blocks of `columns::kBlock` = 25600 values: per block, 4 chains (equal ranges of k, each
   from its own binary search) run interleaved, then the block is formatted and written. No array
   for c; the block buffer stays in L2.
-- Merge: classic SIMD merge (Inoue et al. 2007, AA-sort; Chhugani et al. 2008): keep the 8
-  largest slopes seen, sorted descending; load 8 slopes (ascending) from the input with the
-  smaller head, min/max with the held vector, sort both bitonic halves (3 levels each). The 8
-  minima are the next slopes; an in-vector prefix sum plus a carry gives c. Head choice by masks (GCC emitted a branch
-  for `?:`). Slopes are read on the fly as `a[i + 1] - a[i]`; a and b are extended with 96
-  elements of slope INT32_MAX (wrapping u32 arithmetic), so exhausted inputs never win.
+- Steps of 8 values by window minima (round 3): from an argmin (i, j) of c[k], the merge passes
+  through an argmin of c[k + p] at (i + q, j + p - q) with 0 <= q <= p, so c[k + p] is the
+  minimum of a[i + q] + b[j + p - q] over q in [0, 8]: 9 broadcasts of a, 9 loads of b, adds
+  and unsigned mins (q = 5..8 in the high half only). Every term is a real split or holds a pad,
+  so the minimum is exact. The next argmin is the first q with a[i + q] + b[j + 8 - q] = c[k + 8]
+  (one compare of a diagonal), else q = 8. Pads: INT32_MAX after a and b and before b; two pads
+  add up without wrapping, so out-of-range terms never win.
+- Before round 3: classic SIMD merge of slopes (Inoue et al. 2007, AA-sort; Chhugani et al.
+  2008) with a bitonic network and in-vector prefix sums; 17% slower than the windows.
 - Output: `columns.hpp`, a copy of `../min_plus_convolution_convex_arbitrary/columns.hpp` (10- or
   11-byte fields per block; judge-specific) with two code-generation fixes (round 3). The width
   comes from the block's two end values: c is convex, so its largest value in a block is at an end.
@@ -129,3 +132,14 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.31 ms on `lc-amd` (with `lib/io
     merge 0.67, format 0.85; the merge runs at ~17 cycles per 8 values against ~10 for its
     instruction mix (no PMU on `lc-bench` to say why). The formatter fixes would also apply to
     convex_arbitrary and concave_arbitrary, which include the original `columns.hpp`.
+  - PR #280 merged; CI new/old 0.9541 (EPYC 9V74 0.9593, EPYC 7763 0.9466 and 0.9564).
+    Submitted: [409568](https://judge.yosupo.jp/submission/409568) AC 9 ms, 17.8 MiB, no spike
+    (`tools/spikes.py`: clean 9). Per case: small_slopes_00/01 9, monotone_01/03 8, the rest of
+    the max cases 7. Clean score unchanged (9 in 409240 to 409305 too); the judged 13 was spikes.
+  - Window minima instead of the bitonic merge (see Design): no held vector, carry or prefix
+    sums; a step is ~20 loads and ~30 vector ops, and the only loop-carried path is the argmin
+    pointers. Merge 0.660 -> 0.548 ms (small_slopes_01), 0.660 -> 0.545 (max_random_00).
+    Variants (merge ms): min as a chain 0.570, as a tree 0.560, q = 5..8 in xmm 0.553 (kept);
+    2, 6, 8 chains 0.845, 0.601, 0.802 (4 kept). `judge.py bench` against #280, 41 rounds,
+    5 slowest cases: 8.62 -> 8.52 ms (0.974). Checks: 34/34, stress 1500, ASan/UBSan on all 34
+    cases, file and pipe.

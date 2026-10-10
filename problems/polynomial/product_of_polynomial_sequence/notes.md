@@ -63,6 +63,16 @@ _03, random_01, unbalanced_00.
     size (2^9 .. 2^20 words), in both layouts; base nodes built recursively by the tree's split
     (same time as consecutive pairs); base 16 instead of 32 (same); the counting sort's cursors
     in two interleaved chains (0.9 -> 1.3 ms); degrees kept as bytes for the sort (neutral).
+  - Merged as #203 (CI: correctness only, no baseline).
+  - The walk's `d ? 1 : tokens[at + 1]` (constants into the product) compiled to a branch:
+    mispredicted for max_random's ~30% constants. As a mask: read phase of max_random_01
+    4.2-4.5 -> 3.45-3.57 ms; whole process 30.25 -> 29.41 ms (ratio 0.972, `lc-amd`, 11
+    rounds interleaved; all_degree_one unchanged at 28.7).
+  - Counting sort placement alone (max_random_01, 305741 polynomials): 0.81 ms, 9.2 cycles
+    each, plus a 0.1 ms huge-page fault for `order`. Lists for degrees 1-4 appended in the walk
+    (a cursor array indexed by a degree table, the counting sort only for degrees 5-255):
+    placement 0.15 ms but the walk +0.5 ms; whole process 0.993 (11 rounds), not kept. With
+    five cursors and selects in registers instead: walk +1.7 ms (spills).
 - Next: the transforms are ~2 per tree level (19 levels for linear factors) and near the
   kernels' speed; remaining overheads: the base (~1000 cycles per node of bookkeeping), the top
   tree's 3 standard levels (leaf products; a 2- or 4-coefficient leaf layout would cost less)

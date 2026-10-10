@@ -6517,8 +6517,8 @@ void read_polynomials(io::Reader& in, std::size_t n, Polynomials& p) {
         io::read_bulk(in, tokens + parsed, need - parsed);
         parsed = need;
         for (; i < n && at + 1 < parsed; ++i) {  // degree and first coefficient parsed
-            const u32 d = tokens[at];
-            p.constants.add(d ? 1 : tokens[at + 1]);
+            const u32 d = tokens[at], constant = 0u - (d == 0);  // all ones for a constant
+            p.constants.add((tokens[at + 1] & constant) | (1 & ~constant));  // a select GCC made a branch
             total += d;
             if (d >= kBuckets) [[unlikely]] {
                 p.large[p.large_count++] = u32(at);

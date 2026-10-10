@@ -1131,6 +1131,8 @@ scalar code (min instead of ?:) made compose slower (29.86 -> 30.08 ms): still s
 composition_of_formal_power_series 0.9929 (0.9922), compositional_inverse_of_formal_power_series
 1.0007 (1.0057). Tests: `test.cpp` at -O2 and ASan/UBSan, both `stress.py` 400 rounds, all
 official tests. projection.hpp has loops of the same kind (for #87).
+- Merged as #253. CI: composition_of_formal_power_series 0.9863, _large 0.9929,
+  compositional_inverse_of_formal_power_series 0.9939; all 3 0.9910.
 
 ## Sources
 

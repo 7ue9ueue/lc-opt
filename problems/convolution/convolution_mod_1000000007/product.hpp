@@ -7,7 +7,8 @@
 //   product.multiply(a, b, out, work, mod, factor);   // out <- a b factor mod p, canonical
 //
 // a[i], b[i] < 4P, readable up to 2^lg / 2 + 8 words and zero from the factor's length up to
-// 2^lg / 2. out and work hold 2^lg + kPadding words; work is destroyed and may be b's storage.
+// 2^lg / 2. out and work hold 2^lg + kPadding words; work is destroyed. In place: out may be a's
+// storage with b in its upper half (b's first level runs before a's), or work b's storage.
 #pragma once
 
 #include "kernels.hpp"
@@ -150,8 +151,8 @@ public:
         auto* b = reinterpret_cast<Vec*>(work);
         if (std::countr_zero(nv) % 2 == 0) {  // nv = 4^j
             const std::size_t h = nv / 4;
-            detail::forward_radix4(a, h, a_in, roots_, m);
             detail::forward_radix4(b, h, b_in, roots_, m);
+            detail::forward_radix4(a, h, a_in, roots_, m);
             for (std::size_t t = 0; t < 4; ++t) subtrees.visit(a + t * h, b + t * h, h, t);
             return detail::inverse_radix4(a, h, inverse_roots_, multimod::Factor(s, m), m.p);
         }
@@ -161,8 +162,8 @@ public:
         alignas(32) Vec w[12];
         const std::uint32_t first[6] = {roots_[1], roots_[9], roots_[2], roots_[10], roots_[3], roots_[11]};
         for (int i = 0; i < 6; ++i) w[i] = detail::broadcast(first[i]);
-        kernels::forward_radix8(a, q, a_in, w);
         kernels::forward_radix8(b, q, b_in, w);
+        kernels::forward_radix8(a, q, a_in, w);
         for (std::size_t c = 0; c < 8; ++c) subtrees.visit(a + c * q, b + c * q, q, c);
         const std::uint32_t z0 = inverse_roots_[1], x1 = inverse_roots_[slot(1)];
         const std::uint32_t* y1 = inverse_roots_ + slot(2);

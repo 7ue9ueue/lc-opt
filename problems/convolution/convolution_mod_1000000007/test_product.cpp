@@ -240,11 +240,19 @@ void test_top(Tables& t) {
     }
 }
 
+// Ways to place the arrays of lazy::Product::multiply.
+enum class Layout { kSeparate, kWorkInB, kOutInA };
+
 // lazy::Product against lib/multimod (inputs reduced mod p), for factors of n and m words < 10^9 + 7.
-void test_product(const multimod::Modulus& m, int lg, std::size_t n, std::size_t m_count, int kind, bool in_place) {
+void test_product(const multimod::Modulus& m, int lg, std::size_t n, std::size_t m_count, int kind, Layout layout) {
     const std::size_t len = std::size_t(1) << lg, half = len / 2;
-    Vectors a(half / 8 + 2), b(len / 8 + 2), out(len / 8 + 2), work(len / 8 + 2), ra(len / 8 + 2), rb(len / 8 + 2),
+    Vectors x(len / 8 + 2), y(len / 8 + 2), out(len / 8 + 2), work(len / 8 + 2), ra(len / 8 + 2), rb(len / 8 + 2),
         ref(len / 8 + 2), tables(lazy::Product::table_words(lg) / 8 + 1);
+    // kOutInA: a and b are the halves of x, out is x. Otherwise a is x and b is y; the upper halves
+    // hold garbage that must not be read.
+    u32* a = x.lanes();
+    u32* b = layout == Layout::kOutInA ? x.lanes() + half : y.lanes();
+    for (std::size_t i = 0; i < len + 8; ++i) x.lanes()[i] = u32(rng()), y.lanes()[i] = u32(rng());
     const auto value = [&](std::size_t i) -> u32 {
         switch (kind) {
         case 0: return random_below(1000000007);
@@ -253,20 +261,19 @@ void test_product(const multimod::Modulus& m, int lg, std::size_t n, std::size_t
         default: return random_below(10);
         }
     };
-    for (std::size_t i = 0; i < n; ++i) a.lanes()[i] = value(i);
-    for (std::size_t i = 0; i < m_count; ++i) b.lanes()[i] = value(i);
-    for (std::size_t i = half; i < len + 8; ++i) b.lanes()[i] = u32(rng());  // upper half of b: not read
-    a.lanes()[half] = u32(rng());
-    for (std::size_t i = 0; i < half; ++i) ra.lanes()[i] = a.lanes()[i] % m.p, rb.lanes()[i] = b.lanes()[i] % m.p;
+    for (std::size_t i = 0; i < half; ++i) a[i] = i < n ? value(i) : 0;
+    for (std::size_t i = 0; i < half; ++i) b[i] = i < m_count ? value(i) : 0;
+    for (std::size_t i = 0; i < half; ++i) ra.lanes()[i] = a[i] % m.p, rb.lanes()[i] = b[i] % m.p;
     const u32 factor = random_below(m.p);
     const multimod::Transform reference(lg, tables.lanes());
     reference.multiply(multimod::Padded{ra.lanes(), n}, multimod::Padded{rb.lanes(), m_count}, ref.lanes(), work.lanes(),
                        m, factor);
     const lazy::Product product(lg, tables.lanes());
-    u32* w = in_place ? b.lanes() : work.lanes();
-    product.multiply(a.lanes(), b.lanes(), out.lanes(), w, m, factor);
+    u32* o = layout == Layout::kOutInA ? x.lanes() : out.lanes();
+    u32* w = layout == Layout::kWorkInB ? b : work.lanes();
+    product.multiply(a, b, o, w, m, factor);
     bool ok = true;
-    for (std::size_t i = 0; i < len; ++i) ok &= out.lanes()[i] == ref.lanes()[i];
+    for (std::size_t i = 0; i < len; ++i) ok &= o[i] == ref.lanes()[i];
     expect(ok, "product", u64(lg) * 1000000 + n);
 }
 
@@ -284,10 +291,12 @@ int main() {
         test_top(t);
         for (int lg = 9; lg <= multimod::kMaxLog; ++lg) {
             const std::size_t half = std::size_t(1) << (lg - 1);
-            test_product(m, lg, half, half, lg % 4, lg % 2);
-            test_product(m, lg, half, half, 1, !(lg % 2));
-            test_product(m, lg, half - 3, 1 + random_below(half), 0, true);
-            if (lg <= 12) test_product(m, lg, 1, 1, 2, false);
+            for (const Layout layout : {Layout::kSeparate, Layout::kWorkInB, Layout::kOutInA}) {
+                test_product(m, lg, half, half, lg % 4, layout);
+                test_product(m, lg, half - 3, 1 + random_below(half), 0, layout);
+            }
+            test_product(m, lg, half, half, 1, Layout::kOutInA);
+            if (lg <= 12) test_product(m, lg, 1, 1, 2, Layout::kSeparate);
         }
     }
     if (failures) {

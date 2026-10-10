@@ -203,8 +203,9 @@ def loop_function(name, graph, kind, pair, knobs, doc):
 
 # ------------------------------------------------------------------------------------- bottom
 
-# lib/ntt's knobs; 'both' deadlocks the scheduler at window 20 with these graphs.
-BOTTOM_KNOBS = dict(gpk.KNOBS, both=gk.Knobs(window=16))
+# lib/ntt's knobs, but 'both' from timing 100 knob sets on EPYC 7B13 (118.3 cycles per group;
+# lib/ntt's set deadlocks the scheduler with these graphs, and window 16 gives 122.9).
+BOTTOM_KNOBS = dict(gpk.KNOBS, both=gk.Knobs(margin=1, load_latency=6, window=20))
 
 def forward_h1(g, array, x, y):
     tw = lambda base, d: (g.scalar(base, d), g.scalar(base, d + 32))

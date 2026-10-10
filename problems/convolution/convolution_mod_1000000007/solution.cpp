@@ -130,13 +130,12 @@ void solve() {
     const std::size_t len = std::size_t(1) << lg, words = len + lazy::kPadding;
     const auto padded = [](std::size_t k) { return (k + 7) & ~std::size_t(7); };
 
-    mem::Arena arena(4 * (len / 2 + 8 + lazy::Product::table_words(lg) + (kPrimes + 1) * words +
-                          fields11::kBlock) +
+    mem::Arena arena(4 * (lazy::Product::table_words(lg) + (kPrimes + 1) * words + fields11::kBlock) +
                      fields11::kTextBytes + 64 * 16);
-    // a: zero up to half the length, plus a word the first level reads. b holds the last prime's
-    // transform of b in place.
-    auto* a = arena.take<std::uint32_t>(len / 2 + 8);
-    auto* b = arena.take<std::uint32_t>(words);
+    // a and b, each zero up to half the length, in one array that becomes the last prime's
+    // residues: the last product runs in place.
+    auto* factors = arena.take<std::uint32_t>(words);
+    std::uint32_t *a = factors, *b = factors + len / 2;
     io::read_bulk(in, a, n);
     io::read_bulk(in, b, m);
 
@@ -144,9 +143,8 @@ void solve() {
     auto* work = arena.take<std::uint32_t>(words);
     Residues residues;
     for (int k = 0; k < kPrimes; ++k) {
-        const bool last = k + 1 == kPrimes;
-        auto* r = last ? work : arena.take<std::uint32_t>(words);
-        product.multiply(a, b, r, last ? b : work, Modulus(kPrimeList[k][0], kPrimeList[k][1]), kCrt.scale[k]);
+        auto* r = k + 1 == kPrimes ? factors : arena.take<std::uint32_t>(words);
+        product.multiply(a, b, r, work, Modulus(kPrimeList[k][0], kPrimeList[k][1]), kCrt.scale[k]);
         residues[k] = r;
     }
 

@@ -15,6 +15,8 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
 - `composition.hpp`: f(g) mod x^n by Kinoshita and Li's algorithm (issue #67); its own bottoms
   and tables on top of the transform layer. `projection.hpp`: power projection, the same levels
   run forward (issue #68); `compositional_inverse.hpp` on top of it and `pow.hpp`.
+- `product_tree.hpp`: products of many polynomials (issue #74), for multipoint evaluation and
+  interpolation next; its own tables and transforms (`TreeTransform`) on the transform layer.
 
 APIs and usage: the header of each file. Tests: `test.cpp` (O(n^2) references; sizes 1..64,
 powers of two and their neighbours up to 2^20, random sizes; also run under ASan/UBSan in CI).
@@ -365,6 +367,42 @@ g with f(g) = x mod x^n, f[0] = 0, f[1] != 0 (`compositional_inverse.hpp`). Lagr
 H = (x / g)^(n-1) / (n - 1) mod x^(n-1) by one `divide_by_index` (reversed), and
 g / x = (H / H[0])^(-1 / (n-1)) / f[1] by `power` (which divides by H[0]). At n = 8000: power
 251 µs (log_derivative 105, exp 146) of ~1500.
+
+## Product tree
+
+`product_tree.hpp`: `ProductTree<Layout, Leaves, Keep>` multiplies the leaves of a source
+(polynomials of degree >= 1, Montgomery form) depth first. `TreeTransform`: Transform's
+transforms with tables of its own, scales cached per length (Transform computes (n/8)^-1 by an
+exponentiation per call: ~500 cycles, more than a whole transform of 64 words), and 8, 16 and
+32 words by radix-2 steps.
+- Doubling: node p of length L (power of two >= deg p) from its children's transforms of length
+  L: T_L(p) by a product pass, kept as the lower part of the parent's transform; p mod
+  (x^L - 1) by an inverse; with the wrap fixed (deg p = L: p[L] = product of the leading
+  coefficients, subtracted from p[0]), forward_upper of p mod (x^L + 1) and, if the parent is
+  longer still, of p mod (x^m + 1) for m = 2L ..: one product pass, one inverse, one forward
+  of length L per node. The root: product and inverse only.
+- Montgomery form everywhere: leaf and pointwise products carry 2^-32, so products of
+  Montgomery-form transforms are Montgomery-form transforms; no correction pass.
+- Layouts. Standard: Transform's leaves mod x^8 - w_p, leaf products. Lanes: 8 polynomials
+  side by side (word 8 j + l = coefficient j of polynomial l); the same transforms of 8m words
+  act on each lane as a transform of length m with one-coefficient leaves (the butterflies are
+  vertical), so products are pointwise Montgomery products. Per lane: degrees and leading
+  coefficients as vectors; the wrap is fixed lane by lane under a mask (degree == L).
+- Lanes, nodes of degree <= 32: schoolbook (`multiply_lanes`: 64-bit sums of up to 17 products,
+  one Montgomery step; above 12 products a fold 2^32 h + l -> h (2^32 mod P) + l first), the
+  leaves multiplied in consecutive pairs (no tree split inside the base), leading coefficients
+  gathered from the result; then one forward to the parent's length.
+- Split: leaves [lo, hi) at the prefix sum of degree(k) closest to half. Leaves sorted by
+  degree, largest first, keep a single large leaf alone.
+- Scratch: a stack; at a node of length L, b (L + 1 coefficients) and, when the parent has the
+  same length, a (L); else a is the upper part of the parent's buffer. About 3 root lengths.
+- Costs (`lc-amd`, cycles per vector of 8 words, in cache): lanes pointwise + inverse 23 at 2^13
+  words, 30 at 2^17, 33 at 2^19; forward_upper 20, 28, 31; standard leaf products + inverse 44,
+  51, 54. A tree level costs ~2 transforms of its total length: per vector ~44 cycles at 2^13
+  words (lanes) up to ~85 at 2^19 (standard). Schoolbook in lanes, rdtsc cycles per call:
+  1x1 17, 2x2 31, 4x4 68, 8x8 196, 16x16 734.
+- Keep(lo, hi, transform) sees every node's final transform at its parent's length: for the
+  downward passes of multipoint evaluation (#75) and interpolation (#77).
 
 ## Measurements
 
@@ -760,6 +798,22 @@ products 1.77 and 1.69).
   CI: exp 0.9713, log 0.9994. pow judged [409426](https://judge.yosupo.jp/submission/409426)
   13 ms with a launch spike, clean 7 ms.
 
+2026-10-10, claude (issue #74, product_of_polynomial_sequence):
+- New `product_tree.hpp` (Product tree above); no existing header changed. Tests: TreeTransform
+  against the leaf definition for 8 .. 2^15 words (forward from x^shift in, forward_upper,
+  inverse times c, leaf and pointwise products in Montgomery form); `multiply_lanes` for every
+  m + k <= 32 with random, half-zero and near-(P - 1) coefficients; both trees against naive
+  products (degrees up to 3000, longer at 3 random points) for linear factors (2^k of them:
+  wraps at every level), equal degrees, random small degrees, one large and many small, sizes
+  around 32 and powers of two; lanes with sorted and with mixed lane degrees; every kept
+  transform (nodes up to 4096 words) against the forward of the node's product; `lane_columns`.
+  Mutations (one wrap subtraction, the fold for 13..16 products, no p[L] at the root) fail them.
+- Fused product + inverse bottoms (each tile's products, then the asm `inverse_bottom` from
+  them): 1-1.5 cycles per vector slower than a separate product pass at 2^9 .. 2^20 words in
+  both layouts (in cache). Not kept.
+- product_of_polynomial_sequence on `lc-amd`: 35.3 -> 30.0 ms whole process (floor 7.9); the lane
+  tree 14.4 ms and the top tree 5.7 ms of it (problem notes).
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -791,3 +845,7 @@ products 1.77 and 1.69).
 - Lagrange inversion: n [x^n] f^k = k [x^(n-k)] (x / g)^n for g the compositional inverse of f
   (standard; R. Stanley, Enumerative Combinatorics vol. 2, section 5.4). Power projection with
   the numerator carried forward: Kinoshita and Li above; derived and written here, no code read.
+- Product trees with transform doubling (keep a node's transform of length L, extend it by the
+  transform of p mod (x^L + 1)) and the wrap at length = degree: standard techniques (as in
+  Bernstein's survey "Fast multiplication and its applications", 2008, from memory; not
+  consulted in this round). Lanes, the base and the code derived and written here; no code read.

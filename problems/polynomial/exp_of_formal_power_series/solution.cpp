@@ -2,6 +2,7 @@
 // (problems/convolution/convolution_mod/fields.hpp). One arena holds every array.
 #include <unistd.h>
 
+#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/poly/exp.hpp"
 #include "problems/convolution/convolution_mod/fields.hpp"
@@ -17,7 +18,7 @@ void solve() {
                       poly::Arena::footprint(kTextWords));
     const poly::Transform transform(arena, lg);
     const std::span<std::uint32_t> g = arena.take(n);
-    in.read(g.data(), n);
+    io::read_bulk(in, g.data(), n);
     poly::exp(transform, g, g, arena.take(poly::exp_scratch(n)));  // in place: f is read first
     io::Writer out;
     fields::write(out, g.data(), n, reinterpret_cast<char*>(arena.take(kTextWords).data()));

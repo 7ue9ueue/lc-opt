@@ -93,11 +93,26 @@ step's transform of length 2m' = m), d = f', q = d mod x^(m-1):
   w[m, 2m)), upper half.
 - Per step 8 transforms of length 2m (in halves: T_m(g) 1, e 1, h 2, T_m(r) 1, r 1, T_2m(h) 2,
   upper half of T_2m(r) 1, t 2, upper half of T_2m(g) 1, g s 4) and 3.5 leaf products of that
-  length. In all about 16 T(n) + 7 LP(n) for n = 2^19 (inverse: 10 T + 4 LP).
+  length.
+- Last step (m < n <= 2m, `detail::exp_last_step`): transforms of length m only, and h is not
+  extended. With h0 = h mod x^(m/2) (H from the previous step), G0 = T_m(g mod x^(m/2)) (the
+  previous step's G) and halves r0, r1, s0, s1:
+  - t = h r mod x^m = h0 r0 + x^(m/2) (h0 (r1 - e r0) mod x^(m/2)), since h = 1/g mod x^m =
+    h0 - x^(m/2) (h0 e mod x^(m/2)). Products: e (upper half of g h0), e r0 (lower half, after
+    T_m(e)), h0 (r1 - e r0) (lower half), h0 r0 (both halves); the division's loader adds the two
+    parts of t.
+  - (g s)[0, m/2) = (g0 s0)[0, m/2); (g s)[m/2, m) = upper half of the cyclic product
+    g s0 + g0 x^(m/2) s1 (one `inverse_product_sum` of T_m(g) T_m(s0) and G0 T_m(x^(m/2) s1)):
+    every product has degree < 3m/2, so nothing wraps into that half.
+  - 14 transforms and 8 leaf products of length m against 16 and 7 for a full step. When
+    n - m <= m/2 only the lower parts are computed (6 transforms, 3 leaf products).
+  - Transforms have length at most 2^(lg-1), so `exp_log` is one less than before and the
+    tables half as large.
+- In all about 15 T(n) + 7.5 LP(n) for n = 2^19 (inverse: 10 T + 4 LP).
 - Below 64 coefficients: the recurrence n g_n = sum_k k f_k g_(n-k); h mod x^32 by
   `inverse_direct`.
 - f is only read by the first pass (into d = f'), so g may be f.
-- Scratch: d, G, H, w (length 2^lg each), h (2^(lg-1)).
+- Scratch: d, G, w (2^lg words each), H, h (2^(lg-1)); `detail::exp_length(n)` is 2^lg.
 - Code: `exp` = `derivative` into d, `exp_direct`, then `detail::exp_newton` (the steps, from any
   d and any g[0] != 0; `power` reuses it).
 
@@ -232,17 +247,23 @@ the same with e = 1/2. log is `Recurrence` on G = n g (taps (d, -f_d), r = n f_n
   (1 - B)(n + θ) G - (A + B') G = R, R the terms reaching before the block. F (the solution for
   n = 0, F[0] = 1) solves the n = 0 operator, so G = F U gives (1 - B) F (n + θ) U = R:
   G = F (y ⊙ W) mod x^16, W = Q R, Q = 1 / ((1 - B) F), y[t] = 1 / (n + t) (variation of
-  constants). From the state S (last w values) W = V S, w columns, plus n V' S with slopes;
-  long taps add Q R_long (a 16 x 16 triangle). Verified first in a Python prototype.
-- Per block: W (4w `vpmuludq`, partial Montgomery step to < 4P), H = y ⊙ W (one product, step,
-  subtraction), G = F H (triangle: 46 `vpmuludq`, upper half with 16 products folded). The next
-  block's state is G's upper half, broadcast from registers.
+  constants). Long taps add Q R_long (a 16 x 16 triangle). Verified first in a Python prototype.
+- Slopes: from the state S (last w values), R = R0 + n R1, and n y[t] = 1 - t y[t] gives
+  y ⊙ W = y ⊙ (Q R0 - t Q R1) + Q R1. So H = y ⊙ (V S) + V' S with V = Q R0 - t Q R1 and
+  V' = Q R1 (w columns each); V' S joins the product with y before its Montgomery step.
+- Per block: W = V S (4w `vpmuludq`, partial Montgomery step to < 4P), H = y ⊙ W + V' S (one
+  product, 4w with slopes, one step, 1 to 3 subtractions), G = F H (triangle: 46 `vpmuludq`,
+  upper half with 16 products folded). The next block's state is G's upper half, broadcast from
+  registers.
 - Costs per coefficient (w = 7): W 7 products, H 1, triangle 8.5, against w = 7 for 1/f. About
   260 vector ops per block; 1.975 ms for 10^6 coefficients without the dependency from block to
   block, 2.21 ms with it (`lc-amd`, in memory, reciprocals included): mostly throughput.
-- Reciprocals 2^32 / m: odd m by `batch_inverses` per `next` call (step 2); even m from a table
-  of the first half, 2^32 / m = (2^32 / (m / 2)) / 2, with the 1/2 folded into the even lanes of
-  V, V', Q (`columns(..., true)`). The table (2 MiB at N = 10^6) is in transparent huge pages.
+- Reciprocals 2^32 / m: odd m by batch inversion (`BatchInverter`) in windows of 16384
+  coefficients; even m from a table of the first half, 2^32 / m = (2^32 / (m / 2)) / 2, with the
+  1/2 folded into the even lanes of V, Q (`columns(..., true)`; not V', added after y). The table
+  (2 MiB at N = 10^6) is in transparent huge pages. The kernel loop runs the next window's batch
+  inversion, a half step (two chains of 8 lanes) per block: independent work for the cycles the
+  chain from block to block leaves free. The 32 lane totals by a product tree (as `Divider`).
 
 `Divider` (`divider.hpp`): g[n] = G[n] / n, called on consecutive ranges (multiples of 64 but
 the last), in place or not. For log: G from `Recurrence` in chunks, divided after the chunk's
@@ -687,6 +708,57 @@ products 1.77 and 1.69).
 - Zen 3 throughput (`lc-amd`, asm loops of 12 independent ops per iteration): `vpmuludq` 2 per
   cycle, `vpsrlq` 2, `vpaddq` 4, `vpblendd` 4, `vperm2i128` 1; 6 `vpmuludq` + 6 `vpsrlq`
   4.15 cycles (the shifts share a pipe with the multiplies), 6 `vpmuludq` + 6 `vpaddq` 4.28.
+
+2026-10-10, claude (issue #63, exp round 2; owner lane):
+- `exp.hpp`: `detail::exp_last_step` (Exp above): the last Newton step with transforms of length
+  m only, 14 transforms and 8 leaf products of length m against 16 and 7. In process at
+  N = 500000 (`lc-amd`, in-process A/B, 41 alternating calls): 12.24 -> 11.79 ms (0.963);
+  computing (g s)[m/2, n) as one half of a sum of two cyclic products instead of with
+  T_m(g1) = ±(T_m(g) - G0): 11.79 -> 11.74 (0.995). Last step 6.33 -> 5.87 ms. Scratch 9 -> 8 MB
+  at N = 500000 (H holds m words, not 2m); `exp_log` one less, tables half as large. pow uses
+  the same steps (`power` at N = 500000 in process 20.95 -> 20.48 ms, at 7999 0.987).
+- Tests: exp at 3 * 2^(k-2) and 3 * 2^(k-2) + 1 (the last step without and with its upper
+  parts); exp and power with the smallest tables they allow (lg_max = exp_log, power_log).
+  Mutations (S1 not shifted, t without its upper part, v = b - r1, (g s)[m/2, ..) from G0 only)
+  fail them. -O2 and ASan/UBSan, `-march=native` and `-march=x86-64-v3` (`lc-intel`).
+- Tried, not kept:
+  - `divide_by_index` with the even integers' reciprocals halved from the previous step's
+    (only odd integers in the batch inversion; 2.5 Montgomery products per coefficient instead
+    of 4; `lc-amd`, 2^18 integers, ns per coefficient): 0.910 against 0.905 with GCC's
+    out-of-line lambda, 0.77 with it inlined, but 1.09 once it also stores the reciprocals for
+    the next step; exp in process 1.0096 (out-of-line version). The division is bound by
+    instruction count (about 9.4 instructions per coefficient, 4 per cycle), not by the
+    multiplies.
+  - Leaf product with one window load per step and the odd terms by `vpsrlq` (16 loads per leaf
+    instead of 24): `inverse_product` 1.039, `cyclic_product` 1.026, `forward_product` 1.057 at
+    2^18 (`lc-amd`). The bottoms are bound by vector ops, not loads.
+- Measured at 2^18 (`lc-amd`, cycles per vector): forward 30.7, inverse 29.5,
+  `inverse_product` 51.4, `cyclic_product` 79.9, `forward_product` 56.1, `inverse_product_sum`
+  of 2 72.3. A leaf product with its windows costs 20-25 cycles per vector in the bottoms.
+- Merged as #185 (with exp's `io::read_bulk`). CI: exp 0.9724, pow 0.9750,
+  compositional_inverse 1.0017; all 3 0.9830. Judged: exp
+  [409402](https://judge.yosupo.jp/submission/409402) AC 16 ms (was 18; two earlier runs had
+  launch spikes, clean 16).
+
+2026-10-10, claude (issue #72, pow_of_formal_power_series_sparse):
+- `holonomic.hpp`: slopes after the reciprocal scale (H = y ⊙ (V S) + V' S, above; was
+  W = V S + n V' S with V' S reduced and multiplied by n on the chain); `scale<k>` takes a sum of
+  k products into its Montgomery step (k <= 8: two subtractions, 9 and 10: three, more: the sum
+  folded first); `BatchInverter` (batch inversion in half steps) and windows of odd reciprocals
+  advanced by the kernel loop; V columns before V' columns. API unchanged. Bundles changed: exp,
+  log (`divider.hpp` includes `holonomic.hpp`), pow (new).
+- In process (`lc-amd`, 10^6 coefficients in chunks of 25600, medians, ms), pow w = 2, 6 and exp
+  w = 7: main 2.55, 2.95, 2.28; slopes 2.24, 2.52, -; reciprocals in the loop 2.00, 2.38, 2.10;
+  V first 1.98, 2.36, 2.10. Probes: main without the dependency from block to block 2.23, 2.60
+  (pow), without the reciprocals 2.19, 2.59; after this round the dependency costs nothing.
+  Windows of 32768: no change.
+- Tests: `scale<k>` for k = 0, 1, 8, 9, 10, 11, 15 at its bounds (sums up to k (P - 1)^2);
+  recurrences over 3 and 5 windows with long taps at window edges. Mutations (no t Q R1 term,
+  V' halved, one subtraction fewer, no 4P subtraction at k = 9, 10, no fold at k > 10, no finish
+  of the window's batch, a wrong offset into the odd reciprocals) fail them.
+- `judge.py bench` (`lc-amd`, 21 rounds) against main: exp 0.9627, log 0.9940. Merged as #196;
+  CI: exp 0.9713, log 0.9994. pow judged [409426](https://judge.yosupo.jp/submission/409426)
+  13 ms with a launch spike, clean 7 ms.
 
 ## Sources
 

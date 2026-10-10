@@ -72,7 +72,8 @@ small, k0.
     m 2^lg lg 0.25. Constants fitted on lc-amd (log below).
 - Memory: blocks of 256 KiB or more are 2 MiB aligned with `MADV_HUGEPAGE`; smaller ones take
   small pages (round 1 rounded every block to 2 MiB pages, faulting in a whole huge page for each).
-- Output: `../fixed_width.hpp` (judge-specific padding). `.preinit_array` start and `_exit`.
+- Output: `../convolution_mod/fields.hpp` (judge-specific padding), its text in g (dead by then).
+  `.preinit_array` start and `_exit`.
 - `-DFORCE_GRADED` forces the graded method, `-DFORCE_SPLIT` the cheapest split;
   `-DBLOCK_BYTES=1` makes every non-lane variable a top one. `stress.py` runs all three and the
   default build against `brute.cpp`.
@@ -139,6 +140,23 @@ no sources read.
   - Merged in #153. Submitted: [409322](https://judge.yosupo.jp/submission/409322), AC, 14 ms,
     14.8 MiB; [409323](https://judge.yosupo.jp/submission/409323), AC, 22 ms (same source; a judge
     launch spike, see `tools/spikes.py`).
+- 2026-10-10, claude (lib/io #21, round 4): the output text goes into g, dead after the product
+  and already touched, page-aligned, instead of `fixed_width.hpp`'s static 250 KB (63 page
+  faults), and blocks are 60 pages (`lib/io/notes.md`). `judge.py bench`, `lc-amd`, 31 rounds,
+  slowest 3 cases: 13.76 → 13.59 ms (0.988). Outputs byte-identical to main on all 17 tests
+  (judge build, ASan/UBSan, pipe input).
+  - PR #187 merged; CI 0.9920 (EPYC 7763 0.987, EPYC 9V45 1.000, Xeon 8573C 0.990).
+  - Submitted: [409405](https://judge.yosupo.jp/submission/409405), AC 20 ms, 14.8 MiB.
+    Against 409322: dim1_00 6 → 15, dim1_01 6 → 14, dim2_01 10 → 20 (+9 each: launch spikes;
+    `judge.py test` on `lc-amd`: 7.2, 6.5, 9.0 ms, as main); twos_00 13 → 14, threes_00
+    14 → 13. Clean 14 ms; best judged stays 14 ms.
+- 2026-10-10, claude (lib/io #21, round 5): output through `../convolution_mod/fields.hpp`
+  (in memory 0.64 ms per 2^20 values against 1.04 for `fixed_width.hpp`, now deleted); text
+  still page-aligned in g (`../text_buffer.hpp`). `judge.py bench`, `lc-amd`, 31 rounds,
+  slowest 3 cases: 13.69 → 13.60 ms (0.995; 2^18 output values). Outputs byte-identical to main
+  on all 17 tests and 200 random inputs; ASan/UBSan on all 17 tests, file and pipe.
+  PR #198 merged; CI 0.9961 (EPYC 7763 1.000, EPYC 9V45 0.993, EPYC 9V74 0.996). Not submitted
+  (0.1 ms, under the judge's resolution).
 
 ## Next
 

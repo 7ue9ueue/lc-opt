@@ -11,7 +11,8 @@
 
 #include "lib/io/io.hpp"
 #include "lib/io/bulk64.hpp"
-#include "fixed_width.hpp"
+#include "convolution_mod/fields.hpp"
+#include "text_buffer.hpp"
 
 namespace {
 
@@ -61,7 +62,8 @@ int main() {
 #endif
     io::Writer out;
 #ifdef FIXED
-    fixed_width::write(out, a, answer);
+    // The text after the answer, if it fits there, as the solutions place it in a dead array.
+    fields::write(out, a, answer, text_buffer<fields::kTextBytes>(a + answer, (n + m - answer) * sizeof(Value)));
 #else
     out.write_array(a, answer, ' ');
     out.write('\n');

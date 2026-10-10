@@ -37,11 +37,12 @@ Best judged: ours, 42 ms: [409339](https://judge.yosupo.jp/submission/409339) (c
   a time through a 4x4 transpose), then the column step on slices of two lines per row gathered
   into contiguous buffers.
 - `lib/io` input (`read_bulk`); `.preinit_array` start, `_exit`.
-- Output (`fields.hpp`, judge-specific): blocks of 3104 values. A block where at least 1/8 of
-  the values are below 2^53 goes through `write_array`; otherwise every value is right-aligned in
-  20 characters (wcmp checker compares tokens). Scalar code splits x = h 10^16 + m 10^8 + l and
-  looks up h as 4 characters with leading spaces; AVX2 makes 8 digits of m and l, four values
-  per step, 64 values behind the scalar split in the same loop. h = 0 (rare) is blanked after.
+- Output (`fields.hpp`, judge-specific): blocks of 12288 values. A block where at least 1/8 of
+  the values are below 2^53 goes through `write_array`; otherwise
+  `../convolution_mod_2_64/fields64.hpp` prints a space and each value right-aligned in 20
+  characters (wcmp checker compares tokens). Its text is in b (dead by then), and each block goes
+  to `write(2)` directly. Until round 5 the fixed-width blocks had their own formatter (round 2
+  in the log).
 
 ## Costs (lc-amd, gen_max, ms, in-process stamps)
 
@@ -145,6 +146,22 @@ same harness: 2.55, 2.1, 2.05, 6.0, 12.1, 4.3, 11.2.
   AC 42 ms: gen_2_x_3_11_01 42 (32.6 on lc-amd, a spike), every other case at most 38.
   [409345](https://judge.yosupo.jp/submission/409345) AC 46 ms: many_ones_00 46, every other case at
   most 38. Large cases 34-38 ms against 43-44 for #119. Best judged 42 ms (2/5 for this version).
+- 2026-10-10, claude (lib/io #21, round 5): fixed-width blocks through
+  `../convolution_mod_2_64/fields64.hpp`. In memory, 2^20 random values, median of 31 (`lc-amd`,
+  judge flags): fields64 2.62 ms, this problem's round-2 formatter 3.19. Blocks of 12288 values
+  (was 3104) go to `write(2)` directly, from b (page-aligned, at least 2^15 words for every
+  size, so no static buffer), instead of 65516-byte Writer flushes whose start drifted against
+  the page (0.6% of bytes in the slow band, `lib/io/notes.md`). Short-value blocks are
+  unchanged but now start with a space. Per case, 15 rounds: gen_max_00 37.85 → 36.78 ms,
+  many_ones_00 38.09 → 37.12, random_00 33.95 → 33.07; all_ones, all_same, small_values
+  (variable width) equal. `judge.py bench`, 31 rounds, 6 slowest cases: 39.62 → 39.23 ms
+  (0.976). Checks: `judge.py test` 51/51; 120 random inputs (runs of short and long values
+  across block edges with a = 1, long outputs, tiny ones) token-identical to main, also with
+  ASan/UBSan, file and pipe input.
+  PR #198 merged; CI 0.9922 (EPYC 7763 0.969; EPYC 9V45 0.998 and 1.011). Submitted
+  [409429](https://judge.yosupo.jp/submission/409429): AC 45 ms, 38.0 MiB. Spikes: all_ones_00
+  45 (36 in 409339 and 409345), random_01 44 (35, 34), gen_2_x_3_11_00 41 (33, 32); the rest at
+  most 38 (many_ones_00 38, gen_max 37). Clean 38, as before; best judged stays 42.
 - Next: the transform loops run at ~6.4 cycles per vector multiply against 5.7 with eight
   independent chains: a hand-scheduled asm loop with two columns in flight and no spills
   (~1.5 ms if it reaches 5.8). Fuse the pointwise product into the stage 1-0 group passes (shared

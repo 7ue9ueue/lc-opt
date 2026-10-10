@@ -40,15 +40,80 @@ inline void exp_direct(std::span<const std::uint32_t> d, std::span<std::uint32_t
 
 }  // namespace detail
 
-// Transform length exp uses for n coefficients: the Transform needs lg_max >= this.
-inline int exp_log(std::size_t n) {
-    return std::max(Transform::kMinLog + 1, int(std::bit_width(std::max<std::size_t>(n, 2) - 1)));
+namespace detail {
+
+// Words of d = f' and of the larger scratch buffers: a power of two >= n, at least 2 kExpBase.
+inline std::size_t exp_length(std::size_t n) {
+    return std::size_t(1) << std::max(Transform::kMinLog + 1, int(std::bit_width(std::max<std::size_t>(n, 2) - 1)));
 }
+
+}  // namespace detail
+
+// Transform length exp uses for n coefficients: the Transform needs lg_max >= this. The last
+// step's transforms have length exp_length(n) / 2, as do the full steps' doublings.
+inline int exp_log(std::size_t n) { return std::countr_zero(detail::exp_length(n)) - 1; }
 
 namespace detail {
 
+// x - y mod P for canonical x, y.
+inline Vec difference(Vec x, Vec y) { return reduce(_mm256_sub_epi32(add(x, broadcast(kP)), y), kP); }
+
+// The last Newton step of exp_newton() below, from g mod x^m to g mod x^n, m < n <= 2m, with
+// transforms of length m only. From the previous step: H = T_m(h0), h0 = 1 / g mod x^(m/2), and
+// G0 = T_m(g0), g0 = g mod x^(m/2) (computed here when there was no previous step). With the
+// halves g1 = g[m/2, m), r0 = r mod x^(m/2), r1 = r[m/2, m), s0 and s1 likewise:
+//   h = 1 / g mod x^m = h0 - x^(m/2) (h0 e mod x^(m/2)), e = (g h0)[m/2, m)
+//   t = h r mod x^m   = h0 r0 + x^(m/2) (h0 (r1 - e r0) mod x^(m/2))
+//   g s mod x^m       = g0 s0 + x^(m/2) ((g0 s1 + g1 s0) mod x^(m/2))
+// Each product has degree < m - 1, so a cyclic product of length m gives it exactly; the upper
+// parts are needed only if n - m > m/2. (g s)[m/2, m) is the upper half of the cyclic product
+// g s0 + g0 x^(m/2) s1 (no product reaches x^(3m/2)). 14 transforms and 8 leaf products of
+// length m (a full step, as in exp_newton: 16 and 7).
+// Spans: gt = [G0, T_m(g)] and w of 2m words, work of m words; ht holds H.
+[[gnu::always_inline]] inline void exp_last_step(const Transform& t, std::span<const std::uint32_t> d, std::span<std::uint32_t> g,
+                                                 std::size_t m, bool first, Vec d_before, std::span<std::uint32_t> gt,
+                                                 std::span<const std::uint32_t> ht, std::span<std::uint32_t> w,
+                                                 std::span<std::uint32_t> work) {
+    const std::size_t n = g.size(), rest = n - m, half = m / 2;
+    const bool upper = rest > half;
+    const Half both = upper ? Half::kBoth : Half::kLower;
+    const std::span<std::uint32_t> g0t = gt.first(m), glt = gt.subspan(m, m), r = w.first(m), r0t = w.subspan(m, m);
+    if (first) t.forward(g.first(half), 0, g0t);
+    t.forward(g.first(m), 0, glt);
+    if (upper) {  // T_m(e) in work
+        t.inverse_product(glt, ht, r, Half::kUpper);
+        t.forward(r.subspan(half, half), 0, work);
+    }
+    t.forward_product(d.first(m - 1), 1, r, glt);
+    t.inverse(r, both);
+    t.forward(r.first(half), 0, r0t);
+    if (upper) {  // h0 (r1 - e r0) mod x^(m/2) at work[0, m/2)
+        t.inverse_product(work, r0t, work, Half::kLower);
+        for (std::size_t i = 0; i < half; i += 8) store(work.data() + i, difference(load(r.data() + half + i), load(work.data() + i)));
+        t.forward(work.first(half), 0, work);
+        t.inverse_product(ht, work, work, Half::kLower);
+    }
+    t.inverse_product(ht, r0t, r0t, both);  // h0 r0
+    // s at w[0, rest), from t = h0 r0 + x^(m/2) work[0, m/2) (as in exp_newton)
+    detail::divide_by_index(m, w.first(rest), [&](std::size_t i) {
+        Vec x = load(r0t.data() + i);
+        if (i >= half) x = reduce(add(x, load(work.data() + i - half)), kP);
+        x = reduce(add(x, load_unaligned(d.data() + m - 1 + i)), kP);
+        return add(x, _mm256_sub_epi32(broadcast(kP), i ? load_unaligned(d.data() + i - 1) : d_before));
+    });
+    t.forward(w.first(std::min(rest, half)), 0, work);  // T_m(s0)
+    if (upper) {  // (g s)[m/2, rest) at r0t[m/2, ..)
+        t.forward(w.subspan(half, rest - half), half, r0t);
+        const Transform::Pair pairs[] = {{glt, work}, {g0t, r0t}};
+        t.inverse_product_sum(pairs, r0t, Half::kUpper);
+        std::copy(r0t.begin() + std::ptrdiff_t(half), r0t.begin() + std::ptrdiff_t(rest), g.begin() + std::ptrdiff_t(m + half));
+    }
+    t.inverse_product(g0t, work, work, Half::kLower);  // (g s)[0, m/2) = (g0 s0)[0, m/2)
+    std::copy_n(work.begin(), std::min(rest, half), g.begin() + std::ptrdiff_t(m));
+}
+
 // The Newton steps of exp() below, from g mod x^kExpBase (given) to g mod x^n, n = g.size() >
-// kExpBase, for g' = d g: d has 2^exp_log(n) words, d[i] = 0 for i >= n - 1. Each step is
+// kExpBase, for g' = d g: d has exp_length(n) words, d[i] = 0 for i >= n - 1. Each step is
 // invariant under scaling g, so g[0] may be any nonzero constant. scratch: exp_newton_scratch(n).
 [[gnu::always_inline]] inline void exp_newton(const Transform& t, std::span<const std::uint32_t> d, std::span<std::uint32_t> g,
                                               std::span<std::uint32_t> scratch) {
@@ -58,14 +123,14 @@ namespace detail {
         scratch = scratch.subspan(Arena::footprint(words));
         return s;
     };
-    const std::span<std::uint32_t> h = take(len / 2), gt = take(len), ht = take(len), w = take(len);
+    const std::span<std::uint32_t> h = take(len / 2), gt = take(len), ht = take(len / 2), w = take(len);
     std::size_t m = kExpBase;
     inverse_direct(g, h.first(m / 2));
     t.forward(h.first(m / 2), 0, ht.first(m));
     // d[i - 1] for i = 0 .. 7, with d[-1] = 0
     const Vec d_before = _mm256_blend_epi32(
         _mm256_permutevar8x32_epi32(load(d.data()), _mm256_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6)), _mm256_setzero_si256(), 1);
-    for (; m < n; m *= 2) {
+    for (; 2 * m < n; m *= 2) {
         const std::size_t half = m / 2;
         const std::span<std::uint32_t> g_low = gt.first(m), h_low = ht.first(m), w_low = w.first(m);
         t.forward(g.first(m), 0, g_low);
@@ -87,20 +152,21 @@ namespace detail {
         });
         t.forward_upper(g.first(m), 0, gt.subspan(m, m));
         t.cyclic_product(w.subspan(m, m), m, w.first(2 * m), gt.first(2 * m), Half::kUpper);
-        std::copy_n(w.begin() + m, std::min(m, n - m), g.begin() + m);
+        std::copy_n(w.begin() + m, m, g.begin() + m);
     }
+    exp_last_step(t, d, g, m, m == kExpBase, d_before, gt, ht, w, h);
 }
 
 inline std::size_t exp_newton_scratch(std::size_t n) {
-    const std::size_t len = std::size_t(1) << exp_log(n);
-    return 3 * Arena::footprint(len) + Arena::footprint(len / 2);
+    const std::size_t len = exp_length(n);
+    return 2 * Arena::footprint(len) + 2 * Arena::footprint(len / 2);
 }
 
 }  // namespace detail
 
 // Scratch words for exp() of n coefficients.
 inline std::size_t exp_scratch(std::size_t n) {
-    return Arena::footprint(std::size_t(1) << exp_log(n)) + detail::exp_newton_scratch(n);
+    return Arena::footprint(detail::exp_length(n)) + detail::exp_newton_scratch(n);
 }
 
 // g = exp(f) mod x^n for n = g.size() >= 1. f[0] = 0; coefficients of f past f.size() are zero.
@@ -119,7 +185,7 @@ inline std::size_t exp_scratch(std::size_t n) {
 inline void exp(const Transform& t, std::span<const std::uint32_t> f, std::span<std::uint32_t> g,
                 std::span<std::uint32_t> scratch) {
     using namespace detail;
-    const std::size_t n = g.size(), len = std::size_t(1) << exp_log(n);
+    const std::size_t n = g.size(), len = exp_length(n);
     const std::span<std::uint32_t> d = scratch.first(len);
     derivative(f.first(std::min(f.size(), n)), d);  // d[i] = 0 for i >= n - 1
     exp_direct(d, g.first(std::min(n, kExpBase)));

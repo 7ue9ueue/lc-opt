@@ -3,7 +3,9 @@
 f with K <= 10 nonzero terms (f[0] = 1), N <= 10^6; print the first N coefficients of log(f)
 mod 998244353. 10 s. Input is tiny; output up to 10 MB.
 
-Best judged: none yet. Record when opened (issue #71): 38 ms.
+Best judged: ours, 14 ms: [409396](https://judge.yosupo.jp/submission/409396) (`main.cpp` of
+#182); small_dense_02 took 14 ms against 5 for its peers, likely a launch spike (guess: clean
+score 5 ms). Record when opened (issue #71): 38 ms.
 
 ## Tests
 
@@ -62,7 +64,18 @@ version 7.31 (1.157). In process, small_dense_02 (10^6 coefficients, median of 2
     `vpsrlq` 2, `vpaddq` 4, `vpblendd` 4, `vperm2i128` 1; 6 `vpmuludq` + 6 `vpsrlq` 4.15
     cycles, 6 `vpmuludq` + 6 `vpaddq` 4.28, 4 + 4 + 4 3.0. The block pass runs at ~3 IPC with 12
     `vpmuludq` per 16 values.
+  - Formatting each 64-value step right after its division (a sink called from the block pass,
+    probe in scratch): next + divide + format in process 1.59 ms against 1.56 for the chunk's
+    division then its format; format alone 0.62. No overlap gained; not kept.
+  - On the same inputs, inv_of_formal_power_series_sparse's `main.cpp` (1/f: the same
+    recurrence, no division) runs 1.055 times the floor, ours 1.140 (21 rounds).
+  - Merged as #182. Submitted: [409396](https://judge.yosupo.jp/submission/409396) AC 14 ms,
+    12.2 MiB. small_dense_00, 01, 04 5 ms, small_dense_02 14 ms (+9 ms: the launch spike's
+    signature, `tools/spikes.md`), max_random 3, all others at most 2. `tools/spikes.py` has no
+    other runs of this problem to compare with, so it reports 14; not resubmitted.
 - Next: the division is 30 `vpmuludq` per 16 values (prefix 6, backward 12, products 12) at
-  ~65% of the multiply pipes; the recurrence is inv's kernel. Fusing the products with the
-  output formatting (mul-heavy against shuffle-heavy) is untested. max_random (3.5 ms, not the
-  slowest) divides all of its mostly zero G.
+  ~65% of the multiply pipes; the recurrence is inv's kernel. max_random (3 ms, not the slowest)
+  divides all of its mostly zero G.
+- 2026-10-10, claude (issue #72, pow_of_formal_power_series_sparse): the bundle changed with
+  `lib/poly/holonomic.hpp` (`divider.hpp` includes it for its helpers; `Divider` itself is
+  unchanged). `judge.py bench` (`lc-amd`, 21 rounds) against main: 0.9940; 24/24 official tests.

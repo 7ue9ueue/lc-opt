@@ -7,7 +7,7 @@ You are unattended: the user is offline, so do not ask questions. Decide and act
    Do not repeat a logged attempt without a new reason.
 3. Run the module's tests, then `tools/judge.py test` on every problem that uses the module.
    Time on `lc-amd`; profile on `lc-intel`.
-4. Log the attempt in `{path}/notes.md`. Open a pull request from branch `agent/{problem}` and run
+4. Log the attempt in `{path}/notes.md`. Open a pull request from a branch `agent/lib-<topic>` and run
    `gh pr merge --auto --squash`. Wait until it merges or CI fails; if CI fails, fix it or close the pull request.
 5. Finish with one comment on issue #{issue}: what you tried, the numbers, and a last line that is exactly
    `Result: gain` or `Result: no gain`.

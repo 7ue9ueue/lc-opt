@@ -7,9 +7,9 @@ Needs Linux and Docker.
 
 Each --io file stands in for lib/io/io.hpp, so library versions can be compared in the same run
 (default: this repository's). --fixed prints answers in fixed-width fields where every value is
-below 10^9 (a judge-specific trick, ./fixed_width.hpp). A round runs every version once on each
-case, in rotated order; its score is the slowest case. Prints the median over rounds and the
-median paired ratio to the first version.
+below 10^9 (a judge-specific trick, ./convolution_mod/fields.hpp). A round runs every version
+once on each case, in rotated order; its score is the slowest case. Prints the median over rounds
+and the median paired ratio to the first version.
 """
 import argparse
 import statistics

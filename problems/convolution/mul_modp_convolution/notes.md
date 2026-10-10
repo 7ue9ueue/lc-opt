@@ -3,7 +3,7 @@
 c_k = sum over i j = k (mod P) of a_i b_j mod 998244353, P prime, 2 <= P <= 524288 (so at most
 524287 = 2^19 - 1). 5 s.
 
-Best judged: ours, 12 ms: [409289](https://judge.yosupo.jp/submission/409289) (current `main.cpp`, #135).
+Best judged: ours, 12 ms: [409289](https://judge.yosupo.jp/submission/409289) (`main.cpp` of #135).
 Record when opened (issue #35): 45 ms.
 
 ## Design

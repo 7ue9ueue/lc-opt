@@ -55,3 +55,8 @@ ours 8.69 (min 7.42): 1.36 times the floor. In process, small_dense_02 (11 runs)
   consecutive-qword layout (40 instead of 46 `vpmuludq`), multiplies and adds in the order
   M M A A (asm), the odd reciprocals (~0.25 ms) interleaved with the kernel. max_random (3.5 ms,
   not the slowest) computes reciprocals for all blocks though g is mostly zero.
+- 2026-10-10, claude (issue #72, pow_of_formal_power_series_sparse): `lib/poly/holonomic.hpp`
+  changed there; for exp the odd reciprocals now run inside the kernel loop, a half step of the
+  next window's batch inversion per block (design in `lib/poly/notes.md`). In process (`lc-amd`,
+  10^6 coefficients, w = 7 and w = 3): 2.28 -> 2.10 ms, 2.15 -> 1.90. `judge.py bench`
+  (`lc-amd`, 21 rounds) against main: 0.9627. 25/25 official tests; `stress.py` 200 rounds.

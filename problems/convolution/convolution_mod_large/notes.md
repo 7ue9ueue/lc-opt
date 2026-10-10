@@ -3,7 +3,7 @@
 N, M <= 2^24 coefficients mod 998244353; print the N + M - 1 coefficients of the product. 10 s,
 1 GiB (the output file's tmpfs pages count). Inputs and outputs are ~331 MB at the maximum.
 
-Best judged: ours, [409343](https://judge.yosupo.jp/submission/409343), 430 ms (current `main.cpp`,
+Best judged: ours, [409343](https://judge.yosupo.jp/submission/409343), 430 ms (`main.cpp` of
 #127; no spike). Same version: [409265](https://judge.yosupo.jp/submission/409265), 439 ms (clean 429).
 Earlier: [409233](https://judge.yosupo.jp/submission/409233), 448 ms.
 Before: [408888](https://judge.yosupo.jp/submission/408888), 452 ms, the QPoly exploration-014
@@ -14,8 +14,8 @@ twin, 454 ms): parse 71, NTT 205, output 156 (`write()` ~120), ~12-15 outside `m
 ## Design
 
 `lib/ntt` (transform length 2^25 at the maximum), `lib/io` input, output by
-`../convolution_mod/fields.hpp` (same bytes as `../fixed_width.hpp`), start from `.preinit_array`
-and `_exit` as in `../convolution_mod`.
+`../convolution_mod/fields.hpp` (10-byte fixed-width fields), start from `.preinit_array` and
+`_exit` as in `../convolution_mod`.
 
 ## Log
 - 2026-10-09, claude: refactored the QPoly program onto `lib/ntt`, `lib/io` input and

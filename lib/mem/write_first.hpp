@@ -18,8 +18,9 @@
 
 namespace mem {
 
+// static: GCC then sees which registers it clobbers, so callers keep theirs across the call.
 template <class T>
-void write_first(T* x, std::size_t begin, std::size_t end) {
+static void write_first(T* x, std::size_t begin, std::size_t end) {
     constexpr std::size_t kPage = kHugePage / sizeof(T);  // elements
     const std::size_t offset = reinterpret_cast<std::uintptr_t>(x) / sizeof(T) % kPage;
     for (std::size_t i = (begin + offset + kPage - 1) / kPage * kPage - offset; i < end; i += kPage) x[i] = 0;

@@ -190,7 +190,5 @@ transform (all large tests), else `ntt::Convolution`. `lib/io` input, output by
     `lc-k68`, judged 416-418) against the fixed path (fft_killer: 399, judged 403-405). A parse as
     fast as the fixed path is worth up to ~12 ms; time it on `lc-k68`.
 - 2026-10-10, claude (lib, issue #156 round 3): `write_first` moved to `lib/mem/write_first.hpp`
-  (`mem::write_first`). The function is instruction-identical; `convolve` keeps two values in
-  callee-saved registers across its calls (+4 instructions). `judge.py bench`, `lc-bench`:
-  407.83 -> 410.25 ms (15 rounds), then 408.28 -> 406.30 with the sources swapped (21 rounds):
-  noise. 54/54 official tests. Details: `lib/mem/notes.md`.
+  (`mem::write_first`). Same stripped executable as before (judge flags, `lc-amd`). 54/54
+  official tests. Details: `lib/mem/notes.md`.

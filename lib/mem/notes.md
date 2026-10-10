@@ -71,13 +71,14 @@ and a bump arena).
 
 2026-10-10, claude (issue #156, round 3): `write_first` from convolution_mod_large, generic over
 the element type (the same instructions for `uint32_t`).
-- Compiled code (judge flags, `lc-amd`): `write_first` is instruction-identical and still out of
-  line. `convolve` grows from 70 to 74 instructions: it keeps two values in callee-saved
-  registers across the calls, because GCC's interprocedural register allocation sees which
-  registers a local function clobbers, not a function template's (it may be replaced at link
-  time).
-- `judge.py bench` on `lc-bench`, slowest 3 cases: 15 rounds 407.83 -> 410.25 ms (1.0059); 21
-  rounds, sources swapped, 406.30 (new) against 408.28 (old). Noise.
+- Compiled code (judge flags, `lc-amd`): the stripped executable is byte-identical to main's.
+  `write_first` is `static`: as a plain function template, `convolve` grew from 70 to 74
+  instructions, keeping two values in callee-saved registers across the calls, because GCC's
+  interprocedural register allocation sees which registers a local function clobbers, not a
+  template that may be replaced at link time. That version: `judge.py bench` on `lc-bench`, 15
+  rounds 407.83 -> 410.25 ms (1.0059), then sources swapped, 21 rounds, 406.30 (new) against
+  408.28 (old); CI 1.0005 and, re-run, 1.0024 (#343). Code alignment may explain a part (`.text`
+  +71 bytes); 4 instructions run once per process.
 - Checks (`lc-amd`): `test.cpp` (new: stores exactly at the boundaries in [begin, end), for
   `uint32_t` and `uint64_t`, four alignments, eight ranges) at -O2 and with ASan/UBSan; rounding
   the first boundary down instead of up fails it. convolution_mod_large: 54/54 official tests.

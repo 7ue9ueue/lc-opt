@@ -73,8 +73,8 @@ Checked on the judge with `tools/isa_probe.cpp` (aplusb, [409083](https://judge.
 | Machine | Use |
 |---|---|
 | Mac (ARM64) | Edit, build, correctness. x86 binaries run under Rosetta; never time them. |
-| GCP `lc-intel` (c4-standard-4, Xeon 8581C, PMU on) | Profiling with `perf`: core events and top-down. No L3 events. |
-| GCP `lc-amd` (c2d-standard-4, EPYC 7B13, the judge's CPU) | Judge-like timing. No hardware counters. |
+| GCP `lc-intel` (c4-standard-4, europe-west2-c, Xeon 8581C, PMU on) | Profiling with `perf`: core events and top-down. No L3 events. |
+| GCP `lc-amd` (c2d-standard-4, europe-west2-b, EPYC 7B13, the judge's CPU) | Judge-like timing. No hardware counters. |
 | GitHub Actions (EPYC 7763 Zen 3, plus other CPUs) | Timing. Confirm wins on the judge's core without losses elsewhere. |
 
 - VMs are in project `project-c73e6eb1-e167-4d7a-a31`, region `europe-west2` (London). Reach them with

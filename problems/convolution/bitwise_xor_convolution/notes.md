@@ -16,7 +16,9 @@ Record when opened: 25 ms.
 - Rows of 2^12 values (32 KiB of int64), 2^(N-12) rows, rows padded by 64 bytes so a column's rows
   hit different cache sets. Row levels in L1; column levels per strip of one cache line per row.
 - The two lane bits: a 4x4 transpose between two radix-4 steps (forward leaves groups of four
-  transposed; the product does not care; the inverse transposes back).
+  transposed; the product does not care; the inverse transposes back). The inverse (round 3) does
+  the 64-bit stage, one level, the 128-bit stage, one level: its values then pack into dwords in
+  order with `vshufps` alone (no `vpermq`). It runs a group of four ahead of the reductions.
 - Radix-16 passes in inline assembly (`gen_radix16.py`, which simulates its output): 64 add/sub,
   17 stores, one spill, scheduled so that 16 registers are live only at the end.
 - x mod P for |x| < 2^51: the bits of x + 0x4338... are the double 1.5 2^52 + x; one FMA with
@@ -26,6 +28,9 @@ Record when opened: 25 ms.
 - Products in doubles (round 2): h = x y, l = fma(x, y, -h) exact, q = round(h / P) by the magic
   constant (|h / P| < 2^51), r = h - q P exact by FMA; r + l, |r + l| < 0.9 P. No reduction of
   y (|y| < 2^20 P) first; 4 FMA-pipe and 4 add-pipe ops per vector, against 7 multiplies before.
+  Software-pipelined (round 3): h and M + l of the next row before q, r of this one.
+- The input mapping is advised `MADV_SEQUENTIAL` (round 3): its `munmap` skips marking pages
+  accessed.
 - Order: a's rows while it is parsed (chunks of 2^16 tokens: smaller bulk reads leave ~1000
   tokens per call to the scalar path), a's columns, a / 2^N kept as dwords (4 MiB); b reuses the
   int64 array: rows, columns with the products, inverse columns; inverse rows, printed per chunk.
@@ -144,14 +149,65 @@ faults), columns a 0.59, columns b 1.05, inverse rows 0.75, print 4.63, exit 0.9
   `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
   before (judge flags, `lc-amd`).
 
+2026-10-10, claude, round 3 (`agent/bitwise_xor_convolution-r3`). Judge image and flags; builds
+on `lc-amd`, timing on `lc-bench` (EPYC 7B13, core clock 3.42 GHz, TSC 3.05 GHz). "Probe": phase
+stamps in-process plus fork-to-exit wall time, max_random_00, output unlinked before each run.
+"Kernel micro": one kernel over N = 20 data laid out as in the program, TSC ticks per vector
+(2^18 vectors), median of 15. Sources, scripts, raw numbers:
+`lc-opt-explore/bitwise_xor_convolution/`.
+- Phases of main (probe, 61 runs, ms): start 1.08, parse 3.69, rows 0.97 (both arrays), columns a
+  0.60, columns b 0.86, inverse rows 0.78, format 0.66, `write()` 3.59, input `munmap` 0.74,
+  exit 0.20. Kernel micro, hot (data touched first) against from L3: inverse rows 7.31 / 8.11,
+  columns b 9.25 / 9.83; two radix-16 passes over a row 2.90, over a strip 2.54; reading and
+  writing every strip line in column order 1.39.
+- Zen 3 throughputs (`ports*.cpp`, 12 independent ops, core cycles per op): `vinserti128` from a
+  register or from memory 1.0, `vperm2i128` 1.0 (register or memory), `vpermq` 1.27, `vcvtdq2pd`
+  1.0 (and 1.44 per pair with an FMA), `vpmovzxdq` from memory, unpacks, `vshufps`, `vpsrlq` 0.5,
+  `vpblendd`, `vpand`, `vpaddq` 0.25. A 128-bit store costs a full store slot (1 per cycle, as
+  256-bit ones). 256-bit loads 2 per cycle; 4 adds + 1 store + 1 load per cycle sustain.
+- Kept: the inverse's last pass does the 64-bit stage, a level, the 128-bit stage, a level, so
+  the reduced values pack with `vshufps` only (no `vpermq`): kernel micro 8.11 → 7.33 (L3).
+- Kept: products split in halves, the next row's h and M + l issued before this row's q and r:
+  columns b 9.85 → 9.10, the product itself 4.7 → 3.6 core cycles per vector (latency bound
+  before: ~25-cycle chain, ~5 rows in flight).
+- Kept: the inverse's last pass a group of four ahead of its reductions: 7.29 → 6.99.
+- Kept: `MADV_SEQUENTIAL` on the input (as `bitwise_and_convolution`): `munmap` 0.731 → 0.701.
+- Probe, 61 runs: total 13.24 → 12.94 ms; columns b 0.860 → 0.801, inverse rows 0.775 → 0.644,
+  `munmap` 0.741 → 0.701. `judge.py bench`, `lc-bench`, slowest 3 cases: 61 rounds 13.05 →
+  12.93 ms (0.9828); an earlier 31 rounds 14.02 → 13.92 (0.9949, the VM was noisy).
+- No gain: rows in 2 KiB blocks (first pass and vector bits 2-5 per block while in L1, then bits
+  6-9): forward 5.45 → 5.63, inverse 7.32 → 7.70 through `transform`, 5.32 → 5.32 and 7.13 →
+  7.31 with direct loops; products two rows ahead 9.13 → 9.29; the divide of a's columns a row
+  ahead 5.09 → 5.67; a's values converted by `vpmovsxdq` and the magic constant instead of
+  `vcvtdq2pd`: 8.35 → 8.94 (hot); prefetch hint T1 in the column passes 5.11 / 9.04 against
+  5.11 / 9.05; output in whole 25600-value blocks across chunks (41 `write` calls, not 48),
+  text in the first chunk's dead rows: wall ratio 1.000 (101 runs); `levels<4>` with the width
+  as a template argument: two row passes 2.82 → 2.58 alone, but forward and inverse rows
+  unchanged in the kernel micro.
+- Radix-16 kernel in L1 (512 vectors, `xr*.cpp`): 21.4 cycles per call (1.34 per vector)
+  against 17 for its 17 stores; register-only butterfly networks run at 4 adds per cycle. Also
+  21.4: a software-pipelined loop (the next call's level-8 loads between this call's level-1
+  stores; 9 register moves close the loop), stores 34 KiB away (out of place), each input
+  loaded once (19 loads, not 26), loop aligned to 64 bytes. Loads replaced by register
+  operands: 17.15 (store bound); keeping 10 or 18 of the 26 loads: 18.2. Cause not found.
+- Not applicable: `convolution_mod`'s fixed-stride input path; max_random tokens have mixed
+  lengths (20738704 bytes for 2^21 + 1 tokens).
+- Checks: 13/13 official tests (`judge.py test`, `lc-amd`); `stress.py` 200 rounds and the three
+  N = 20 known-answer cases (judge image); ASan/UBSan on all 13 official inputs, file and pipe;
+  outputs of every variant byte-identical to main on max_random_00.
+
 ## Next
 
-- Compute left over the floor: ~4 ms of ~15.3. Largest: column pass 1.6 ms (products 0.56),
-  inverse rows ~0.8, row transposes (~2.6 core cycles per vector forward, ~6 with the reduction
-  in the inverse; `vperm2i128`/`vpermq` are slow on Zen 3).
-- The inverse rows' last pass (transpose, reduction, pack) costs ~0.25 ms more than the forward
-  first pass; not explained by its op count (guess: latency of the reduction chain).
-- The floor itself (parse 3.7 ms, `write(2)` ~4.5 ms) belongs to `lib/io`.
+- Compute left (probe): rows 0.96 (both arrays, with x's huge-page faults), columns a 0.60,
+  columns b 0.80, inverse rows 0.64; the rest is I/O and process start/exit (~9.9 ms).
+- Radix-16 passes are ~1.4 ms of it at 1.34-1.63 cycles per vector; 1.07 would be the store
+  bound. The kernel study above found no lever yet.
+- The 128-bit transpose stages (`vinserti128`, `vperm2i128`) take one cycle each on one pipe:
+  4 per 16 values in the forward first pass and in the inverse last pass. Doing them with
+  broadcast loads and blends needs a store and reload (an extra pass) or a layout where the
+  swapped bit is transformed in another pass; sketched, not built (estimate 0.1-0.15 ms).
+- Product fused into the column pass's radix-16 (multiply 16 inputs, then butterflies) would
+  save a pass over each strip; estimate ~0.07 ms, needs a generated kernel.
 
 ## Sources
 
@@ -162,4 +218,7 @@ faults), columns a 0.59, columns b 1.05, inverse rows 0.75, print 4.63, exit 0.9
 - Exact product as h + l with FMA (error-free transformation): standard; e.g. Ogita, Rump, Oishi,
   Accurate sum and dot product, SIAM J. Sci. Comput. 26 (2005).
 - `.preinit_array` start: taken from `../convolution_mod/solution.cpp`.
+- `MADV_SEQUENTIAL` on the input: taken from `../bitwise_and_convolution/solution.cpp`.
+- Software pipelining (round 3): the standard technique, e.g. M. Lam, Software pipelining: an
+  effective scheduling technique for VLIW machines, PLDI 1988.
 - Zen 3 costs: measured here; see AGENTS.md for uops.info.

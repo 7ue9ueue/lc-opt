@@ -1,11 +1,13 @@
 // a * b mod 998244353: one cyclic NTT of length 2^lg >= N + M - 1 (lib/ntt), output in fixed-width
-// fields (fields.hpp). For 2^lg = 2 * 4^j (2^20 at the maximum) the top level is a radix-8
-// pass here (Product); other lengths use ntt::Convolution as is.
+// fields (fields.hpp). For 2^lg = 2 * 4^j >= 1024 (2^20 at the maximum) the top level is a radix-8
+// pass here and the bottom stage comes from bottom.hpp (Product); other lengths use
+// ntt::Convolution as is.
 #include <unistd.h>
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/ntt/ntt.hpp"
+#include "bottom.hpp"
 #include "fields.hpp"
 
 namespace {
@@ -15,6 +17,7 @@ using ntt::detail::diff;
 using ntt::detail::Factor;
 using ntt::detail::kP;
 using ntt::detail::reduce;
+using ntt::detail::slot;
 using ntt::detail::Vec;
 
 // Shoup product, < 2P for any x < 2^32.
@@ -47,13 +50,82 @@ void forward_radix8(Vec* f, std::size_t q, const std::uint32_t* roots) {
     }
 }
 
-// a * b when the transform length 2^lg is 2 * 4^j >= 256 and each factor fills at most half of it.
+// ntt::detail::Recursion with the bottom stage of bottom.hpp: two groups per inlined kernel and
+// no leaf weight array (13% less time in the bottom stage on Zen 3). Subtrees of at least 16
+// vectors, so tiles start at even group indices.
+class Subtrees {
+public:
+    Subtrees(const std::uint32_t* roots, const std::uint32_t* inverse_roots) : r_(roots), ir_(inverse_roots) {}
+
+    // Forward transforms of a and b, leaf products into a, inverse transform; nv = 4^j >= 16.
+    void visit(Vec* a, Vec* b, std::size_t nv, std::size_t k) const {
+        switch (nv) {
+        case 16: return tile<16>(a, b, k);
+        case 64: return tile<64>(a, b, k);
+        case 256: return tile<256>(a, b, k);
+        }
+        const std::size_t h = nv / 4;
+        forward(a, b, h, k);
+        for (std::size_t t = 0; t < 4; ++t) visit(a + t * h, b + t * h, h, 4 * k + t);
+        inverse(a, h, k);
+    }
+
+private:
+    template <std::size_t NV>
+    [[gnu::noinline]] void tile(Vec* a, Vec* b, std::size_t k) const {
+        for (std::size_t h = NV / 4; h >= 4; h /= 4)
+            for (std::size_t j = 0, g = k * (NV / (4 * h)); j < NV; j += 4 * h, ++g) forward(a + j, b + j, h, g);
+        bottom(a, b, NV, k * (NV / 4));
+        for (std::size_t h = 4; h < NV; h *= 4)
+            for (std::size_t j = 0, g = k * (NV / (4 * h)); j < NV; j += 4 * h, ++g) inverse(a + j, h, g);
+    }
+
+    void forward(Vec* a, Vec* b, std::size_t h, std::size_t k) const {
+        if (k == 0) {
+            ntt::kernels::forward_identity(a, h, r_);
+            ntt::kernels::forward_identity(b, h, r_);
+            return;
+        }
+        const std::uint32_t *x = r_ + slot(k), *y = r_ + slot(2 * k);
+        if (h == 4) return ntt::kernels::forward_pair(a, b, h, x, y);
+        ntt::kernels::forward(a, h, x, y);
+        ntt::kernels::forward(b, h, x, y);
+    }
+
+    void inverse(Vec* a, std::size_t h, std::size_t k) const {
+        if (k == 0) return ntt::kernels::inverse_identity(a, h, ir_);
+        ntt::kernels::inverse(a, h, ir_ + slot(k), ir_ + slot(2 * k));
+    }
+
+    struct alignas(64) Leaves {
+        std::uint32_t window[4][16];  // [w A_t, A_t]: x^i A_t mod x^8 - w is a sliding window
+        std::uint32_t coefficients[4][8];
+    };
+
+    // Groups [first, first + nv / 4) with h = 1 and their leaves, two per kernel; first is even.
+    // The next two groups' forward half overlaps the current two's products and inverse.
+    void bottom(Vec* a, Vec* b, std::size_t nv, std::size_t first) const {
+        Leaves leaves[2][2];
+        bottom_kernels::first(a, b, leaves[0], r_ + slot(first), r_ + slot(2 * first));
+        for (std::size_t j = 0, k = first;; j += 8, k += 2) {
+            const std::size_t cur = j / 8 % 2, next = cur ^ 1;
+            const std::uint32_t *ix = ir_ + slot(k), *iy = ir_ + slot(2 * k);
+            if (j + 8 == nv) return bottom_kernels::last(a + j, leaves[cur], ix, iy);
+            bottom_kernels::both(a + j + 8, b + j + 8, leaves[next], r_ + slot(k + 2), r_ + slot(2 * k + 4), a + j,
+                                 leaves[cur], ix, iy);
+        }
+    }
+
+    const std::uint32_t *r_, *ir_;
+};
+
+// a * b when the transform length 2^lg is 2 * 4^j >= 1024 and each factor fills at most half of it.
 // Same memory layout as ntt::Convolution; single use.
 class Product {
 public:
     static bool fits(std::size_t n, std::size_t m) {
         const int lg = log_length(n, m);
-        return lg % 2 == 0 && lg >= 8 && 2 * std::max(n, m) <= std::size_t(1) << lg;
+        return lg % 2 == 0 && lg >= 10 && 2 * std::max(n, m) <= std::size_t(1) << lg;
     }
 
     Product(std::size_t n, std::size_t m) : lg_(log_length(n, m)) {
@@ -95,10 +167,10 @@ public:
         forward_radix8(a, q, roots_);
         forward_radix8(b, q, roots_);
         // As ntt::Convolution from here: each half's subtrees and last group, the radix-2 level.
-        const Recursion recursion(roots_, inverse_roots_);
-        for (std::size_t c = 0; c < 4; ++c) recursion.visit(a + c * q, b + c * q, q, c);
+        const Subtrees subtrees(roots_, inverse_roots_);
+        for (std::size_t c = 0; c < 4; ++c) subtrees.visit(a + c * q, b + c * q, q, c);
         ntt::kernels::inverse_identity(a, q, inverse_roots_);
-        for (std::size_t c = 4; c < 8; ++c) recursion.visit(a + c * q, b + c * q, q, c);
+        for (std::size_t c = 4; c < 8; ++c) subtrees.visit(a + c * q, b + c * q, q, c);
         ntt::kernels::inverse(a + h, q, inverse_roots_ + slot(1), inverse_roots_ + slot(2));
         const std::uint32_t scale = multiply_mod(power(std::uint32_t(nv), kP - 2), kR);  // undoes nv / 2^32
         alignas(32) std::uint32_t s[16] = {};  // table layout: s at entry 1

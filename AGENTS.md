@@ -9,8 +9,8 @@ Solve every [Library Checker](https://judge.yosupo.jp) problem, then make each s
   Cite what you used in `notes.md`.
 - QPoly kernels (`../SymPoly/work/`) may be reused, but only after a rewrite to this repo's standards.
   Never use `study/` or vendored files.
-- Submit to Library Checker at most 5 times per version, and only versions that passed CI.
-  If a version needs more, label the issue `blocked` and leave it to the user.
+- Submit to Library Checker at most 5 times per session, and only versions that passed CI.
+  If a session needs more, label the issue `blocked` and leave it to the user.
   Record each submission ID and judged time in `notes.md`. Never commit credentials.
 - No speed claim without passing checks and a measurement.
 

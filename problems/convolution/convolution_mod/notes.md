@@ -20,13 +20,15 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
 - `lib/io` for input: `io::read_bulk` (`lib/io/bulk32.hpp`, the transposed parser on Zen 3)
   straight into the transform buffers.
 - Output: `fields.hpp`, every value in a 10-byte field (judge-specific; the checker compares
-  tokens), the same bytes as `../fixed_width.hpp`. Per value: w = v / 10 as 8 digits, most
-  significant first, in a qword; leading zeros from x ^ (x - 1) and `vpblendvb`; the units digit
-  and separator from v - 10w. 16 values per step, ten 16-byte chunks built by `pshufb`; the
-  divisions of the next step are issued before the digits of this one. The text buffer sits
-  after the NTT tables in their huge page. Shared, not copied: gcd, lcm, mul_mod2n, mul_modp,
-  convolution_mod_large and multivariate_convolution_cyclic include it, and six polynomial
-  problems.
+  tokens), the same bytes as the former `../fixed_width.hpp` (deleted in #198). Per value:
+  w = v / 10 as 8 digits, most significant first, in a qword; leading zeros from x ^ (x - 1) and
+  `vpblendvb`; the units digit and separator from v - 10w. 16 values per step, ten 16-byte chunks
+  built by `pshufb`; the divisions of the next step are issued before the digits of this one. The
+  text buffer sits after the NTT tables in their huge page. Shared, not copied: 21 other `main.cpp`
+  files include it (gcd, lcm, mul_mod2n, mul_modp, bitwise_and, bitwise_xor, multivariate and
+  multivariate_cyclic, convolution_mod_large, the min_plus problems through `../floor.cpp`, nine
+  polynomial problems). A change to it re-times all of them in CI. Its first comment still names
+  `../fixed_width.hpp`; fix that with the next change that alters its code.
 - The program runs from `.preinit_array` and ends with `_exit`: libstdc++'s initializers
   (iostreams, locales) and exit handlers never run.
 

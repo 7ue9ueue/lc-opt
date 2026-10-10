@@ -221,6 +221,46 @@ public:
         run(out, Source(nullptr, 0, 0), InverseBottom{inverse_roots_, in.data()}, scale(out.size(), c));
     }
 
+    // The inverse of forward_upper: out = c times the coefficients of a mod (x^n + 1) (canonical,
+    // c < P) from in, the upper half of a's transform of length 2n (n = out.size() words). in may
+    // be out; otherwise they must not overlap.
+    void inverse_upper(std::span<const std::uint32_t> in, std::span<std::uint32_t> out, std::uint32_t c = 1) const {
+        using namespace detail;
+        check_length(2 * out.size());
+        const std::size_t nv = out.size() / 8;
+        auto* v = reinterpret_cast<Vec*>(out.data());
+        const Factor s(scale(out.size(), c));
+        if (out.size() < 64) {
+            Vec f[4];
+            for (std::size_t j = 0; j < nv; ++j) f[j] = load(in.data() + 8 * j);
+            inverse_small(f, nv, 1, inverse_roots_);
+            for (std::size_t j = 0; j < nv; ++j) v[j] = reduce(times(f[j], s), kP);
+            return;
+        }
+        // The bottom reads leaves by their index in the transform of length 2n: in is its upper half.
+        const Recursion recursion(roots_, inverse_roots_, InverseBottom{inverse_roots_, in.data() - out.size()});
+        if (std::countr_zero(nv) % 2 == 0) {  // group 1: groups 4 .. 7 below its radix-4 butterfly
+            const std::size_t h = nv / 4;
+            for (std::size_t t = 0; t < 4; ++t) recursion.visit(out.data() + 8 * t * h, h, 4 + t);
+            const Group w(inverse_roots_, 1);
+            for (std::size_t j = 0; j < h; ++j) {
+                Vec f[4] = {v[j], v[j + h], v[j + 2 * h], v[j + 3 * h]};
+                inverse_h1(f, w);
+                for (std::size_t t = 0; t < 4; ++t) v[j + t * h] = reduce(times(f[t], s), kP);
+            }
+            return;
+        }
+        // Groups 2 and 3 (moduli x^(n/2) -+ z, z^2 = -1), then u + w and (u - w) / z.
+        const std::size_t h = nv / 2;
+        recursion.visit(out.data(), h, 2);
+        recursion.visit(out.data() + 8 * h, h, 3);
+        const Factor sz(ntt::detail::multiply_mod(scale(out.size(), c), inverse_roots_[1]));
+        for (std::size_t j = 0; j < h; ++j) {
+            const Vec u = v[j], w = v[j + h];
+            v[j] = reduce(times(add(u, w), s), kP), v[j + h] = reduce(times(diff(u, w), sz), kP);
+        }
+    }
+
     // Standard layout: out = a b leaf by leaf (canonical, times 2^-32), n = out.size() words.
     // out may be a or b.
     void leaf_products(const std::uint32_t* a, const std::uint32_t* b, std::span<std::uint32_t> out) const {
@@ -367,12 +407,18 @@ struct DropTransforms {
 //       // writes the degree(k) + 1 coefficients of leaf k at c (kWords words each, Montgomery
 //       // form, zero past a lane's degree) and returns its degrees and leading coefficients.
 // Keep(lo, hi, transform) sees each node but the root once its transform (at its parent's
-// length, Layout::kWords * length words) is final: transforms for later reuse.
+// length, Layout::kWords * length words) is final: transforms for later reuse. A Keep with
+//   std::uint32_t* place(std::size_t lo, std::size_t mid, std::size_t hi, std::size_t words);
+// instead gives the room where the children of node [lo, hi), split at mid, are built: the left
+// one's transform (words words) at the result, the right one's Arena::footprint(words) words
+// later. Its operator() is not called. A Keep with root(transform) also sees the root's product
+// transform (length words), which stays in the scratch.
 template <class Layout, class Leaves, class Keep = DropTransforms>
 class ProductTree {
 public:
     using Value = typename Layout::Value;
     using Node = typename Layout::Node;
+    static constexpr bool kPlaces = requires(Keep k, std::size_t i) { k.place(i, i, i, i); };
     struct Root {
         std::span<std::uint32_t> coefficients;  // Layout::kWords * (length + 1) words, Montgomery form
         Node node;
@@ -401,8 +447,11 @@ public:
         }
         std::uint32_t* const a = stack_.take(w * length);
         const std::size_t mid = split(0, count);
-        const Node left = build(0, mid, a, length), right = build(mid, count, c, length);
-        Layout::product(t_, a, c, {a, w * length});
+        std::uint32_t *left_out = a, *right_out = c;
+        if constexpr (kPlaces) left_out = keep_.place(0, mid, count, w * length), right_out = left_out + Arena::footprint(w * length);
+        const Node left = build(0, mid, left_out, length), right = build(mid, count, right_out, length);
+        Layout::product(t_, left_out, right_out, {a, w * length});
+        if constexpr (requires { keep_.root(std::span<const std::uint32_t>{}); }) keep_.root(std::span<const std::uint32_t>(a, w * length));
         t_.inverse({a, w * length}, {c, w * length});
         const Node node{Layout::sum(left.degree, right.degree), Layout::lead_product(left.lead, right.lead)};
         const Value top = Layout::top(node.degree, node.lead, length);
@@ -467,29 +516,36 @@ private:
         if (hi - lo == 1 || degree(lo, hi) <= Layout::kBase) {  // out_length > degree: not the root
             const Node node = coefficients(lo, hi, out);
             t_.forward({out, w * (degree(lo, hi) + 1)}, 0, {out, w * out_length});
-            keep_(lo, hi, std::span<const std::uint32_t>(out, w * out_length));
+            if constexpr (!kPlaces) keep_(lo, hi, std::span<const std::uint32_t>(out, w * out_length));
             return node;
         }
         const std::size_t length = Layout::length(degree(lo, hi)), words = w * length, mark = stack_.mark();
-        std::uint32_t* const a = out_length >= 2 * length ? out + words : stack_.take(words);
-        std::uint32_t* const b = stack_.take(words + w);
-        const std::size_t mid = split(lo, hi);
+        std::uint32_t *a, *b, *c;  // the children's transforms; c: p's coefficients
+        std::size_t mid;
+        if constexpr (kPlaces) {
+            mid = split(lo, hi);
+            a = keep_.place(lo, mid, hi, words), b = a + Arena::footprint(words), c = stack_.take(words + w);
+        } else {
+            a = out_length >= 2 * length ? out + words : stack_.take(words);
+            b = c = stack_.take(words + w);
+            mid = split(lo, hi);
+        }
         const Node left = build(lo, mid, a, length), right = build(mid, hi, b, length);
         const Node node{Layout::sum(left.degree, right.degree), Layout::lead_product(left.lead, right.lead)};
         Layout::product(t_, a, b, {out, words});  // separate passes: 1 cycle per vector faster than fused
         if (out_length > length) {
-            // b = p mod (x^L - 1) = p + top (1 - x^L), top = p[L] or 0; first p mod (x^L + 1).
-            t_.inverse({out, words}, {b, words});
+            // c = p mod (x^L - 1) = p + top (1 - x^L), top = p[L] or 0; first p mod (x^L + 1).
+            t_.inverse({out, words}, {c, words});
             const Value top = Layout::top(node.degree, node.lead, length);
-            Layout::subtract(b, top);
-            Layout::subtract(b, top);
-            t_.forward_upper({b, words}, 0, {out + words, words});
-            Layout::add(b, top);
-            Layout::put(b + words, top);
-            for (std::size_t m = 2 * length; m < out_length; m *= 2) t_.forward_upper({b, words + w}, 0, {out + w * m, w * m});
+            Layout::subtract(c, top);
+            Layout::subtract(c, top);
+            t_.forward_upper({c, words}, 0, {out + words, words});
+            Layout::add(c, top);
+            Layout::put(c + words, top);
+            for (std::size_t m = 2 * length; m < out_length; m *= 2) t_.forward_upper({c, words + w}, 0, {out + w * m, w * m});
         }
         stack_.release(mark);
-        keep_(lo, hi, std::span<const std::uint32_t>(out, w * out_length));
+        if constexpr (!kPlaces) keep_(lo, hi, std::span<const std::uint32_t>(out, w * out_length));
         return node;
     }
 

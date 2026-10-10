@@ -4,7 +4,8 @@ N <= 20; a, b of 2^N values < 998244353; print c_k = sum over i xor j = k of a_i
 Input ~20.7 MB (2^21 tokens), output ~10.4 MB.
 
 Best judged: ours, [409428](https://judge.yosupo.jp/submission/409428), 13 ms (lib/io #21 round 5,
-PR #198). Round 3 (PR #249): 409530, 13 ms. Round 2: 409210, 14 ms. Round 1: 409198, 15 ms.
+PR #198). Round 4 (PR #335): 409697 and 409698, 13 ms (max cases 13/12/12 and 12/13/13).
+Round 3 (PR #249): 409530, 13 ms. Round 2: 409210, 14 ms. Round 1: 409198, 15 ms.
 Record when opened: 25 ms.
 
 ## Design
@@ -254,9 +255,28 @@ runs unless noted.
   cases (one irregular) on both; ASan/UBSan on all official inputs, file and pipe; each parser
   path forced on the other CPU (`-DIO_BULK32_TRANSPOSE=0` on `lc-amd`, `=1` on `lc-intel`), with
   ASan/UBSan, on all official inputs and 4 irregular ones (N = 10, 12, 14, 20): outputs equal.
+- No gain: `MADV_COLLAPSE` on the mapped input (a 2 MiB-aligned mapping of the tmpfs file). On a
+  fresh copy of the input per run, as on the judge, the collapse takes 3.7-3.9 ms (sometimes
+  partly failing), against 1.8 ms of faults and `munmap` it saves. The collapse persists in the
+  file's page cache: on a reused file it measured 0.04 ms, and it made the other programs' runs
+  faster too. `timef.sh` copies the input before every run for such tests.
+- Phases with a fresh input per run (probe, 21 runs): start 1.21, a's parse and rows 2.69 (with
+  x's 4 huge-page faults and ~32 small-page faults of the parser's statics), columns a 0.75, b's
+  parse and rows 2.09, columns b 0.82, inverse rows 0.65, format 0.67, `write()` 3.88, `munmap`
+  0.65, exit 0.22; total 13.69.
+- PR #335 merged; CI 0.9744: EPYC 9V45 0.932, EPYC 7763 0.982, Xeon 8573C 1.0105.
+- Submitted the #335 `main.cpp` twice (2/5 this round): [409697](https://judge.yosupo.jp/submission/409697)
+  AC 13 ms (max_random_00/01/02 13/12/12), [409698](https://judge.yosupo.jp/submission/409698)
+  AC 13 ms (12/13/13). No spike on a max case (`tools/spikes.py`). Best judged stays 13 ms;
+  3 of these 6 max-case times are 12 ms, against 1 of the 12 in rounds 2-3's last four
+  submissions.
 
 ## Next
 
+- 12 ms judged needs all three max cases at 12: about 0.3-0.5 ms more (a guess from the
+  per-case spread above).
+- The parser's statics (`steps_`, `tails_`) cost ~32 small-page faults in a's parse; scratch in
+  memory already faulted would save ~0.05 ms, but no such region is free during b's parse.
 - Where 13.4 ms go (`lc-k68`): fixed kernel and loader work ~7.6 (start 1.13, input faults 1.2
   and `munmap` 0.65, huge-page zeroing 0.53, `write()` 3.8, exit 0.21); parse ~2.1; transforms,
   products and reductions ~3.0; format 0.66.

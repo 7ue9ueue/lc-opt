@@ -56,13 +56,36 @@ inline void transpose_columns(Matrix& dst, int j0, const u32* src, std::ptrdiff_
     }
 }
 
-// Basis of the kernel: vector i is 1 at free[i], 0 at the other free columns.
-struct Kernel {
-    std::vector<int> free;
-    int stride = 0;          // of the vectors: round8(cols)
-    std::vector<u32> basis;  // vector i at basis + i stride, entries [0, cols), zero after
+// Echelon form left in A by eliminate(): pivot t is the row pivot_rows[t] of A, P_t = pi_t at
+// column pivots[t], 0 at the earlier pivots and before. A kernel vector is fixed by its entries at
+// the free columns.
+struct Echelon {
+    int cols = 0;
+    std::vector<int> free, pivots, pivot_rows;
+    std::vector<u32> scales;  // -1 / pi_t
 
-    const u32* vector(int i) const { return basis.data() + std::size_t(i) * stride; }
+    int dimension() const { return int(free.size()); }
+
+    // count kernel vectors, vector j with values[j dimension() + i] at free[i], at out + j stride
+    // (zero from cols to round8(cols)). Back substitution for all at once: row c of X holds entry
+    // c of each vector, x[c_t] = -sum_{c > c_t} P_t[c] x[c] / pi_t.
+    void solve(const Field& F, Matrix& A, const u32* values, int count, u32* out, int stride) const {
+        const int k = dimension(), width = round8(count), rank = int(pivots.size());
+        std::vector<u32> X(std::size_t(cols) * width, 0);
+        for (int j = 0; j < count; ++j)
+            for (int i = 0; i < k; ++i) X[std::size_t(free[i]) * width + j] = values[j * k + i];
+        for (int t = rank - 1; t >= 0; --t) {
+            const int c = pivots[t];
+            u32* x = X.data() + std::size_t(c) * width;
+            if (c + 1 < cols) combine(F, x, count, nullptr, A.row(pivot_rows[t]) + c + 1, cols - c - 1, x + width, width);
+            for (int j = 0; j < count; ++j) x[j] = F.mul(x[j], scales[t]);
+        }
+        for (int j = 0; j < count; ++j) {
+            u32* o = out + std::size_t(j) * stride;
+            std::fill(o, o + round8(cols), 0);
+            for (int c = 0; c < cols; ++c) o[c] = X[std::size_t(c) * width + j];
+        }
+    }
 };
 
 // a[i] <- a[i]^-1 for nonzero a[0, n): one inverse and 3 (n - 1) products.
@@ -78,17 +101,19 @@ inline void invert_all(const Field& F, u32* a, int n) {
     }
 }
 
-inline Kernel kernel(const Field& F, Matrix& A) {
+inline Echelon eliminate(const Field& F, Matrix& A) {
     constexpr int kBlock = 16;
     const int rows = A.rows, cols = A.cols, ld = A.ld;
-    std::vector<int> trailing(rows), pivots, pivot_rows;  // pivot t: column, row of A holding P_t
-    std::vector<u32> pivot_values;
+    Echelon E;
+    E.cols = cols;
+    std::vector<int> trailing(rows);
+    std::vector<int>&pivots = E.pivots, &pivot_rows = E.pivot_rows;
+    std::vector<u32>& pivot_values = E.scales;
     for (int i = 0; i < rows; ++i) trailing[i] = i;
     const int pstride = round8(rows);
     std::vector<u32> panel(std::size_t(kBlock + 1) * pstride);  // M_0 .. M_(nb-1), then the work column
     std::vector<u32> block(std::size_t(kBlock + 1) * ld);         // P_0 .. P_(nb-1), then the new row
     std::vector<char> chosen(rows);
-    Kernel K;
     for (int c0 = 0; c0 < cols; c0 += kBlock) {
         const int c1 = std::min(cols, c0 + kBlock), n = int(trailing.size()), from = c0 & ~7, len = cols - from;
         u32* P = block.data();
@@ -97,7 +122,7 @@ inline Kernel kernel(const Field& F, Matrix& A) {
         std::fill(chosen.begin(), chosen.begin() + n, 0);
         for (int c = c0; c < c1; ++c) {
             if (n == 0) {
-                K.free.push_back(c);
+                E.free.push_back(c);
                 continue;
             }
             // Work column: R^(nb)[c] = L_nb R[c] - sum_s M_s S_(s,nb) P_s[c].
@@ -110,7 +135,7 @@ inline Kernel kernel(const Field& F, Matrix& A) {
             int i = 0;
             while (i < n && (chosen[i] || work[i] == 0)) ++i;
             if (i == n) {
-                K.free.push_back(c);
+                E.free.push_back(c);
                 continue;
             }
             // Pivot row: P_nb = L_nb R - sum_s M_s[i] S_(s,nb) P_s, from a copy of R after P_(nb-1).
@@ -138,24 +163,9 @@ inline Kernel kernel(const Field& F, Matrix& A) {
         }
         trailing.resize(kept);
     }
-    // Back substitution for all kernel vectors at once: row j of X holds entry j of each vector;
-    // x[c_t] = -sum_{j > c_t} P_t[j] x[j] / pi_t, pivots in increasing column order.
-    const int k = int(K.free.size()), width = round8(k), rank = int(pivots.size());
-    invert_all(F, pivot_values.data(), rank);
-    std::vector<u32> X(std::size_t(cols) * width, 0);
-    for (int i = 0; i < k; ++i) X[std::size_t(K.free[i]) * width + i] = F.one;
-    for (int t = rank - 1; t >= 0; --t) {
-        const int c = pivots[t];
-        u32* x = X.data() + std::size_t(c) * width;
-        if (c + 1 < cols) combine(F, x, k, nullptr, A.row(pivot_rows[t]) + c + 1, cols - c - 1, x + width, width);
-        const u32 scale = F.neg(pivot_values[t]);
-        for (int i = 0; i < k; ++i) x[i] = F.mul(x[i], scale);
-    }
-    K.stride = round8(cols);
-    K.basis.assign(std::size_t(k) * K.stride, 0);
-    for (int j = 0; j < cols; ++j)
-        for (int i = 0; i < k; ++i) K.basis[std::size_t(i) * K.stride + j] = X[std::size_t(j) * width + i];
-    return K;
+    invert_all(F, pivot_values.data(), int(pivot_values.size()));
+    for (u32& s : pivot_values) s = F.neg(s);
+    return E;
 }
 
 }  // namespace factor

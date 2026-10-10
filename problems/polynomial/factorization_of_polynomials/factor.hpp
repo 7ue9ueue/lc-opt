@@ -3,11 +3,8 @@
 // - per square-free part g: s = x^((p-1)/2) mod g, x^p = x s^2; the linear factors
 //   L = gcd(g, x^p - x) by root finding (s mod L gives the first split);
 // - the rest by Berlekamp: Q (rows x^(p j) mod g) by a Krylov sequence of the multiplication by
-//   x^p, the kernel of Q - I (dimension k = number of factors), then either
-//   - large p: the minimal polynomial mu of a random v in the kernel algebra B has k distinct
-//     roots c_i (v = c_i mod g_i); g_i is split off by gcd(h, P(v)) for P the product of t - c
-//     over half the roots, recursively (powers of v from the Krylov sequence give P(v));
-//   - small p: Cantor-Zassenhaus on B, gcd(h, v^((p-1)/2) - 1) for random v until k pieces.
+//   x^p, the kernel algebra B = {v : v^p = v mod g} as the kernel of (Q - I)^T (dimension k, the
+//   number of factors), then the factors grouped by the value of a random v in B (split).
 #pragma once
 
 #include <cstdint>
@@ -43,6 +40,7 @@ public:
 
 private:
     static constexpr u32 kExhaustiveRoots = 256;  // p up to this: roots by evaluation at every point
+    static constexpr int kSamples = 2;             // random kernel elements per Berlekamp step
 
     Field F_;
     Ring R_;
@@ -70,7 +68,12 @@ private:
     void square_free(const Poly& f, u64 multiplicity) {
         const Poly df = R_.derivative(f);
         if (df.n == 0) return square_free(R_.pth_root(f), multiplicity * F_.p);
-        Poly c = R_.gcd(f, df), w = R_.quotient(f, c);
+        Poly c = R_.gcd(f, df);
+        if (c.n == 1) {
+            multiplicity_ = multiplicity;
+            return factor_square_free(f);
+        }
+        Poly w = R_.quotient(f, c);
         for (u64 i = 1; w.n > 1; ++i) {
             const Poly y = R_.gcd(w, c), z = R_.quotient(w, y);
             if (z.n > 1) {
@@ -185,62 +188,97 @@ private:
             transpose_columns(A, j0, rows, stride);
         }
         for (int i = 0; i < m; ++i) A.row(i)[i] = F_.sub(A.row(i)[i], F_.one);
-        const Kernel B = kernel(F_, A);
-        matrix_ = A.release();
-        const int k = int(B.free.size());
-        if (k == 1) return emit(M.g);
-        if (u64(k) * k * 32 < F_.p)
-            split_by_minimal_polynomial(M, B);
-        else
-            split_by_powers(M, B);
-    }
-
-    // Random element of the kernel algebra. The constant term matters for split_by_powers: without
-    // it, the values on two factors keep a fixed ratio when k = 2.
-    Poly random_element(const Modulus& M, const Kernel& B) {
-        const int k = int(B.free.size());
-        std::vector<u32> coef(k);
-        for (auto& c : coef) c = random_residue();
-        Poly v;
-        combine(F_, v.c, M.m, nullptr, coef.data(), k, B.basis.data(), B.stride);
-        v.n = M.m;
-        v.trim();
-        return v;
-    }
-
-    void split_by_minimal_polynomial(Modulus& M, const Kernel& B) {
-        const int m = M.m, stride = M.stride, k = int(B.free.size());
-        std::vector<u32>& powers = matrix_;
-        for (;;) {
-            const Poly v = random_element(M, B);
-            multiplication_matrix(M, v);
-            // powers j = v^j mod g; their coordinates in B are the entries at the free columns.
-            powers.assign(std::size_t(k + 1) * stride, 0);
-            powers[0] = F_.one;
-            for (int j = 0; j < k; ++j)
-                combine(F_, &powers[std::size_t(j + 1) * stride], m, nullptr, &powers[std::size_t(j) * stride], m,
-                        M.table.data(), stride);
-            Matrix C(k, k + 1);
-            for (int t = 0; t < k; ++t)
-                for (int j = 0; j <= k; ++j) C.row(t)[j] = powers[std::size_t(j) * stride + B.free[t]];
-            const Kernel mu = kernel(F_, C);
-            if (mu.free.size() != 1) continue;  // two factors share a value of v: deg mu < k
-            Poly minimal;
-            minimal.n = k + 1;
-            std::copy(mu.vector(0), mu.vector(0) + k + 1, minimal.c);
-            std::vector<u32> roots;
-            find_roots(minimal, nullptr, roots);
-            extract(M.g, v, roots, 0, k, powers, stride, m);
-            return;
+        const Echelon E = eliminate(F_, A);
+        const int k = E.dimension();
+        if (k == 1) {
+            matrix_ = A.release();
+            return emit(M.g);
         }
+        // Two random elements of the kernel algebra: the first sorts the factors into groups, the
+        // second tests the groups for more than one factor.
+        alignas(32) u32 samples[kSamples * kCap];
+        std::vector<u32> values(std::size_t(kSamples) * k);
+        for (u32& x : values) x = random_residue();
+        E.solve(F_, A, values.data(), kSamples, samples, stride);
+        matrix_ = A.release();
+        split(M, E.free, samples, r);
+    }
+
+    // The factors of g = M.g (k = free.size() of them) grouped by the value of v = samples[0] (v = c_i
+    // mod g_i): the values are the roots of the minimal polynomial mu of v, whose degree is the
+    // number of groups; mu comes from the coordinates of the powers of v in the kernel algebra
+    // (their entries at the free columns). For large p every group is one factor but for
+    // probability k^2 / 2p; otherwise the groups with more factors are factored again (berlekamp).
+    void split(Modulus& M, const std::vector<int>& free, const u32* samples, const Poly& r) {
+        const int m = M.m, stride = M.stride, k = int(free.size());
+        Poly v;
+        std::copy(samples, samples + m, v.c);
+        v.n = m;
+        v.trim();
+        multiplication_matrix(M, v);
+        std::vector<u32>& powers = matrix_;  // v^j mod g, j <= k
+        powers.assign(std::size_t(k + 1) * stride, 0);
+        powers[0] = F_.one;
+        for (int j = 0; j < k; ++j)
+            combine(F_, &powers[std::size_t(j + 1) * stride], m, nullptr, &powers[std::size_t(j) * stride], m,
+                    M.table.data(), stride);
+        Matrix C(k, k + 1, std::move(M.table));
+        for (int t = 0; t < k; ++t)
+            for (int j = 0; j <= k; ++j) C.row(t)[j] = powers[std::size_t(j) * stride + free[t]];
+        const Echelon EC = eliminate(F_, C);
+        const int groups = EC.free[0];  // the first power dependent on the lower ones
+        std::vector<u32> unit(EC.dimension(), 0);
+        unit[0] = F_.one;
+        Poly minimal;
+        EC.solve(F_, C, unit.data(), 1, minimal.c, kCap);
+        minimal.n = groups + 1;
+        M.table = C.release();
+        std::vector<u32> roots;
+        find_roots(minimal, nullptr, roots);
+        if (groups == k) return extract(M.g, v, roots, 0, k, powers, stride, m, nullptr);
+        std::vector<Poly> pieces;
+        pieces.reserve(groups);
+        extract(M.g, v, roots, 0, groups, powers, stride, m, &pieces);
+        // A group where the second sample is not constant has two factors or more. If the groups
+        // left do not make up the k factors, some passed as constant (probability 1/p per pair):
+        // then every group left is factored again.
+        const std::size_t before = factors_.size();
+        std::vector<char> settled(groups, 0);
+        for (int pass = 0; pass < 2; ++pass) {
+            for (int i = 0; i < groups; ++i) {
+                if (settled[i]) continue;
+                const Poly& h = pieces[i];
+                if (h.n > 4 && (pass == 1 || !is_constant_on(h, samples + stride, m))) {
+                    Modulus N = R_.modulus(h, std::move(M.table));
+                    berlekamp(N, R_.remainder(r, h));
+                    M.table = std::move(N.table);
+                    settled[i] = 1;
+                }
+            }
+            std::size_t count = factors_.size() - before;
+            for (int i = 0; i < groups; ++i) count += !settled[i];
+            if (count == std::size_t(k)) break;
+        }
+        for (int i = 0; i < groups; ++i)
+            if (!settled[i]) emit(pieces[i]);
+    }
+
+    // Whether u (m coefficients) is a constant modulo h.
+    bool is_constant_on(const Poly& h, const u32* u, int m) const {
+        Poly w;
+        std::copy(u, u + m, w.c);
+        w.n = m;
+        w.trim();
+        return R_.remainder(w, h).n <= 1;
     }
 
     // h is the product of the g_i whose value c_i of v is in roots[lo, hi); vh = v mod h. The left
     // part is gcd(h, P(v)) for P = prod over roots[lo, mid) of (t - c): from the powers of v mod g
-    // near the top, by Horner on v mod h once that is cheaper (small h, few roots).
+    // near the top, by Horner on v mod h once that is cheaper (small h, few roots). The parts go to
+    // pieces, or are emitted if pieces is null.
     void extract(const Poly& h, const Poly& vh, const std::vector<u32>& roots, int lo, int hi,
-                 const std::vector<u32>& powers, int stride, int m) {
-        if (hi - lo == 1) return emit(h);
+                 const std::vector<u32>& powers, int stride, int m, std::vector<Poly>* pieces) {
+        if (hi - lo == 1) return pieces ? pieces->push_back(h) : emit(h);
         const int mid = (lo + hi) / 2;
         Poly u;
         if ((mid - lo) * (h.n - 1) <= m) {
@@ -260,8 +298,8 @@ private:
             u = R_.remainder(u, h);
         }
         const Poly left = R_.gcd(h, u), right = R_.quotient(h, left);
-        extract(left, R_.remainder(vh, left), roots, lo, mid, powers, stride, m);
-        extract(right, R_.remainder(vh, right), roots, mid, hi, powers, stride, m);
+        extract(left, R_.remainder(vh, left), roots, lo, mid, powers, stride, m, pieces);
+        extract(right, R_.remainder(vh, right), roots, mid, hi, powers, stride, m, pieces);
     }
 
     // u - c.
@@ -270,27 +308,6 @@ private:
         u.n = std::max(u.n, 1);
         u.trim();
         return u;
-    }
-
-    void split_by_powers(const Modulus& M, const Kernel& B) {
-        const int k = int(B.free.size());
-        std::vector<Poly> pieces{M.g};
-        while (int(pieces.size()) < k) {
-            const Poly v = random_element(M, B);
-            for (std::size_t i = 0, count = pieces.size(); i < count; ++i) {
-                const Poly h = pieces[i];
-                if (h.n <= 4) continue;  // degree <= 3 without roots: irreducible
-                const Poly u = R_.remainder(v, h);
-                if (u.n <= 1) continue;
-                Poly w = R_.power(u, (F_.p - 1) / 2, R_.modulus(h));
-                w.c[0] = F_.sub(w.c[0], F_.one);
-                w.n = std::max(w.n, 1);
-                w.trim();
-                const Poly d = R_.gcd(h, w);
-                if (d.n > 1 && d.n < h.n) pieces[i] = d, pieces.push_back(R_.quotient(h, d));
-            }
-        }
-        for (const Poly& h : pieces) emit(h);
     }
 };
 

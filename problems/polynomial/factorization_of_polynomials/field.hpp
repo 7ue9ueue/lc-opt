@@ -40,8 +40,7 @@ public:
     int chunk;    // products a folded accumulator takes
     __m256i vp, vneg_inv, vone;
 
-    static u64 fold(u64 x, u32 one) { return (x >> 32) * one + u32(x); }
-    u64 fold(u64 x) const { return fold(x, one); }
+    u64 fold(u64 x) const { return (x >> 32) * one + u32(x); }
 
     // x / 2^32 mod p, for x <= (2^32 - 1) p.
     u32 reduce(u64 x) const {

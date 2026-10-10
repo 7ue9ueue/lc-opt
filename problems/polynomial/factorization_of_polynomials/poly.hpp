@@ -18,7 +18,6 @@ struct Poly {
     int n = 0;
     alignas(32) u32 c[kCap] = {};
 
-    int degree() const { return n - 1; }
     u32 lead() const { return c[n - 1]; }
     void trim() {
         while (n > 0 && c[n - 1] == 0) --n;
@@ -39,12 +38,6 @@ public:
 
     const Field& F;
 
-    Poly constant(u32 a) const {
-        Poly r;
-        r.c[0] = a;
-        r.n = a != 0;
-        return r;
-    }
     // x - z.
     Poly linear(u32 z) const {
         Poly r;
@@ -268,25 +261,6 @@ public:
                 s.trim();
                 r = s;
             }
-        }
-        return r;
-    }
-
-    // u^e mod g, e >= 1, deg u < deg g.
-    Poly power(const Poly& u, u64 e, const Modulus& M) const {
-        if (M.m <= 8) {
-            const __m256i base = load(u.c);
-            __m256i r = base;
-            for (int bit = 62 - __builtin_clzll(e); bit >= 0; --bit) {
-                r = multiply_small(r, r, M);
-                if (e >> bit & 1) r = multiply_small(r, base, M);
-            }
-            return to_poly(r, M.m);
-        }
-        Poly r = u;
-        for (int bit = 62 - __builtin_clzll(e); bit >= 0; --bit) {
-            r = multiply_mod(r, r, M);
-            if (e >> bit & 1) r = multiply_mod(r, u, M);
         }
         return r;
     }

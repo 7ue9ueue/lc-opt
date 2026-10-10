@@ -7629,13 +7629,21 @@ inline std::uint32_t mod_sub(std::uint32_t x, std::uint32_t y) { return x >= y ?
 inline std::uint32_t mod_negate(std::uint32_t x) { return x ? kP - x : 0; }
 inline std::uint32_t mod_inverse(std::uint32_t x) { return ntt::detail::power(x, kP - 2); }
 
-// out[j] = x u[j] + y v[j - 1] + z v[j] for j in [from, to), rounded out to whole vectors: from
-// down and to up to multiples of 8 (callers keep 8 words before u, v and out, and 8 after).
+// out[j] = (x u[j] + y v[j - 1] + z v[j]) / 2^32 mod P for j in [from, to), rounded out to whole
+// vectors: from down and to up to multiples of 8 (callers keep 8 words before u, v and out, and 8
+// after). x, y, z < P; canonical u, v give canonical out: the 64-bit sums of 3 products stay below
+// 2^32 P, one Montgomery reduction each.
 inline void combine3(const std::uint32_t* u, const std::uint32_t* v, std::uint32_t* out, std::ptrdiff_t from,
-                     std::ptrdiff_t to, const Factor& x, const Factor& y, const Factor& z) {
+                     std::ptrdiff_t to, std::uint32_t x, std::uint32_t y, std::uint32_t z) {
+    const Vec xs = broadcast(x), ys = broadcast(y), zs = broadcast(z);
     for (std::ptrdiff_t j = from & ~std::ptrdiff_t(7); j < to; j += 8) {
-        const Vec s = low(add(times(load_unaligned(u + j), x), times(load_unaligned(v + j - 1), y)));
-        store_unaligned(out + j, canonical(add(s, times(load_unaligned(v + j), z))));
+        const Vec a = load_unaligned(u + j), b = load_unaligned(v + j - 1), c = load_unaligned(v + j);
+        const Vec even = _mm256_add_epi64(_mm256_add_epi64(_mm256_mul_epu32(a, xs), _mm256_mul_epu32(b, ys)),
+                                          _mm256_mul_epu32(c, zs));
+        const Vec odd = _mm256_add_epi64(
+            _mm256_add_epi64(_mm256_mul_epu32(_mm256_srli_epi64(a, 32), xs), _mm256_mul_epu32(_mm256_srli_epi64(b, 32), ys)),
+            _mm256_mul_epu32(_mm256_srli_epi64(c, 32), zs));
+        store_unaligned(out + j, reduce(montgomery_reduce(even, odd), kP));
     }
 }
 
@@ -7733,7 +7741,7 @@ public:
         }
         if (k <= direct_) return euclid(a, n, b, m, k, out);
         const std::size_t mark = stack_.mark(), room = std::max<std::size_t>(64, std::bit_ceil(std::size_t(k)));
-        const std::ptrdiff_t k1 = (k + 1) / 2, s1 = std::max<std::ptrdiff_t>(0, n - 2 * k1);
+        const std::ptrdiff_t k1 = first_jump(k), s1 = std::max<std::ptrdiff_t>(0, n - 2 * k1);
         Matrix r1 = matrix(std::size_t(k1), room);
         jump(a + s1, n - s1, b + s1, m - s1, k1, r1);
         std::ptrdiff_t c_deg = 0;
@@ -7764,6 +7772,13 @@ public:
     }
 
 private:
+    // The first part of a jump of k: half of a power of two, else its largest power of two
+    // below k, so that the transform lengths fit (lib/poly/notes.md, Gcd).
+    static std::ptrdiff_t first_jump(std::ptrdiff_t k) {
+        const std::size_t u = std::size_t(k);
+        return std::ptrdiff_t(std::has_single_bit(u) ? u / 2 : std::bit_floor(u));
+    }
+
     std::span<std::uint32_t> take(std::size_t n) { return {stack_.take(n), n}; }
 
     // n words with 8 zero words before them and 8 after (for combine3).
@@ -7826,7 +7841,9 @@ private:
                 // e = alpha^2 c - (alpha beta x + gamma) d kills the coefficients c_deg and d_deg.
                 const std::uint32_t beta = c[c_deg];
                 const std::uint32_t gamma = mod_sub(mod_mul(alpha, c[c_deg - 1]), mod_mul(beta, d[d_deg - 1]));
-                const Factor x(mod_mul(alpha, alpha)), y(kP - mod_mul(alpha, beta)), z(mod_negate(gamma));
+                // Factors times 2^32 for combine3's Montgomery reduction.
+                const std::uint32_t alpha_r = mod_mul(alpha, kR);
+                const std::uint32_t x = mod_mul(alpha, alpha_r), y = kP - mod_mul(beta, alpha_r), z = mod_negate(mod_mul(gamma, kR));
                 combine3(c, d, e, lo, d_deg, x, y, z);
                 for (int i = 0; i < 2; ++i) {
                     const std::size_t sc = row_size[0][i], sd = row_size[1][i];
@@ -8061,7 +8078,7 @@ private:
 inline std::size_t inverse_mod_words(std::size_t n, std::size_t m) {
     const std::size_t d = m - 1;
     return divide_words(n, m) + Arena::footprint(d) + Arena::footprint(quotient_size(n, m)) +
-           detail::HalfGcd::words(std::max<std::size_t>(d, 1)) + 4 * Arena::footprint(m);
+           detail::HalfGcd::words(std::max<std::size_t>(d, 1));
 }
 
 // h = 1 / f mod g with deg h < deg g = m - 1 (h.size() >= m - 1); returns the number of

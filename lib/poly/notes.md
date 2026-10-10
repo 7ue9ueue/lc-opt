@@ -27,6 +27,8 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
   `gen_factorials.py`) and product chains in 32 lanes (issues #79, #80).
 - `division.hpp`: quotient and remainder of polynomials (issue #81), blocks of the quotient
   on the transform layer and `inverse.hpp`.
+- `gcd.hpp`: half-gcd jumps (2 x 2 polynomial matrices) and the inverse modulo a polynomial
+  (issue #82), on the transform layer and `division.hpp`.
 
 APIs and usage: the header of each file. Tests: `test.cpp` (O(n^2) references; sizes 1..64,
 powers of two and their neighbours up to 2^20, random sizes; also run under ASan/UBSan in CI).
@@ -730,6 +732,56 @@ G = rev(g) and k = n - d: rev(q) = F / G mod x^k, rev(r) = (F - G rev(q))[k, n).
   same size); larger s for fewer blocks (the inverse's cost and B s rounding cancel the gain at
   n_max_02: 6.2 ms for s = 2^16, ~6.3 for 2^17 even with a short first block).
 
+## Gcd
+
+`gcd.hpp`: half-gcd jumps (`detail::HalfGcd`) and `inverse_mod` (issue #82); for root finding
+(#85) and factorization (#83) later.
+- Jump of k on (a, b), deg a = n > deg b: R = Q_h ... Q_1 (Euclidean quotient matrices) with
+  deg r_h >= n - k > deg r_(h+1). It depends only on a and b divided by x^(n - 2k): with both
+  cut at x^s, r_(j+1) agrees above s + n - deg r_j, and q_(j+1) reads r_j, r_(j+1) from degree
+  deg r_(j+1) - deg q_(j+1), so the quotients agree while deg r_(j+1) >= (n + s) / 2. Entries
+  have degree <= k; deg R[1][1] = n - deg r_h ("progress").
+- Fraction-free steps: remainders are kept up to constants, so no inversion per step:
+  e = alpha^2 c - (alpha beta x + gamma) d for a quotient of degree 1 (alpha = lc d, beta = lc c,
+  gamma = alpha c[D - 1] - beta d[D - 2]); pseudo-division for longer quotients. R (a, b) =
+  (lambda r_h, mu r_(h+1)).
+- Recursion: jump(k) = jump(k1) on the top 2 k1 + 1 coefficients, apply to (a, b), jump(k - progress)
+  on the top of (c, d), combine R2 R1. k1 = k / 2 for powers of two, else the largest power of two
+  below k: lengths then fit their transforms. k1 = ceil(k / 2) left every level at 76% of its
+  transform length for n = 50000 (25000, 12500, ... round up): 16.2 -> 13.9 ms in process
+  (`lc-amd`), as a cost model predicted (within 1.5% of the model's best split). If the first
+  jump makes no progress (deg b < n - k1), one division step (long division, or `divide` for
+  quotients past kLongDivision).
+- Apply: (c, d) = R1 (a, b) at degrees [s2, deg c] by cyclic products of length
+  L = bit_ceil(n / 2). deg c = D < 2L, so c mod (x^L - 1) holds c[j] + c[j + L] for j <= D - L;
+  c[0, D - L] comes from R1 times (a, b) mod x^(D - L + 1), whose support ends at n - L <= L
+  (coefficient L wraps onto 0, fixed from the entries' coefficients 0). For n = 2k: 4 transforms
+  (2 half-sparse), 8 leaf products and 4 inverses of length k, against 2 transforms, 4 products,
+  2 inverses of length 2k and R1's transforms at 2k. No mixing when D < L (the spine).
+- Combine: R2 R1 by cyclic products of length L = bit_ceil(p), p the progress (coefficient p = L
+  wraps onto 0). Product transforms are kept: the parent's transforms of length 2L come from them
+  by `forward_upper` of the entry mod x^L + 1 (doubling, as product_tree.hpp). `products<K>`
+  computes a row, sharing the windows of R2's row; the windows of group g + 1 are filled before
+  the products of group g (filling and reading at once: combine 17.2 -> 16.5 ms with sharing).
+  Separate products then inverses for the apply's pairs (sharing the windows of a, b): equal to
+  the fused `inverse_product_sum` (16.6 against 16.5 ms); kept fused.
+- Entries: inverse_mod needs R[0][1] and c = R[0][0](0) g(0) + R[0][1](0) b(0): `at0` (coefficient
+  0 of every entry of a computed row) is tracked, so the top computes R[0][1] only and the right
+  spine row 0 only.
+- Base (Euclid, k <= kDirect = 64): only the coefficients from the floor n - 2k + progress are
+  updated. `combine3`: 3 products in 64-bit sums, one Montgomery reduction (factors times 2^32);
+  against Shoup products 16.5 -> 16.2 ms. kDirect 32: +5%, 96 and 128 within 1% at n = 50000.
+- Costs (`lc-amd`, in process, full jump on random input of degree d = 2^j - 1, ns per degree):
+  63: 43, 127: 59, 255: 77, 511: 95, 1023: 115, 2047: 136, 4095: 159, 8191: 184, 16383: 209,
+  32767: 237, 65535: 265. A level costs 16 to 28 ns per degree: about 16 leaf products and 15
+  transforms of length k per node of 2k.
+- Profile (`lc-intel`, n = 50000, before the power-of-two split): leaf products 43% (combine 21%,
+  apply's fused inverse products 21.5%), Euclid 16%, transforms ~30%.
+- Not done: pointwise products (transforms down to single points: leaf products are about half
+  the time, but 3 more levels per transform); Strassen-Winograd (7 leaf products for 15 leaf
+  additions, ~17 cycles against ~15 per leaf); applying R2 R1 in factored form (more products);
+  two Euclid steps per pass.
+
 ## Measurements
 
 AMD EPYC 7B13 (`lc-amd`, 3.48 GHz), GCC 15.2, judge flags, 2026-10-09. ns per coefficient,
@@ -1415,6 +1467,18 @@ compositional_inverse_of_formal_power_series 0.9768 (0.9673).
   fail them.
 - Problem: 20.1 ms whole process on the large tests (`lc-bench`), floor 4.3 ms.
 
+2026-10-10, claude (issue #82, inv_of_polynomials; product-tree lane):
+- New `gcd.hpp` (Gcd above); no existing header changed. It reuses product_tree.hpp's `Stack`
+  and calculus.hpp's unaligned loads (a second definition in the same namespace does not
+  compile where both are included). Tests (`test_gcd`): 300 jumps on random pairs (degree up
+  to 300, three coefficient kinds, remainder sequences with quotients of degree up to 30 and a
+  common factor) against the extended Euclidean algorithm (rows and remainders proportional,
+  progress, coefficients 0), with the direct threshold forced to 1, 2, 3, 8, 32, 64, 100;
+  inverse_mod on every size pair up to 12 x 12, 120 random pairs up to 500 (common factors, g
+  dividing f, abnormal sequences), sizes around 64, 128, 1024; five large pairs (50000 x 50000,
+  20000 x 50000, 50000 x 3000, 32769 x 32769, 1000 x 40000) by (f h - 1) mod g = 0. -O2 -Wall
+  -Wextra and ASan/UBSan (`lc-amd`).
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -1476,3 +1540,8 @@ compositional_inverse_of_formal_power_series 0.9768 (0.9673).
   consulted in this round). The blocks with tail products, the remainder from q g mod (x^L - 1)
   with f's coefficients as the wrap, the split remainder and the code derived and written here;
   no code read.
+- Half-gcd: the jump of k depends on the top 2k coefficients (K. Thull, C. Yap, "A unified
+  approach to HGCD algorithms for polynomials and integers", 1990; J. von zur Gathen, J. Gerhard,
+  "Modern Computer Algebra", chapter 11, from memory). The recursion with the split at powers of
+  two, the apply by cyclic products with the low part, transform reuse, fraction-free steps
+  (pseudo-remainders, standard) and the code derived and written here; no code read.

@@ -24,6 +24,8 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
   evaluation and interpolation on geometric sequences; uses `montgomery` from `calculus.hpp`.
 - `factorials.hpp`: factorials from a generated table (`factorial_table.hpp`,
   `gen_factorials.py`) and product chains in 32 lanes (issues #79, #80).
+- `division.hpp`: quotient and remainder of polynomials (issue #81), blocks of the quotient
+  on the transform layer and `inverse.hpp`.
 
 APIs and usage: the header of each file. Tests: `test.cpp` (O(n^2) references; sizes 1..64,
 powers of two and their neighbours up to 2^20, random sizes; also run under ASan/UBSan in CI).
@@ -649,6 +651,41 @@ Lagrange interpolation on 0, 1, ..., N - 1.
   random), `invert` (sizes 0..1000, values 1 and P - 1), chains through `scan` against scalar
   products (forward and reversed, steps 8..512, bases and steps near 0 and P), `scan_chunk`'s
   bounds.
+
+## Division
+
+`division.hpp`: q and r with f = q g + r, deg r < d = deg g (issue #81). With F = rev(f),
+G = rev(g) and k = n - d: rev(q) = F / G mod x^k, rev(r) = (F - G rev(q))[k, n).
+- Quotient in B blocks of s (a power of two >= 32), F padded with B s - k zeros in front, so the
+  last block ends at k. h = 1 / G mod x^s (`inverse`; k coefficients when B = 1) and T_2s(h).
+  Block j: R_j = F_j minus the residual, Q_j = h R_j mod x^s by `cyclic_product` of length 2s
+  (lower half), in place in the quotient buffer (the upper half it spoils is the next block's).
+- Tails (d < s): the residual is (G Q)[js, js + d) = (G T)[d, 2d) for T = Q_(j-1)[s - d, s), a
+  product of two d-coefficient polynomials' upper half: one `cyclic_product` of length
+  L = bit_ceil(2d) with T at x^(L - 2d), so (G T)[d, 2d) lands in the upper half. Windows
+  (d >= s): sum over t <= min(j, d / s + 1) of (W_t Q_(j-t))[s, 2s), W_t = G[(t-1)s, (t+1)s),
+  from stored T(W_t) and a ring of T(Q_i), one inverse of up to 8 leaf products
+  (`InverseProductSumBottom<K>`, K > 3 through `inverse_with`).
+- Per block: tails 2 cyclic products (lengths 2s and L), windows a cyclic product, a forward and
+  an inverse of length 2s and min(j, d / s + 1) leaf products.
+- Remainder, four ways: (kWrap) q g mod (x^L - 1) for L = bit_ceil(d): its coefficient j < d is
+  (q g)[j] + f[j + L] + f[j + 2L] + ..., q and g folded mod x^L - 1. (kSplit) for L' = L / 2 < d
+  and k + d - L' <= L' + 1: q g mod (x^L' - 1), and (q g)[L', d) as the coefficients
+  [k - 1, k - 1 + d - L') of q g[L' - k + 1, d) mod (x^L' - 1), both from one T_L'(q):
+  5 transforms and 2 leaf products of length L' instead of 3 and 1 of length 2L'. (kTail) with
+  tails, rev(r) is the next block's residual: one more tail product. (kDirect) k <= 64: 64-bit
+  sums of 4 `vpmuludq` products, one Montgomery reduction each (q times 2^32).
+- Plan: s from 32 up to one block, each with every remainder method that applies; the cheapest
+  sum of the cost model (ns per coefficient of a transform by length, of a leaf product, of a
+  fold; Measurements). Long division for k d <= 2^12.
+- Memory: one scratch span: G (only the coefficients the plan reads), T(h), then the inverse's
+  scratch overlapping the later quotient buffer and the tails' or windows' transforms; the
+  remainder's buffers reuse it from its start. q is written block by block, reversed, right after
+  each block's product.
+- Not done: a state S_(j+1) = x^-s (F_j + S_j) mod G formulation (the same two products per
+  block); the tail product at a length below 2d (needs the lower half of G T, a product of the
+  same size); larger s for fewer blocks (the inverse's cost and B s rounding cancel the gain at
+  n_max_02: 6.2 ms for s = 2^16, ~6.3 for 2^17 even with a short first block).
 
 ## Measurements
 
@@ -1313,6 +1350,17 @@ compositional_inverse_of_formal_power_series 0.9768 (0.9673).
   AC 33 ms (was 47 with spikes, clean 37). composition.hpp's forward pass could take `Doubling`
   for its levels too (its V is stored per level; the same y levels are skipped); not tried.
 
+2026-10-10, claude (issue #81, division_of_polynomials; product-tree lane):
+- New `division.hpp` (Division above); no other file of lib/poly changed.
+- Cost model against in-process times (`lc-amd`, warm, the quotient alone): within 5% at the
+  chosen block sizes, and the model's choice is the measured best or within 1% on the slowest
+  tests (problem notes).
+- Tests: against long division for n, m <= 40 and 18 size pairs (all three kinds of
+  coefficients), 40 random pairs up to 3000, every block size with every remainder method that
+  applies; f = q g + r at 8 random points for 10 large pairs up to 500000 and two forced plans.
+  -O2 and ASan/UBSan (`lc-amd`).
+- Measurements: problems/polynomial/division_of_polynomials/notes.md.
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -1365,3 +1413,8 @@ compositional_inverse_of_formal_power_series 0.9768 (0.9673).
   Computer Algebra", chapter 10, from memory; not consulted in this round); the combination as
   the transpose of the descent: Bostan, Lecerf and Schost above. The fused lane pass, the base
   and the code derived and written here; no code read.
+- Division with remainder by reversal (rev(q) = rev(f) / rev(g) mod x^(n - d)): the standard
+  reduction (von zur Gathen and Gerhard, "Modern Computer Algebra", section 9.1, from memory; not
+  consulted in this round). The blocks with tail products, the remainder from q g mod (x^L - 1)
+  with f's coefficients as the wrap, the split remainder and the code derived and written here;
+  no code read.

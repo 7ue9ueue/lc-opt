@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / 'bench' / 'data'
 API = 'https://v3.api.judge.yosupo.jp'
 USER = 'Aiyiyi'
+OURS_ANONYMOUS = {408883}  # our submissions made without logging in
 LOCK = '/tmp/bench.lock'
 PORTABLE = '-march=x86-64-v3 -madx -mpclmul -mvpclmulqdq -maes -mvaes'
 MACHINES = {'lc-amd': 'AMD', 'lc-intel': 'Intel'}  # host -> column; others use the host name
@@ -131,12 +132,13 @@ def api(path: str, **query) -> dict:
 
 
 def judged(problem: str) -> tuple[dict | None, float | None]:
-    """Our fastest AC submission, and the fastest AC time by anyone else, on current tests."""
+    """Our fastest AC submission under USER, and the fastest AC time by anyone else, on current tests."""
     ours = api('submissions', problem=problem, user=USER, status='AC', order='+time', limit=1000)
     mine = [s for s in ours['submissions'] if s['is_latest']]
     best = mine[0] if mine else None
     everyone = api('submissions', problem=problem, status='AC', order='+time', limit=ours['count'] + 100)
-    others = [s['time'] for s in everyone['submissions'] if s['is_latest'] and s.get('user_name') != USER]
+    others = [s['time'] for s in everyone['submissions']
+              if s['is_latest'] and s.get('user_name') != USER and s['id'] not in OURS_ANONYMOUS]
     return best, (others[0] * 1000 if others else None)
 
 

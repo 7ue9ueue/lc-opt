@@ -770,10 +770,10 @@ private:
 //
 // The levels (shared with power projection): m = 2^T >= n, Q_0(x, y) = 1 - y g(x), and
 // Q_(s+1)(x^2, y) = Q_s(x, y) Q_s(-x, y) mod x^(m / 2^s). Q_s has L = m / 2^s coefficients in x
-// and degree Y = 2^s in y; Q_s(x, 0) = Q_s(0, y) = 1. Level s stores the transform of length 4m of
-// Q_s by Kronecker substitution x = z, y = z^(2L): x below L, rows 0 .. Y of 2Y. A product mod
-// (z^4m - 1) then carries nothing from x into y while the x degree stays below 2L, and wraps y
-// mod y^(2Y).
+// and degree Y = 2^s in y; Q_s(x, 0) = Q_s(0, y) = 1. A level 0 < s < T - 2 is stored as the
+// transform of length 4m of Q_s by Kronecker substitution x = z, y = z^(2L): x below L, rows
+// 0 .. Y of 2Y. A product mod (z^4m - 1) then carries nothing from x into y while the x degree
+// stays below 2L, and wraps y mod y^(2Y). Levels 0, T - 2 and T - 1 are one-dimensional (Levels).
 
 #include <immintrin.h>
 
@@ -3824,6 +3824,12 @@ inline void compose_direct(std::span<const std::uint32_t> f, std::span<const std
     }
 }
 
+// -2x mod P for x < P.
+constexpr std::uint32_t minus_twice(std::uint32_t x) {
+    const std::uint32_t y = x ? 2 * kP - 2 * x : 0;  // < 2P
+    return y >= kP ? y - kP : y;
+}
+
 // -x mod P in [0, P) for x < P.
 inline Vec negate(Vec x) {
     return _mm256_min_epu32(_mm256_sub_epi32(broadcast(kP), x), _mm256_sub_epi32(_mm256_setzero_si256(), x));
@@ -4044,12 +4050,12 @@ struct CompositionBottom {
     }
 };
 
-// Transforms of length a.size() with a bottom, as Transform's: forward in place (input a);
-// inverse with output half, times scale.
+// Transforms of length a.size() with a bottom, as Transform's: forward in place of a[0, size),
+// the rest zero and not read; inverse with output half, times scale.
 template <class Bottom>
-void forward_with(std::span<std::uint32_t> a, const Tables& tables, const Bottom& bottom) {
+void forward_with(std::span<std::uint32_t> a, std::size_t size, const Tables& tables, const Bottom& bottom) {
     const Recursion recursion(tables.roots, tables.inverse_roots, bottom);
-    const Source in(a.data(), a.size(), 0);
+    const Source in(a.data(), size, 0);
     const std::size_t nv = a.size() / 8;
     auto* v = reinterpret_cast<Vec*>(a.data());
     if (std::countr_zero(nv) % 2 == 0) {
@@ -4128,12 +4134,12 @@ struct Levels {
 };
 
 // From v = Q_s(x) Q_s(-x) mod (z^(2m) - 1) at stride L (2Y rows, wrapped: row 0 holds 1 + row 2Y) in
-// a[0, 2m), Q_(s+1) at stride L in a: x below L / 2, rows 0 .. 2Y of 4Y.
+// a[0, 2m), Q_(s+1) at stride L in a[0, (2Y + 1) L): x below L / 2, rows 0 .. 2Y.
 inline void next_level(std::span<std::uint32_t> a, std::size_t stride, std::size_t rows) {
     const std::size_t half = stride / 2, top = rows * stride;
     std::copy(a.begin(), a.begin() + std::ptrdiff_t(half), a.begin() + std::ptrdiff_t(top));
     a[top] = a[top] ? a[top] - 1 : kP - 1;
-    std::fill(a.begin() + std::ptrdiff_t(top + half), a.end(), 0);
+    std::fill(a.begin() + std::ptrdiff_t(top + half), a.begin() + std::ptrdiff_t(top + stride), 0);
     a[0] = 1;
     std::fill(a.begin() + 1, a.begin() + std::ptrdiff_t(half), 0);
     for (std::size_t i = 0; i < rows; ++i)
@@ -4152,21 +4158,18 @@ inline void build_levels(const Transform& t, std::span<const std::uint32_t> g, L
     std::fill(q0.begin(), q0.end(), 0);
     std::copy(g.begin() + std::ptrdiff_t(std::min<std::size_t>(g.size(), 1)), g.begin() + std::ptrdiff_t(std::min(g.size(), m)),
               q0.begin() + 1);
-    forward_with(q0, levels.tables, LevelBottom{&levels.tables, v.data()});
+    forward_with(q0, m, levels.tables, LevelBottom{&levels.tables, v.data()});
     t.inverse(v.first(m));
-    const std::span<std::uint32_t> q1 = levels.level(1);
-    std::fill(q1.begin(), q1.end(), 0);  // stride m: rows 1, -2 ge, v
+    const std::span<std::uint32_t> q1 = levels.level(1).first(3 * m);  // stride m: rows 1, -2 ge, v
+    std::fill(q1.begin(), q1.end(), 0);
     q1[0] = 1;
-    for (std::size_t j = 0; j < m / 2; ++j) {
-        const std::uint32_t e = j > 0 && 2 * j < g.size() ? g[2 * j] : 0, minus_2e = e ? 2 * kP - 2 * e : 0;  // < 2P
-        q1[m + j] = minus_2e >= kP ? minus_2e - kP : minus_2e;
-        q1[2 * m + j] = v[j];
-    }
-    for (int s = 1; s + 2 < levels.lg; ++s) {
-        forward_with(levels.level(s), levels.tables, LevelBottom{&levels.tables, v.data()});
+    for (std::size_t j = 0; j < m / 2; ++j) q1[m + j] = minus_twice(j > 0 && 2 * j < g.size() ? g[2 * j] : 0), q1[2 * m + j] = v[j];
+    for (int s = 1; s + 2 < levels.lg; ++s) {  // Q_s: rows 0 .. Y at stride 2L
+        const std::size_t stride = 2 * (m >> s);
+        forward_with(levels.level(s), ((std::size_t(1) << s) + 1) * stride, levels.tables, LevelBottom{&levels.tables, v.data()});
         if (s + 3 < levels.lg) {
             t.inverse(v, levels.level(s + 1).first(2 * m));
-            next_level(levels.level(s + 1), m >> s, std::size_t(2) << s);
+            next_level(levels.level(s + 1), stride / 2, std::size_t(2) << s);
         }
     }
     t.inverse(v);  // stride 8
@@ -4181,7 +4184,7 @@ inline void build_levels(const Transform& t, std::span<const std::uint32_t> g, L
         }
     }
     std::fill(q.begin(), q.end(), 0);
-    for (std::size_t i = 1; i <= m / 4; ++i) q[i] = c[2][i] ? 2 * kP - 2 * c[2][i] - (2 * c[2][i] <= kP ? kP : 0) : 0;
+    for (std::size_t i = 1; i <= m / 4; ++i) q[i] = minus_twice(c[2][i]);
     const std::span<std::uint32_t> square = levels.work[1].first(m / 2);  // q1^2 mod (y^(m/2) - 1)
     for (std::size_t k = 1; k < 4; ++k) t.forward(c[k]);
     t.inverse_product(c[1], c[1], square);

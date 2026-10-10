@@ -8,6 +8,8 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
   (division f'/f), `pow.hpp` (c (f / f[0])^e as exp(e log)), `sqrt.hpp` (Newton iteration).
 - `sparse.hpp`: linear recurrences with few taps, for series with few nonzero terms (issues
   #69-#73); independent of the transform layer.
+- `composition.hpp`: f(g) mod x^n by Kinoshita and Li's algorithm (issue #67); its own bottoms
+  and tables on top of the transform layer.
 
 APIs and usage: the header of each file. Tests: `test.cpp` (O(n^2) references; sizes 1..64,
 powers of two and their neighbours up to 2^20, random sizes; also run under ASan/UBSan in CI).
@@ -212,6 +214,44 @@ it (a ring, or one array). For 1/f: taps (i_k, -a_k / a_0), r = [1 / a_0].
   then need a different block step, and bulk inverses of 1..N (`calculus.hpp` has batch
   inversion).
 
+## Composition
+
+h = f(g) mod x^n, g[0] = 0, as the transpose of power projection (Kinoshita and Li, Sources).
+m = 2^T >= max(n, 128); n <= 32 by Horner's rule.
+- Levels: Q_0 = 1 - y g(x), Q_(s+1)(x^2, y) = Q_s(x, y) Q_s(-x, y) mod x^L, L = m / 2^s, Y = 2^s
+  the y degree; Q_s(x, 0) = Q_s(0, y) = 1. Power projection maps w to ([x^(m-1)] w g^i)_i by
+  P_(s+1) = odd part of P_s Q_s(-x); composition applies its transpose to f: P_s from P_(s+1)
+  by a middle product with Q_s(-x), and h = P_0 reversed.
+- Layout: x = z, y = z^(2L) (Kronecker), transforms of length 4m: a product carries nothing from
+  x into y while the x degree stays below 2L and wraps y mod y^(2Y). Wraps that land on a known
+  row (row 0 of Q_s(x) Q_s(-x) is 1) are undone exactly, so 2Y rows suffice for degree 2Y. x
+  must be the low part: z -> -z then maps Q(x, y) to Q(-x, y), and in the leaf domain Q(-z) mod
+  (z^8 - w) is the leaf with its odd coefficients negated.
+- Forward pass (`LevelBottom`, the bottom of the transform of Q_s at 4m): canonical leaves are
+  the stored level; leaves 2p, 2p + 1 (moduli z^8 -+ s, s = r[p], s^2 = w_p) give V =
+  Q_s(x) Q_s(-x) mod (u^8 - w_p), u = z^2, as the CRT of a(z) a(-z) = e(u)^2 - u o(u)^2 mod
+  (u^4 - s) and the same for b: 20 products per leaf instead of a 64-product leaf product, 8
+  pairs per step in transposed form (one pair per lane). Then the inverse of V at 2m and the
+  next layout (truncate x, unwrap row 2Y).
+- Backward pass: with P_(s+1) reversed in x and y (layout stride L), the middle product is the
+  plain product R = P(z^2) Q_s(-z) mod (z^4m - 1); rows Y .. 2Y - 1 of R, x below L, are P_s
+  reversed, the next input at once (the reversals cancel). `CompositionBottom`: P(z^2) mod
+  (z^8 -+ s) = lo +- s hi from P's leaf p at 2m, 4 terms, so leaf products of 4 by 8; 8 pairs per
+  step transposed, s folded into the wrapped operands. Per generic level: transform of P at 2m,
+  inverse at 4m with this bottom (upper half).
+- One-dimensional levels: 0 (Graeffe of g at 2m; h = p1(x^2) - p0(x^2) g(-x) with the same
+  bottom at 2m, lower half), T - 1 (Q = 1 + x q(y): one cyclic product of length m) and T - 2
+  (Q = 1 + x q1 + x^2 q2 + x^3 q3: four products of length m/2; q of level T - 1 = 2 q2 - q1^2).
+- Costs at m = 8192 (`lc-amd`, in process, µs): per generic level forward 48 (plain transform
+  of 4m: 27) + 13 (inverse of 2m), backward 13 + 50 (plain inverse of 4m: 27); compose 1460.
+- Memory: level s keeps its transform of 4m words (levels 0, T - 2, T - 1 less); 2 work spans of
+  4m. compose_scratch(8000) = 504200 words.
+- For power projection (#68, #86, #87): the forward pass is the same; P_(s+1) = odd part of
+  P_s Q_s(-x) is, per leaf pair, the CRT of the odd parts of a_P(z) a_Q(-z) and b_P(z) b_Q(-z),
+  so the same pair structure fits a forward-only pass with P's transform at 4m per level.
+- `ntt::detail::multiply` (`times`) takes one factor for all lanes (the odd lanes reuse the even
+  lanes' quotient); per-lane factors need `times_lanes`.
+
 ## Measurements
 
 AMD EPYC 7B13 (`lc-amd`, 3.48 GHz), GCC 15.2, judge flags, 2026-10-09. ns per coefficient,
@@ -413,6 +453,22 @@ products 1.77 and 1.69).
   the order M M A A (the leaf product's finding above): w = 7 0.480 against 0.466 for GCC's
   M A M A, two alternated runs (the multiplies here take their column from memory).
 
+2026-10-09, claude (issue #67, composition_of_formal_power_series):
+- New `composition.hpp` (Composition above); no existing header changed. Tests: compose against
+  Horner's rule for n = 1 .. 160 (four kinds of g, among them leading zero runs), f and g shorter
+  and longer than n, g = 0 and g = x; up to 2^17 + 1 by identities at random coefficients
+  (f = sum c^i y^i: h (1 - c g) = 1; the chain rule h' = (f' o g) g'; f = y^2); scratch filled
+  with garbage first. Nine mutations (wraps, signs, truncation, CRT factor, each special level)
+  fail them.
+- Steps and measurements: problems/polynomial/composition_of_formal_power_series/notes.md.
+  Whole process at N = 8000: 3.44 ms (first version) -> 2.79 ms, floor 1.25 ms.
+- Leaf-product findings: windows filled and read at once stall on store forwarding (86.5 against
+  47.1 us for the same products with windows stored long before); GCC kept a 4-term loop rolled
+  with its operands on the stack until `#pragma GCC unroll`; 8 pairs per step in transposed
+  form beat one pair per vector (50.1 against 58.6 us per inverse of 2^15).
+- For the owner lane: read access to Transform's twiddle tables would save Tables' copies (2 x
+  2^lg / 8 words), and `times` could take per-lane factors.
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -434,3 +490,7 @@ products 1.77 and 1.69).
   response of the short part: standard linear algebra, derived here; no code read.
 - Montgomery reduction: P. Montgomery, "Modular multiplication without trial division",
   Math. Comp. 44 (1985).
+- Composition: K. Kinoshita, B. Li, "Power Series Composition in Near-Linear Time", FOCS 2024,
+  https://arxiv.org/abs/2404.05177 (power projection by Graeffe steps in x with y as the
+  coefficient ring, composition as its transpose). Layout, leaf-level Graeffe and transposed
+  steps derived and written here; no code read.

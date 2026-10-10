@@ -4,7 +4,8 @@
 // descending; Moebius: x_i -= x_ip, i ascending). Primes >= 17 together: one sweep over the
 // multipliers m coprime to 30030 ("rough"), in two stages (prime factors below and above 100),
 // segment by segment so the sources stay in L2 (in L1 for m < 256).
-// a and b are interleaved as pairs, so one load fetches both.
+// a and b are interleaved as pairs, so one load fetches both. b is parsed chunk by chunk; each chunk
+// is interleaved, and the rough zeta sweep takes its segments, while they are in the cache.
 #include <immintrin.h>
 
 #include <algorithm>
@@ -14,11 +15,11 @@
 #include <cstring>
 #include <iterator>
 
-#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/io/sequential.hpp"
 #include "lib/mem/huge.hpp"
 #include "lib/run/early.hpp"
+#include "chunk_read.hpp"
 #include "../convolution_mod/fields.hpp"
 
 namespace {
@@ -254,12 +255,14 @@ template <std::uint32_t kStage, class T, class Term>
     return sum_large<kStage>(i, k, last, sum + other, term);
 }
 
-// pairs[i] = (a_i, b_i R mod P) for 1 <= i <= n, then the zeta pass of p = 3. a may be the first
-// half of pairs: i descends, so pairs[i] only overwrites a_2i and a_2i+1, which are read already.
-void interleave_zeta3(const AliasWord* a, const std::uint32_t* b, std::uint64_t* pairs, std::uint32_t n) {
+// pairs[i] = (a[i], b[i] R mod P) for 0 <= i < count. a may lie in the same memory, ahead of
+// pairs by more than count + 8 dwords: i ascends, so pairs[i] only overwrites values of a read
+// already.
+void interleave(const AliasWord* a, const std::uint32_t* b, std::uint64_t* pairs, std::uint32_t count) {
     const Vec r2 = broadcast(kR2);
-    // b_i R as Montgomery products of b_i and R^2: dwords [b R] in the high halves.
-    auto scaled_pairs = [&](std::uint32_t i, Vec& low, Vec& high) {
+    std::uint32_t i = 0;
+    for (; i + 8 <= count; i += 8) {
+        // b_i R as Montgomery products of b_i and R^2: dwords [b R] in the high halves.
         const Vec va = load(a + i), vb = load(b + i);
         const Vec even = redc(_mm256_mul_epu32(vb, r2));
         const Vec odd = redc(_mm256_mul_epu32(_mm256_srli_epi64(vb, 32), r2));
@@ -267,34 +270,14 @@ void interleave_zeta3(const AliasWord* a, const std::uint32_t* b, std::uint64_t*
         const Vec bs = _mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA);
         const Vec br = _mm256_min_epu32(bs, _mm256_sub_epi32(bs, broadcast(kP)));
         const Vec lo = _mm256_unpacklo_epi32(va, br), hi = _mm256_unpackhi_epi32(va, br);
-        low = _mm256_permute2x128_si256(lo, hi, 0x20);
-        high = _mm256_permute2x128_si256(lo, hi, 0x31);
-    };
-    const std::uint32_t third = n / 3;
-    std::uint32_t i = n + 1;
-    // Targets i > n / 3 only take their own values. Eight at a time, from the top.
-    while (i >= third + 9) {
-        i -= 8;
-        Vec low, high;
-        scaled_pairs(i, low, high);
-        store(pairs + i, low);
-        store(pairs + i + 4, high);
+        store(pairs + i, _mm256_permute2x128_si256(lo, hi, 0x20));
+        store(pairs + i + 4, _mm256_permute2x128_si256(lo, hi, 0x31));
     }
-    auto one = [&](std::uint32_t k) {
-        const std::uint32_t br = std::uint32_t((std::uint64_t(b[k]) << 32) % kP);
-        const std::uint64_t pair = a[k] | std::uint64_t(br) << 32;
-        std::memcpy(pairs + k, &pair, sizeof pair);
-        if (k <= third) add_pair(pairs + k, pairs + 3 * k);
-    };
-    while (i > third + 1) one(--i);
-    while (i >= 8 + 4) {  // sources 3i > i + 7
-        i -= 8;
-        Vec low, high;
-        scaled_pairs(i, low, high);
-        store(pairs + i, add(low, gather_pairs(pairs + 3 * i, 3)));
-        store(pairs + i + 4, add(high, gather_pairs(pairs + 3 * (i + 4), 3)));
+    for (; i < count; ++i) {
+        const std::uint32_t br = std::uint32_t((std::uint64_t(b[i]) << 32) % kP);
+        const std::uint64_t pair = a[i] | std::uint64_t(br) << 32;
+        std::memcpy(pairs + i, &pair, sizeof pair);
     }
-    while (i > 1) one(--i);
 }
 
 // Zeta pass of p >= 5 on the pairs: four targets at a time from the top, then one at a time.
@@ -354,62 +337,82 @@ struct ZetaSweep {
 };
 
 // pairs[i] += sum of pairs[i m] over rough m > 1, i m <= n: the zeta passes of all primes >= 17,
-// as stage 1 after stage 2. Stage 2 changes only i <= n / 101, all in segment 0; its sums go to t2
-// (n / 101 + 1 pairs). Segment 0 goes first, by target ascending, so its sources are unchanged
-// when read; then source segments ascend (their targets lie in earlier segments). Last, stage 1
-// on t2, which is then added to the pairs.
-void zeta_rough(std::uint64_t* pairs, std::uint32_t n, std::uint64_t* t2) {
-    constexpr std::uint32_t kSegment = 1 << 15, kPiece = 1 << 12;  // pairs: 256 KiB, 32 KiB
-    const std::uint32_t last2 = n / kStage2Min;
-    std::memset(t2, 0, (last2 + 1) * sizeof(std::uint64_t));
-    auto widened = [&](std::uint32_t j) { return widen_pair(pairs + j); };
-    const std::uint32_t last0 = std::min(n, kSegment - 1);
-    for (std::uint32_t i = 1; kStagePrimes[0] * i <= last0; ++i) {
-        add_sums(pairs + i, sum_multiples<1, Half>(i, last0, widened));
-        if (kStage2Min * i <= last0) add_sums(t2 + i, sum_multiples<2, Half>(i, last0, widened));
+// as stage 1 after stage 2, fed segment by segment as the pairs are written. Stage 2 changes only
+// i <= n / 101, all in segment 0; its sums go to t2 (n / 101 + 1 pairs). Segment 0 goes first, by
+// target ascending, so its sources are unchanged when read; then source segments ascend (their
+// targets lie in earlier segments). Last, stage 1 on t2, which is then added to the pairs.
+class ZetaRough {
+public:
+    ZetaRough(std::uint64_t* pairs, std::uint32_t n, std::uint64_t* t2) : pairs_(pairs), t2_(t2), n_(n) {
+        std::memset(t2, 0, (n / kStage2Min + 1) * sizeof(std::uint64_t));
+        one_.init(kSegment, n);
+        two_.init(kSegment, n);
     }
-    if (n >= kSegment) {
-        static ZetaSweep<1> one;
-        static ZetaSweep<2> two;
-        one.init(kSegment, n);
-        two.init(kSegment, n);
-        for (std::uint32_t start = kSegment; start <= n; start += kSegment) {
-            const std::uint32_t last_source = std::min(n, start + kSegment - 1);
-            for (std::uint32_t piece = start + kPiece; piece <= last_source; piece += kPiece) {
-                two.by_target(pairs, piece - 1, kPieceTargets);
-                one.by_multiplier(pairs, pairs, one.s.tiny, piece - 1);
-                two.by_multiplier(t2, pairs, two.s.tiny, piece - 1);
-            }
-            one.by_multiplier(pairs, pairs, ZetaSweep<1>::M::kSmall, last_source);
-            two.by_multiplier(t2, pairs, ZetaSweep<2>::M::kSmall, last_source);
-            one.by_target(pairs, last_source, kMaxTargets);
-            two.by_target(pairs, last_source, kMaxTargets);
-        }
-        one.finish(pairs, n);
-        two.finish(t2, n);
-    }
-    auto from_t2 = [&](std::uint32_t j) { return widen_pair(t2 + j); };
-    for (std::uint32_t i = 1; kStagePrimes[0] * i <= last2; ++i) add_sums(t2 + i, sum_multiples<1, Half>(i, last2, from_t2));
-    for (std::uint32_t i = 1; i <= last2; ++i) add_pair(pairs + i, t2 + i);
-}
 
-// Zeta pass of p = 2 fused with the product and the Moebius pass of 2:
-// c_i = A_i B_i - A_2i B_2i (the second term for i <= n / 2).
-void zeta2_product_moebius2(std::uint64_t* pairs, std::uint32_t* c, std::uint32_t n) {
-    const std::uint32_t half = n / 2;
-    std::uint32_t i = n + 1;
-    while (i >= half + 9) {
-        i -= 8;
-        store(c + i, high_dwords(product4(load(pairs + i)), product4(load(pairs + i + 4))));
+    // Takes the segments whose sources all lie in [1, ready].
+    void advance(std::uint32_t ready) {
+        for (; start_ <= n_ && std::min(n_, start_ + kSegment - 1) <= ready; start_ += kSegment) {
+            if (start_ == 0) first_segment();
+            else segment(start_);
+        }
     }
+
+    // After advance(n).
+    void finish() {
+        one_.finish(pairs_, n_);
+        two_.finish(t2_, n_);
+        const std::uint32_t last2 = n_ / kStage2Min;
+        auto from_t2 = [&](std::uint32_t j) { return widen_pair(t2_ + j); };
+        for (std::uint32_t i = 1; kStagePrimes[0] * i <= last2; ++i) add_sums(t2_ + i, sum_multiples<1, Half>(i, last2, from_t2));
+        for (std::uint32_t i = 1; i <= last2; ++i) add_pair(pairs_ + i, t2_ + i);
+    }
+
+private:
+    static constexpr std::uint32_t kSegment = 1 << 15, kPiece = 1 << 12;  // pairs: 256 KiB, 32 KiB
+    static inline ZetaSweep<1> one_;
+    static inline ZetaSweep<2> two_;
+    std::uint64_t* pairs_;
+    std::uint64_t* t2_;
+    std::uint32_t n_, start_ = 0;
+
+    void first_segment() {
+        const std::uint32_t last0 = std::min(n_, kSegment - 1);
+        auto widened = [&](std::uint32_t j) { return widen_pair(pairs_ + j); };
+        for (std::uint32_t i = 1; kStagePrimes[0] * i <= last0; ++i) {
+            add_sums(pairs_ + i, sum_multiples<1, Half>(i, last0, widened));
+            if (kStage2Min * i <= last0) add_sums(t2_ + i, sum_multiples<2, Half>(i, last0, widened));
+        }
+    }
+
+    void segment(std::uint32_t start) {
+        const std::uint32_t last_source = std::min(n_, start + kSegment - 1);
+        for (std::uint32_t piece = start + kPiece; piece <= last_source; piece += kPiece) {
+            two_.by_target(pairs_, piece - 1, kPieceTargets);
+            one_.by_multiplier(pairs_, pairs_, one_.s.tiny, piece - 1);
+            two_.by_multiplier(t2_, pairs_, two_.s.tiny, piece - 1);
+        }
+        one_.by_multiplier(pairs_, pairs_, ZetaSweep<1>::M::kSmall, last_source);
+        two_.by_multiplier(t2_, pairs_, ZetaSweep<2>::M::kSmall, last_source);
+        one_.by_target(pairs_, last_source, kMaxTargets);
+        two_.by_target(pairs_, last_source, kMaxTargets);
+    }
+};
+
+// Zeta passes of 3 and 2 fused with the product and the Moebius pass of 2, targets descending:
+// c_i = A_i B_i - A_2i B_2i (the second term for i <= n / 2). The pass of 3 runs a factor 3
+// ahead: its targets [8q, 8q + 8) go just before the targets [24q, 24q + 24) of the pass of 2,
+// which are its sources (so it reads them before the pass of 2 changes them, and the product pass
+// brings them into the cache for both).
+void zeta32_product_moebius2(std::uint64_t* pairs, std::uint32_t* c, std::uint32_t n) {
+    const std::uint32_t half = n / 2, third = n / 3;
+    auto product = [](std::uint32_t x, std::uint32_t yr) {
+        const std::uint64_t t = std::uint64_t(x) * yr;
+        const std::uint32_t m = std::uint32_t(t) * kNegInverse;
+        const std::uint32_t r = std::uint32_t((t + std::uint64_t(m) * kP) >> 32);
+        return std::min(r, r - kP);
+    };
     auto one = [&](std::uint32_t k) {
         std::uint32_t ai = std::uint32_t(pairs[k]), bi = std::uint32_t(pairs[k] >> 32);
-        auto product = [](std::uint32_t x, std::uint32_t yr) {
-            const std::uint64_t t = std::uint64_t(x) * yr;
-            const std::uint32_t m = std::uint32_t(t) * kNegInverse;
-            const std::uint32_t r = std::uint32_t((t + std::uint64_t(m) * kP) >> 32);
-            return std::min(r, r - kP);
-        };
         if (k <= half) {
             const std::uint64_t s = pairs[2 * k];
             ai = add(ai, std::uint32_t(s));
@@ -420,16 +423,46 @@ void zeta2_product_moebius2(std::uint64_t* pairs, std::uint32_t* c, std::uint32_
             c[k] = product(ai, bi);
         }
     };
-    while (i > half + 1) one(--i);
-    while (i >= 8 + 8) {  // sources 2i > i + 7
-        i -= 8;
-        const Vec s0 = even_pairs(pairs + 2 * i), s1 = even_pairs(pairs + 2 * i + 8);
-        const Vec t0 = add(load(pairs + i), s0), t1 = add(load(pairs + i + 4), s1);
-        store(pairs + i, t0);
-        store(pairs + i + 4, t1);
-        store(c + i, sub(high_dwords(product4(t0), product4(t1)), high_dwords(product4(s0), product4(s1))));
+    // Targets [i, i + 8) of the pass of 2 and the product.
+    auto eight = [&](std::uint32_t i) {
+        if (i > half) {
+            store(c + i, high_dwords(product4(load(pairs + i)), product4(load(pairs + i + 4))));
+        } else if (i + 7 <= half && i >= 8) {  // sources 2i > i + 7
+            const Vec s0 = even_pairs(pairs + 2 * i), s1 = even_pairs(pairs + 2 * i + 8);
+            const Vec t0 = add(load(pairs + i), s0), t1 = add(load(pairs + i + 4), s1);
+            store(pairs + i, t0);
+            store(pairs + i + 4, t1);
+            store(c + i, sub(high_dwords(product4(t0), product4(t1)), high_dwords(product4(s0), product4(s1))));
+        } else {
+            for (std::uint32_t k = i + 8; k-- > i;) one(k);
+        }
+    };
+    // Targets [t, t + 8) of the pass of 3 up to n / 3; t >= 4, so the sources 3t > t + 7.
+    auto zeta3_eight = [&](std::uint32_t t) {
+        if (t + 7 <= third) {
+            store(pairs + t, add(load(pairs + t), gather_pairs(pairs + 3 * t, 3)));
+            store(pairs + t + 4, add(load(pairs + t + 4), gather_pairs(pairs + 3 * t + 12, 3)));
+        } else {
+            for (std::uint32_t k = std::min(t + 7, third); k >= t; --k) add_pair(pairs + k, pairs + 3 * k);
+        }
+    };
+    const std::uint32_t blocks = n / 24;
+    if (blocks < 2) {  // small n: the pass of 3 first
+        for (std::uint32_t t = third; t >= 1; --t) add_pair(pairs + t, pairs + 3 * t);
+        for (std::uint32_t k = n; k >= 1; --k) one(k);
+        return;
     }
-    while (i > 1) one(--i);
+    // Top: targets [24 blocks, n] (all above n / 2) and their pass-3 targets [8 blocks, n / 3].
+    for (std::uint32_t t = third; t >= 8 * blocks; --t) add_pair(pairs + t, pairs + 3 * t);
+    for (std::uint32_t k = n; k >= 24 * blocks; --k) one(k);
+    for (std::uint32_t q = blocks - 1; q >= 1; --q) {
+        zeta3_eight(8 * q);
+        eight(24 * q + 16);
+        eight(24 * q + 8);
+        eight(24 * q);
+    }
+    for (std::uint32_t t = std::min(7u, third); t >= 1; --t) add_pair(pairs + t, pairs + 3 * t);
+    for (std::uint32_t k = 23; k >= 1; --k) one(k);
 }
 
 // Moebius pass of p on c: eight targets at a time from i = 4 up (sources ip > i + 7 are unchanged).
@@ -537,25 +570,34 @@ void solve() {
     io::Reader in;
     const auto n = in.read<std::uint32_t>();
     io::advise_sequential(in);
-    // One region: the pairs, with a parsed into their first half; then b, later c; then the stage-2
-    // sums of the rough sweeps (t2: pairs, b2: words). The pairs' first huge page later holds the
-    // output text.
+    // One region, in dwords (W >= n + 65): the pairs [0, 2W), with a parsed into [W, 2W); b's
+    // chunks at [2W, 2W + B), then the stage-2 zeta sums t2; c at [K, K + n] with K >= 1.5 n + 130,
+    // over the pairs' last quarter, the chunk buffer and t2 (the product pass descends, so c_i lands
+    // on pairs above 2i + 16, dead); then the stage-2 Moebius sums b2. The output text goes to the
+    // start (dead pairs). 5 huge pages for n = 10^6.
     constexpr std::size_t kPad = 64;
     const std::size_t words = (n + kPad + 1) / 2 * 2, sums = n / kStage2Min + 1;
+    const std::size_t t2_start = (2 * words + std::min<std::size_t>(n, chunked::kChunkTokens) + 31) / 16 * 16;
+    const std::size_t c_start = (2 * words - n / 2 + 15) / 16 * 16;
+    const std::size_t b2_start = (std::max(t2_start + 2 * sums, c_start + n + 1) + 15) / 16 * 16;
     static_assert(fields::kTextBytes <= std::size_t(1) << 21);
-    auto* region = mem::huge<std::uint32_t>(std::max(3 * (words + sums), fields::kTextBytes / sizeof(std::uint32_t)));
+    auto* region = mem::huge<std::uint32_t>(std::max(b2_start + sums, fields::kTextBytes / sizeof(std::uint32_t)));
     auto* pairs = reinterpret_cast<std::uint64_t*>(region);
-    std::uint32_t* const b = region + 2 * words;
-    auto* const t2 = reinterpret_cast<std::uint64_t*>(region + 3 * words);
-    std::uint32_t* const b2 = region + 3 * words + 2 * sums;
-    io::read_bulk(in, region + 1, n);
-    io::read_bulk(in, b + 1, n);
-
-    interleave_zeta3(region, b, pairs, n);
+    std::uint32_t* const a = region + words;
+    auto* const t2 = reinterpret_cast<std::uint64_t*>(region + t2_start);
+    std::uint32_t* const c = region + c_start;
+    std::uint32_t* const b2 = region + b2_start;
+    chunked::read(in, a + 1, n);
+    // b chunk by chunk: each is interleaved with a, and the rough zeta sweep takes every segment of
+    // pairs as soon as it is complete.
+    ZetaRough rough(pairs, n, t2);
+    chunked::read(in, region + 2 * words, n, [&](const std::uint32_t* values, std::size_t first, std::size_t count) {
+        interleave(a + first + 1, values, pairs + first + 1, std::uint32_t(count));
+        rough.advance(std::uint32_t(first + count));
+    });
+    rough.finish();
     for (const std::uint32_t p : {5, 7, 11, 13}) zeta_pass(pairs, n, p);
-    zeta_rough(pairs, n, t2);
-    std::uint32_t* const c = b;
-    zeta2_product_moebius2(pairs, c, n);
+    zeta32_product_moebius2(pairs, c, n);
     for (const std::uint32_t p : {3, 5, 7, 11, 13}) moebius_pass(c, n, p);
     moebius_rough(c, n, b2);
 

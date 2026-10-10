@@ -1023,7 +1023,8 @@ inline void read_bulk(Reader& in, std::uint32_t* dst, std::size_t count) {
 // product of the leading coefficients and p[0] is corrected by it. The transform of length L' > L
 // that the parent needs is that of length L (kept) and transforms of p mod (x^m + 1) for
 // m = L .. L' / 2 (forward_upper), from the coefficients of p. Per node of length L: one product
-// pass, one inverse, one forward of length L.
+// pass, one inverse, one forward of length L. In lanes, nodes of degree <= 32 are multiplied out
+// by schoolbook (64-bit sums, one Montgomery step per coefficient), then transformed.
 //
 // Nodes are computed depth first; scratch is a stack (ProductTree::scratch_words).
 

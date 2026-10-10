@@ -3,10 +3,9 @@
 f with K <= 10 nonzero terms (i_0 = 0, a_0 != 0), N <= 10^6; print the first N coefficients of
 1/f mod 998244353. 10 s. Input is tiny; output up to 10 MB.
 
-Best judged: ours, 10 ms: [409344](https://judge.yosupo.jp/submission/409344) and
-[409351](https://judge.yosupo.jp/submission/409351) (`main.cpp` of #159); 409351 has one launch
-spike, its clean score is 5 ms. Earlier: 13 ms, [409329](https://judge.yosupo.jp/submission/409329)
-(same version, clean 5 ms). Record when opened (issue #69): 24 ms.
+Best judged: ours, 5 ms: [409581](https://judge.yosupo.jp/submission/409581) (`main.cpp` of
+#159, no launch spike). Earlier, same version with spikes: 10 ms (409344, 409351), 13 ms
+(409329). Record when opened (issue #69): 24 ms.
 
 ## Tests
 
@@ -32,11 +31,19 @@ spike, its clean score is 5 ms. Earlier: 13 ms, [409329](https://judge.yosupo.jp
 
 ## Floor
 
-`lc-amd`, small_dense_02, in-process phases (ms, median of 21 runs): solve 0.53, format 0.66,
-`write()` of 9.9 MB 2.93; total 4.12. Whole process (`tools/judge.py test`) 5.8 ms.
-Output-only floor (read, fill 10^6 values, fixed-width fields in chunks): same run, 21 rounds,
-slowest of small_dense_00..02: floor 6.45, ours 6.83 (ratio 1.066; lc-amd ran ~15% slow then).
-The gap is the solve.
+Floor: `main.cpp` with the solve replaced by a fill of 9-digit values (same chunks, format and
+writes). `lc-bench`, fork to wait, medians of 81 runs (ms): small_dense_02 (w = 7) ours 5.575,
+floor 5.228 (1.066); small_dense_04 (w = 3) 5.253 vs 5.067 (1.037).
+Phases of small_dense_02 (ms): start, fork to the `.preinit_array` entry, 0.92 (an empty program
+the same); setup 0.06 (input 0.017, `Recurrence` constructor 0.032, mapping 0.008); solve 0.55,
+with 0.076 for the huge page's first fault; format 0.66; `write()` of 9.9 MB 3.1-3.2; end,
+`_exit` to wait, 0.15 (empty program 0.13). The gap is the solve's 0.47 ms of compute.
+Judged: every dense case (w = 3 to 7) takes 5 ms, the floor's judged value.
+
+The judge (library-checker-judge source, read 2026-10-10): time is wall time from the first to
+the last 1 ms tick at which the container's `cgroup.procs` lists at least 2 processes (docker's
+init and ours); stdin and stdout are files on a docker volume, and `/var/lib/docker` is tmpfs;
+containers run under `judge.slice`, cpuset 0, an isolated partition. `tools/judge.py` models this.
 
 ## Log
 
@@ -70,6 +77,28 @@ The gap is the solve.
   10 ms, the rest at most 5; `tools/spikes.py` flags nothing);
   [409351](https://judge.yosupo.jp/submission/409351) 01:54 AC 10 ms, clean 5 (spike on
   small_N_02). With 409329: 4/5. New best judged: 10 ms (was 13, 409329).
-- Next: the solve is at the products' pipe bound; what is left is format (0.66 ms, shared
-  `fields.hpp`) and `write()` (2.9 ms, kernel). max_random's long-tap path (0.9 ms) could skip
-  zero sources; it is not the slowest case.
+- 2026-10-10, claude (round 2): no code change; floor re-measured (above). In-process phases on
+  small_dense_02, `lc-bench`, 41-81 runs. Files: `lc-opt-explore/inv_of_formal_power_series_sparse`.
+  - Solve and format fused: `Recurrence::next` with a sink called per group of 16, a step's
+    groups printed during the next step's products. Solve plus format 1.256 ms against
+    0.548 + 0.665 = 1.213 apart. Instructions per 16 values: solve 89, format 125; at 3.0-3.5
+    GHz both issue about 3 per cycle (a guess: no counters on AMD), so the fused loop takes the
+    sum of the two. The first version took 1.447: inside
+    the kernel GCC rebuilt every `fields.hpp` constant from immediates (`mov`, `vmovd`,
+    `vpbroadcastd`) and turned `vpmullw` by 2559 into 4 shifts and adds.
+  - State broadcast once per step into w registers, reused by the 4 blocks (was once per block):
+    kernel in memory, ns per coefficient (median of 3 interleaved runs, each the best of 15),
+    w = 1, 3, 5, 7, 12, 15: 0.182, 0.269, 0.361, 0.454, 0.696, 0.923 against 0.184, 0.275,
+    0.368, 0.475, 0.739, 0.954 (-1 to -6%; w = 7 -4%). Whole process 5.648 vs 5.664 ms (-0.3%,
+    noise). Not kept: in `lib/poly/sparse.hpp`, it re-benches five
+    problems in CI for a gain below its noise.
+  - 4 KiB pages with `MAP_POPULATE` for ring and text: 89 pages take 0.10 ms in `mmap`, the huge
+    page's first fault 0.076. With chunks of 12800 (45 pages): 5.397 vs 5.411 ms (-0.26%, noise).
+    Chunks of 6400 or 3200 go through the Writer: `write()` 3.06 -> 3.39 ms.
+  - `Recurrence` constructor (w = 7): 16 us in a loop, 32 us in process (first touches).
+  - Resubmitted `main.cpp` of #159 (its 5th): [409581](https://judge.yosupo.jp/submission/409581)
+    AC 5 ms, 10.3 MiB, no spike. small_dense_00, 01, 02, 04: 5 ms each; the rest at most 2.
+    New best judged: 5 ms (was 10).
+- Next: nothing here moves the judged time: w = 3 sits at 1.037 times the floor and judges 5 ms
+  as w = 7 does. The broadcast-once kernel can join the next `sparse.hpp` change that has other
+  gains (log of a sparse series uses the same kernel).

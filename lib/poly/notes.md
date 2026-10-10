@@ -1481,6 +1481,14 @@ compositional_inverse_of_formal_power_series 0.9768 (0.9673).
   20000 x 50000, 50000 x 3000, 32769 x 32769, 1000 x 40000) by (f h - 1) mod g = 0. -O2 -Wall
   -Wextra and ASan/UBSan (`lc-amd`).
 
+2026-10-10, claude (issue #69 round 2, inv_of_formal_power_series_sparse; sparse lane): no
+header changed. Two `Recurrence` probes, details in the problem's notes:
+- `homogeneous` with the state broadcast once per step into w registers, shared by the 4 blocks
+  (today: once per block): -1 to -6% in memory for w = 1..15 (w = 7: 0.454 vs 0.475 ns per
+  coefficient, `lc-bench`). Below whole-process noise for inv; worth adding with the next change.
+- A sink per group of 16, the step's groups processed during the next step's products: no gain
+  with `fields.hpp` formatting (both at the same issue rate).
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.

@@ -1,0 +1,714 @@
+{
+ "problem": "composition_of_formal_power_series",
+ "host": "lc-intel",
+ "cpu": "INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz",
+ "compile": "g++ -O2 -std=c++23 -DEVAL -DONLINE_JUDGE -march=x86-64-v3 -madx -mpclmul -mvpclmulqdq -maes -mvaes -o main main.cpp",
+ "commit": "3740c29",
+ "main_sha": "c0f577741b26c1fd",
+ "rounds": 5,
+ "date": "2026-10-10",
+ "cases": {
+  "example_00": {
+   "input_bytes": 22,
+   "output_bytes": 13,
+   "first_line": "5",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.005,
+    0.668,
+    0.673,
+    0.687,
+    0.689
+   ],
+   "floor": [
+    0.449,
+    0.448,
+    0.479,
+    0.439,
+    0.462
+   ]
+  },
+  "hack2_00": {
+   "input_bytes": 158206,
+   "output_bytes": 79104,
+   "first_line": "8000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.919,
+    2.581,
+    2.546,
+    2.561,
+    2.511
+   ],
+   "floor": [
+    0.544,
+    0.475,
+    0.538,
+    0.475,
+    0.46
+   ]
+  },
+  "hack2_01": {
+   "input_bytes": 158223,
+   "output_bytes": 79072,
+   "first_line": "8000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.768,
+    2.533,
+    2.548,
+    2.504,
+    2.51
+   ],
+   "floor": [
+    0.496,
+    0.487,
+    0.489,
+    0.471,
+    0.466
+   ]
+  },
+  "hack2_02": {
+   "input_bytes": 158126,
+   "output_bytes": 79068,
+   "first_line": "8000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.659,
+    2.564,
+    2.496,
+    2.476,
+    2.478
+   ],
+   "floor": [
+    0.496,
+    0.471,
+    0.489,
+    0.474,
+    0.463
+   ]
+  },
+  "hack_00": {
+   "input_bytes": 155558,
+   "output_bytes": 76451,
+   "first_line": "8000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.648,
+    2.612,
+    2.556,
+    2.592,
+    2.507
+   ],
+   "floor": [
+    0.481,
+    0.46,
+    0.493,
+    0.463,
+    0.489
+   ]
+  },
+  "hack_01": {
+   "input_bytes": 121623,
+   "output_bytes": 42451,
+   "first_line": "8000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.577,
+    2.545,
+    2.516,
+    2.481,
+    2.506
+   ],
+   "floor": [
+    0.47,
+    0.463,
+    0.507,
+    0.455,
+    0.465
+   ]
+  },
+  "hack_02": {
+   "input_bytes": 127591,
+   "output_bytes": 48504,
+   "first_line": "8000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.576,
+    2.529,
+    2.587,
+    2.526,
+    2.536
+   ],
+   "floor": [
+    0.483,
+    0.461,
+    0.482,
+    0.45,
+    0.449
+   ]
+  },
+  "max_random_00": {
+   "input_bytes": 158205,
+   "output_bytes": 79132,
+   "first_line": "8000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.612,
+    2.529,
+    2.475,
+    2.487,
+    2.481
+   ],
+   "floor": [
+    0.493,
+    0.54,
+    0.483,
+    0.47,
+    0.457
+   ]
+  },
+  "max_random_01": {
+   "input_bytes": 158286,
+   "output_bytes": 79088,
+   "first_line": "8000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.578,
+    2.544,
+    2.553,
+    2.508,
+    2.504
+   ],
+   "floor": [
+    0.552,
+    0.457,
+    0.478,
+    0.487,
+    0.482
+   ]
+  },
+  "max_random_02": {
+   "input_bytes": 158182,
+   "output_bytes": 79122,
+   "first_line": "8000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.525,
+    2.481,
+    2.502,
+    2.463,
+    2.457
+   ],
+   "floor": [
+    0.465,
+    0.45,
+    0.472,
+    0.456,
+    0.518
+   ]
+  },
+  "max_random_03": {
+   "input_bytes": 158246,
+   "output_bytes": 79123,
+   "first_line": "8000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.582,
+    2.537,
+    2.571,
+    2.554,
+    2.51
+   ],
+   "floor": [
+    0.474,
+    0.468,
+    0.537,
+    0.466,
+    0.65
+   ]
+  },
+  "max_random_04": {
+   "input_bytes": 158130,
+   "output_bytes": 79064,
+   "first_line": "8000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.531,
+    2.52,
+    2.493,
+    2.511,
+    2.486
+   ],
+   "floor": [
+    0.461,
+    0.514,
+    0.487,
+    0.545,
+    0.48
+   ]
+  },
+  "random_00": {
+   "input_bytes": 94702,
+   "output_bytes": 47309,
+   "first_line": "4789",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.424,
+    2.43,
+    2.431,
+    2.417,
+    2.426
+   ],
+   "floor": [
+    0.469,
+    0.556,
+    0.479,
+    0.468,
+    0.444
+   ]
+  },
+  "random_01": {
+   "input_bytes": 84990,
+   "output_bytes": 42481,
+   "first_line": "4294",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.431,
+    2.508,
+    2.354,
+    2.359,
+    2.357
+   ],
+   "floor": [
+    0.526,
+    0.447,
+    0.459,
+    0.519,
+    0.449
+   ]
+  },
+  "random_02": {
+   "input_bytes": 82739,
+   "output_bytes": 41389,
+   "first_line": "4184",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.408,
+    2.431,
+    2.4,
+    2.389,
+    2.428
+   ],
+   "floor": [
+    0.455,
+    0.446,
+    0.454,
+    0.447,
+    0.523
+   ]
+  },
+  "random_03": {
+   "input_bytes": 64585,
+   "output_bytes": 32276,
+   "first_line": "3265",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.48,
+    1.448,
+    1.467,
+    1.471,
+    1.451
+   ],
+   "floor": [
+    0.472,
+    0.45,
+    0.464,
+    0.432,
+    0.455
+   ]
+  },
+  "random_04": {
+   "input_bytes": 131960,
+   "output_bytes": 65998,
+   "first_line": "6676",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    2.567,
+    2.503,
+    2.534,
+    2.471,
+    2.527
+   ],
+   "floor": [
+    0.498,
+    0.467,
+    0.487,
+    0.519,
+    0.451
+   ]
+  },
+  "small_00": {
+   "input_bytes": 94,
+   "output_bytes": 50,
+   "first_line": "5",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.728,
+    0.726,
+    0.696,
+    0.69,
+    0.69
+   ],
+   "floor": [
+    0.552,
+    0.426,
+    0.44,
+    0.45,
+    0.43
+   ]
+  },
+  "small_01": {
+   "input_bytes": 113,
+   "output_bytes": 60,
+   "first_line": "6",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.731,
+    0.718,
+    0.697,
+    0.695,
+    0.691
+   ],
+   "floor": [
+    0.466,
+    0.428,
+    0.444,
+    0.449,
+    0.43
+   ]
+  },
+  "small_02": {
+   "input_bytes": 152,
+   "output_bytes": 79,
+   "first_line": "8",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.695,
+    0.707,
+    0.715,
+    0.707,
+    0.698
+   ],
+   "floor": [
+    0.462,
+    0.43,
+    0.461,
+    0.424,
+    0.452
+   ]
+  },
+  "small_03": {
+   "input_bytes": 14,
+   "output_bytes": 10,
+   "first_line": "1",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.704,
+    0.666,
+    0.693,
+    0.691,
+    0.714
+   ],
+   "floor": [
+    0.444,
+    0.438,
+    0.503,
+    0.434,
+    0.504
+   ]
+  },
+  "small_04": {
+   "input_bytes": 74,
+   "output_bytes": 40,
+   "first_line": "4",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.711,
+    0.681,
+    0.713,
+    0.694,
+    0.691
+   ],
+   "floor": [
+    0.443,
+    0.457,
+    0.455,
+    0.469,
+    0.434
+   ]
+  },
+  "small_05": {
+   "input_bytes": 191,
+   "output_bytes": 100,
+   "first_line": "10",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.747,
+    0.682,
+    0.71,
+    0.692,
+    0.714
+   ],
+   "floor": [
+    0.438,
+    0.437,
+    0.433,
+    0.442,
+    0.434
+   ]
+  },
+  "small_06": {
+   "input_bytes": 112,
+   "output_bytes": 59,
+   "first_line": "6",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.703,
+    0.678,
+    0.736,
+    0.705,
+    0.696
+   ],
+   "floor": [
+    0.455,
+    0.434,
+    0.435,
+    0.427,
+    0.477
+   ]
+  },
+  "small_07": {
+   "input_bytes": 54,
+   "output_bytes": 29,
+   "first_line": "3",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.701,
+    0.675,
+    0.696,
+    0.684,
+    0.693
+   ],
+   "floor": [
+    0.457,
+    0.485,
+    0.555,
+    0.429,
+    0.441
+   ]
+  },
+  "small_08": {
+   "input_bytes": 131,
+   "output_bytes": 68,
+   "first_line": "7",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.702,
+    0.673,
+    0.697,
+    0.694,
+    0.692
+   ],
+   "floor": [
+    0.443,
+    0.446,
+    0.462,
+    0.439,
+    0.431
+   ]
+  },
+  "small_09": {
+   "input_bytes": 14,
+   "output_bytes": 10,
+   "first_line": "1",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.691,
+    0.675,
+    0.758,
+    0.735,
+    0.726
+   ],
+   "floor": [
+    0.437,
+    0.429,
+    0.451,
+    0.445,
+    0.425
+   ]
+  }
+ }
+}

@@ -1,0 +1,350 @@
+{
+ "problem": "bitwise_xor_convolution",
+ "host": "lc-intel",
+ "cpu": "INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz",
+ "compile": "g++ -O2 -std=c++23 -DEVAL -DONLINE_JUDGE -march=x86-64-v3 -madx -mpclmul -mvpclmulqdq -maes -mvaes -o main main.cpp",
+ "commit": "3740c29",
+ "main_sha": "e78b397d34bdd972",
+ "rounds": 5,
+ "date": "2026-10-10",
+ "cases": {
+  "example_00": {
+   "input_bytes": 41,
+   "output_bytes": 32,
+   "first_line": "3",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.894,
+    0.592,
+    0.577,
+    0.605,
+    0.608
+   ],
+   "floor": [
+    0.463,
+    0.444,
+    0.471,
+    0.455,
+    0.457
+   ]
+  },
+  "large_00": {
+   "input_bytes": 648118,
+   "output_bytes": 324025,
+   "first_line": "15",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.316,
+    1.156,
+    1.128,
+    1.112,
+    1.128
+   ],
+   "floor": [
+    0.59,
+    0.612,
+    0.599,
+    0.598,
+    0.574
+   ]
+  },
+  "large_01": {
+   "input_bytes": 1296114,
+   "output_bytes": 648195,
+   "first_line": "16",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.585,
+    1.649,
+    1.613,
+    1.595,
+    1.591
+   ],
+   "floor": [
+    0.763,
+    0.789,
+    0.758,
+    0.738,
+    0.719
+   ]
+  },
+  "large_02": {
+   "input_bytes": 5184369,
+   "output_bytes": 2592311,
+   "first_line": "18",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    3.748,
+    3.326,
+    3.326,
+    3.37,
+    3.356
+   ],
+   "floor": [
+    1.72,
+    1.971,
+    1.758,
+    1.759,
+    1.661
+   ]
+  },
+  "max_random_00": {
+   "input_bytes": 20738704,
+   "output_bytes": 10369048,
+   "first_line": "20",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    12.781,
+    12.12,
+    11.794,
+    11.892,
+    12.049
+   ],
+   "floor": [
+    5.696,
+    5.822,
+    5.652,
+    5.431,
+    5.331
+   ]
+  },
+  "max_random_01": {
+   "input_bytes": 20738511,
+   "output_bytes": 10368979,
+   "first_line": "20",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    12.659,
+    12.488,
+    12.888,
+    12.206,
+    12.967
+   ],
+   "floor": [
+    6.119,
+    6.111,
+    5.73,
+    5.722,
+    5.358
+   ]
+  },
+  "max_random_02": {
+   "input_bytes": 20738089,
+   "output_bytes": 10368602,
+   "first_line": "20",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    13.013,
+    12.791,
+    12.45,
+    12.95,
+    12.852
+   ],
+   "floor": [
+    6.43,
+    6.234,
+    5.643,
+    5.598,
+    5.345
+   ]
+  },
+  "small_00": {
+   "input_bytes": 640,
+   "output_bytes": 317,
+   "first_line": "5",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.619,
+    0.627,
+    0.608,
+    0.639,
+    0.622
+   ],
+   "floor": [
+    0.451,
+    0.446,
+    0.447,
+    0.471,
+    0.462
+   ]
+  },
+  "small_01": {
+   "input_bytes": 1266,
+   "output_bytes": 631,
+   "first_line": "6",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.612,
+    0.605,
+    0.595,
+    0.62,
+    0.605
+   ],
+   "floor": [
+    0.457,
+    0.454,
+    0.442,
+    0.477,
+    0.472
+   ]
+  },
+  "small_02": {
+   "input_bytes": 5062,
+   "output_bytes": 2535,
+   "first_line": "8",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.611,
+    0.598,
+    0.59,
+    0.626,
+    0.604
+   ],
+   "floor": [
+    0.473,
+    0.478,
+    0.447,
+    0.45,
+    0.451
+   ]
+  },
+  "tiny_00": {
+   "input_bytes": 22,
+   "output_bytes": 10,
+   "first_line": "0",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.611,
+    0.574,
+    0.58,
+    0.602,
+    0.572
+   ],
+   "floor": [
+    0.466,
+    0.479,
+    0.462,
+    0.439,
+    0.44
+   ]
+  },
+  "tiny_01": {
+   "input_bytes": 41,
+   "output_bytes": 20,
+   "first_line": "1",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.591,
+    0.571,
+    0.578,
+    0.671,
+    0.573
+   ],
+   "floor": [
+    0.439,
+    0.442,
+    0.462,
+    0.481,
+    0.458
+   ]
+  },
+  "tiny_02": {
+   "input_bytes": 80,
+   "output_bytes": 40,
+   "first_line": "2",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.592,
+    0.576,
+    0.571,
+    0.602,
+    0.566
+   ],
+   "floor": [
+    0.457,
+    0.438,
+    0.441,
+    0.456,
+    0.476
+   ]
+  }
+ }
+}

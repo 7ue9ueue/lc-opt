@@ -1,0 +1,766 @@
+{
+ "problem": "lcm_convolution",
+ "host": "lc-intel",
+ "cpu": "INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz",
+ "compile": "g++ -O2 -std=c++23 -DEVAL -DONLINE_JUDGE -march=x86-64-v3 -madx -mpclmul -mvpclmulqdq -maes -mvaes -o main main.cpp",
+ "commit": "3740c29",
+ "main_sha": "004abbb8148b93ef",
+ "rounds": 5,
+ "date": "2026-10-10",
+ "cases": {
+  "all_zero_00": {
+   "input_bytes": 26,
+   "output_bytes": 12,
+   "first_line": "6",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.124,
+    0.818,
+    0.701,
+    0.873,
+    0.698
+   ],
+   "floor": [
+    0.457,
+    0.546,
+    0.448,
+    0.454,
+    0.449
+   ]
+  },
+  "example_00": {
+   "input_bytes": 26,
+   "output_bytes": 18,
+   "first_line": "6",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    1.055,
+    0.758,
+    0.701,
+    0.813,
+    0.688
+   ],
+   "floor": [
+    0.47,
+    0.433,
+    0.44,
+    0.463,
+    0.447
+   ]
+  },
+  "max_random_00": {
+   "input_bytes": 19778098,
+   "output_bytes": 9888763,
+   "first_line": "1000000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    14.268,
+    13.833,
+    13.473,
+    13.685,
+    13.472
+   ],
+   "floor": [
+    5.68,
+    5.913,
+    5.554,
+    6.791,
+    5.37
+   ]
+  },
+  "max_random_01": {
+   "input_bytes": 19777770,
+   "output_bytes": 9888712,
+   "first_line": "1000000",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    13.735,
+    13.261,
+    14.003,
+    13.353,
+    13.735
+   ],
+   "floor": [
+    6.098,
+    5.897,
+    5.198,
+    6.15,
+    5.903
+   ]
+  },
+  "near_prime_00": {
+   "input_bytes": 19777744,
+   "output_bytes": 9888198,
+   "first_line": "999982",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    14.356,
+    13.644,
+    13.828,
+    13.257,
+    13.757
+   ],
+   "floor": [
+    6.254,
+    6.449,
+    5.577,
+    6.085,
+    5.844
+   ]
+  },
+  "near_prime_01": {
+   "input_bytes": 19777435,
+   "output_bytes": 9887579,
+   "first_line": "999983",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    14.027,
+    13.577,
+    13.628,
+    13.457,
+    13.558
+   ],
+   "floor": [
+    6.284,
+    5.948,
+    5.643,
+    6.53,
+    5.64
+   ]
+  },
+  "near_prime_02": {
+   "input_bytes": 19777218,
+   "output_bytes": 9888817,
+   "first_line": "999984",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    13.54,
+    13.515,
+    13.491,
+    14.269,
+    13.812
+   ],
+   "floor": [
+    6.181,
+    6.415,
+    5.556,
+    6.01,
+    5.375
+   ]
+  },
+  "near_prime_squared_00": {
+   "input_bytes": 19659623,
+   "output_bytes": 9829463,
+   "first_line": "994008",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    14.767,
+    13.705,
+    13.664,
+    13.888,
+    13.892
+   ],
+   "floor": [
+    6.328,
+    6.629,
+    5.554,
+    6.264,
+    5.79
+   ]
+  },
+  "near_prime_squared_01": {
+   "input_bytes": 19659309,
+   "output_bytes": 9829530,
+   "first_line": "994009",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    13.848,
+    13.126,
+    13.426,
+    13.223,
+    13.261
+   ],
+   "floor": [
+    6.046,
+    5.817,
+    7.366,
+    5.953,
+    5.329
+   ]
+  },
+  "near_prime_squared_02": {
+   "input_bytes": 19659079,
+   "output_bytes": 9829510,
+   "first_line": "994010",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    13.483,
+    13.279,
+    13.513,
+    13.119,
+    13.155
+   ],
+   "floor": [
+    6.297,
+    6.099,
+    6.37,
+    6.09,
+    5.62
+   ]
+  },
+  "random_00": {
+   "input_bytes": 7709981,
+   "output_bytes": 3854686,
+   "first_line": "389813",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    5.477,
+    5.32,
+    5.403,
+    5.272,
+    5.351
+   ],
+   "floor": [
+    2.49,
+    2.612,
+    2.639,
+    2.663,
+    2.431
+   ]
+  },
+  "random_01": {
+   "input_bytes": 9158570,
+   "output_bytes": 4578909,
+   "first_line": "463046",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    6.29,
+    6.231,
+    6.255,
+    6.133,
+    6.204
+   ],
+   "floor": [
+    2.818,
+    3.082,
+    3.177,
+    3.126,
+    2.897
+   ]
+  },
+  "random_02": {
+   "input_bytes": 11423870,
+   "output_bytes": 5711764,
+   "first_line": "577624",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    9.16,
+    7.743,
+    8.028,
+    7.698,
+    7.779
+   ],
+   "floor": [
+    3.516,
+    3.656,
+    3.781,
+    3.829,
+    3.414
+   ]
+  },
+  "small_00": {
+   "input_bytes": 22,
+   "output_bytes": 10,
+   "first_line": "1",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.74,
+    0.709,
+    0.712,
+    0.708,
+    0.723
+   ],
+   "floor": [
+    0.483,
+    0.489,
+    0.466,
+    0.454,
+    0.448
+   ]
+  },
+  "small_01": {
+   "input_bytes": 41,
+   "output_bytes": 20,
+   "first_line": "2",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.714,
+    0.703,
+    0.707,
+    0.726,
+    0.702
+   ],
+   "floor": [
+    0.476,
+    0.499,
+    0.482,
+    0.465,
+    0.46
+   ]
+  },
+  "small_02": {
+   "input_bytes": 60,
+   "output_bytes": 28,
+   "first_line": "3",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.728,
+    0.722,
+    0.682,
+    0.701,
+    0.719
+   ],
+   "floor": [
+    0.458,
+    0.458,
+    0.507,
+    0.488,
+    0.46
+   ]
+  },
+  "small_03": {
+   "input_bytes": 82,
+   "output_bytes": 40,
+   "first_line": "4",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.742,
+    0.71,
+    0.691,
+    0.711,
+    0.721
+   ],
+   "floor": [
+    0.448,
+    0.463,
+    0.476,
+    0.479,
+    0.446
+   ]
+  },
+  "small_04": {
+   "input_bytes": 102,
+   "output_bytes": 50,
+   "first_line": "5",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.741,
+    0.708,
+    0.681,
+    0.702,
+    0.703
+   ],
+   "floor": [
+    0.446,
+    0.481,
+    0.484,
+    0.477,
+    0.453
+   ]
+  },
+  "small_05": {
+   "input_bytes": 121,
+   "output_bytes": 60,
+   "first_line": "6",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.738,
+    0.695,
+    0.682,
+    0.704,
+    0.706
+   ],
+   "floor": [
+    0.461,
+    0.471,
+    0.466,
+    0.466,
+    0.439
+   ]
+  },
+  "small_06": {
+   "input_bytes": 140,
+   "output_bytes": 70,
+   "first_line": "7",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.788,
+    0.69,
+    0.688,
+    0.706,
+    0.711
+   ],
+   "floor": [
+    0.48,
+    0.478,
+    0.475,
+    0.453,
+    0.461
+   ]
+  },
+  "small_07": {
+   "input_bytes": 159,
+   "output_bytes": 78,
+   "first_line": "8",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.705,
+    0.682,
+    0.696,
+    0.702,
+    0.722
+   ],
+   "floor": [
+    0.45,
+    0.46,
+    0.493,
+    0.474,
+    0.465
+   ]
+  },
+  "small_08": {
+   "input_bytes": 179,
+   "output_bytes": 90,
+   "first_line": "9",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.698,
+    0.688,
+    0.686,
+    0.709,
+    0.699
+   ],
+   "floor": [
+    0.447,
+    0.447,
+    0.493,
+    0.475,
+    0.45
+   ]
+  },
+  "small_09": {
+   "input_bytes": 203,
+   "output_bytes": 98,
+   "first_line": "10",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.709,
+    0.706,
+    0.684,
+    0.692,
+    0.695
+   ],
+   "floor": [
+    0.46,
+    0.465,
+    0.476,
+    0.48,
+    0.444
+   ]
+  },
+  "small_10": {
+   "input_bytes": 222,
+   "output_bytes": 110,
+   "first_line": "11",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.706,
+    0.703,
+    0.699,
+    0.68,
+    0.701
+   ],
+   "floor": [
+    0.485,
+    0.547,
+    0.493,
+    0.453,
+    0.454
+   ]
+  },
+  "small_11": {
+   "input_bytes": 240,
+   "output_bytes": 119,
+   "first_line": "12",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.698,
+    0.685,
+    0.697,
+    0.686,
+    0.685
+   ],
+   "floor": [
+    0.484,
+    0.475,
+    0.468,
+    0.457,
+    0.468
+   ]
+  },
+  "small_12": {
+   "input_bytes": 261,
+   "output_bytes": 128,
+   "first_line": "13",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.689,
+    0.713,
+    0.694,
+    0.675,
+    0.688
+   ],
+   "floor": [
+    0.464,
+    0.463,
+    0.465,
+    0.464,
+    0.459
+   ]
+  },
+  "small_13": {
+   "input_bytes": 283,
+   "output_bytes": 138,
+   "first_line": "14",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.71,
+    0.704,
+    0.68,
+    0.687,
+    0.686
+   ],
+   "floor": [
+    0.464,
+    0.444,
+    0.471,
+    0.467,
+    0.465
+   ]
+  },
+  "small_14": {
+   "input_bytes": 301,
+   "output_bytes": 149,
+   "first_line": "15",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.716,
+    0.753,
+    0.755,
+    0.695,
+    0.679
+   ],
+   "floor": [
+    0.485,
+    0.473,
+    0.481,
+    0.48,
+    0.445
+   ]
+  },
+  "small_15": {
+   "input_bytes": 320,
+   "output_bytes": 159,
+   "first_line": "16",
+   "verdicts": [
+    "OK",
+    "OK",
+    "OK",
+    "OK",
+    "OK"
+   ],
+   "main": [
+    0.764,
+    0.696,
+    0.699,
+    0.696,
+    0.679
+   ],
+   "floor": [
+    0.47,
+    0.513,
+    0.516,
+    0.462,
+    0.454
+   ]
+  }
+ }
+}

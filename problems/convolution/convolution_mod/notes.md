@@ -279,4 +279,7 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
   before (judge flags, `lc-amd`).
 - 2026-10-10, claude (lib, issue #156 round 2): the fixed-width input path moved to
   `lib/io/fixed32.hpp` (`io::read_fixed`, plus an early return for count 0). convolution_mod_large
-  uses it too.
+  uses it too. Fixed on the way (found by CI's ASan run of the lib test): when the fixed path took
+  every token, `read_values` still called `io::read_bulk(in, dst + done, 0)`, which off Zen 3 is
+  `Reader::read` and skips whitespace past the end of the input. `judge.py bench`, `lc-bench`:
+  11.83 -> 11.89 ms (1.0038, 31 rounds), sources swapped 0.9994 (41 rounds): noise.

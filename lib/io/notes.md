@@ -349,7 +349,14 @@ files on tmpfs.
 
 2026-10-10, claude, issue #156 round 2 (lib extraction): `fixed32.hpp`, `io::read_fixed`, moved
 from convolution_mod's `read_values` (its notes, round 5, have the design measurements). New: an
-early return for count 0. `io.hpp`, `bulk32.hpp` and `bulk64.hpp` are unchanged.
+early return for count 0, and no `read_bulk` call when the fixed path took every token.
+`io.hpp`, `bulk32.hpp` and `bulk64.hpp` are unchanged.
+- Bug found by CI's ASan run (EPYC 9V74, so `read_bulk` is `Reader::read`): the copy called
+  `read_bulk(in, dst + done, 0)` when the fixed path took every token. `Reader::read` skips
+  whitespace before its first token even for count 0; at the end of the input it scans past the
+  buffer (heap overflow with pipe input in `test_bulk_at_end`). The transposed parser (Zen 3) did
+  not, so `lc-amd` passed. convolution_mod's `main.cpp` on main had the same call; its official
+  inputs end with a newline and it passed, but it read past its input on non-Zen 3 CPUs.
 - Users: convolution_mod (moved) and convolution_mod_large (was `io::read_bulk`; 13 of its 21
   large inputs have 9-digit tokens, all_same_00 1-digit ones).
 - convolution_mod_large per case, `lc-bench` (EPYC 7B13), medians of 7 interleaved runs (ms),
@@ -365,7 +372,8 @@ early return for count 0. `io.hpp`, `bulk32.hpp` and `bulk64.hpp` are unchanged.
   on 6 and 3 official cases with 9-digit, 1-digit and mixed tokens, file and pipe input.
 - Tests: `test.cpp` runs the bulk tests through `read_fixed` and a new `test_fixed` (9- and 1-digit
   tokens, one defect at a random place: another width, CRLF, two spaces, a tab; more input after
-  or none; file and pipe), at -O2 (native and x86-64-v3) and with ASan/UBSan.
+  or none; file and pipe), at -O2 (native and x86-64-v3) and with ASan/UBSan, each with
+  `-DIO_BULK32_TRANSPOSE=0` and `1`.
 
 ## Sources
 
@@ -380,6 +388,9 @@ early return for count 0. `io.hpp`, `bulk32.hpp` and `bulk64.hpp` are unchanged.
 
 ## Next
 
+- `Reader::read(dst, 0)` (and `io::read_bulk(in, dst, 0)` off Zen 3) at the end of the input scans
+  past the buffer while skipping whitespace (issue #156, round 2). Return early for count 0 with the
+  next io.hpp change.
 - Bulk write is 1.3 ns per value slower than fixed-width output; the vector work, not the stores,
   is the limit (in-memory: compute 1.4, with movemask 1.7, full 2.4 ns per value).
 - Bulk reads for signed values.

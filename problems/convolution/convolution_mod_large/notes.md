@@ -189,3 +189,6 @@ transform (all large tests), else `ntt::Convolution`. `lib/io` input, output by
   - Next: the score is now the mixed-length parse (max_random_00/01, max_ans_zero_00: 410 on
     `lc-k68`, judged 416-418) against the fixed path (fft_killer: 399, judged 403-405). A parse as
     fast as the fixed path is worth up to ~12 ms; time it on `lc-k68`.
+- 2026-10-10, claude (lib, issue #156 round 3): `write_first` moved to `lib/mem/write_first.hpp`
+  (`mem::write_first`). Same stripped executable as before (judge flags, `lc-amd`). 54/54
+  official tests. Details: `lib/mem/notes.md`.

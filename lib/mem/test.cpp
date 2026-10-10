@@ -1,8 +1,10 @@
-// Tests for lib/mem: alignment, zero fill and the whole range writable, for mappings and arenas.
-#include "lib/mem/huge.hpp"
-
+// Tests for lib/mem: alignment, zero fill and the whole range writable, for mappings and arenas;
+// write_first's stores.
 #include <cstdio>
 #include <cstring>
+
+#include "lib/mem/huge.hpp"
+#include "lib/mem/write_first.hpp"
 
 namespace {
 
@@ -56,11 +58,38 @@ void test_arena() {
     expect(aligned(first, mem::kHugePage), "arena: first take on a huge page");
 }
 
+// write_first on x = base + shift for several ranges: zero exactly at the 2 MiB boundaries in
+// [begin, end). The memory starts as ones so that the stores show.
+template <class T>
+void test_write_first() {
+    constexpr std::size_t kPage = mem::kHugePage / sizeof(T), kCount = 5 * kPage;
+    T* base = mem::huge<T>(kCount + kPage);
+    const std::size_t shifts[] = {0, 1, kPage / 2, kPage - 1};
+    for (const std::size_t shift : shifts) {
+        T* x = base + shift;
+        const std::size_t ranges[][2] = {{0, kCount}, {1, kCount},           {kPage - shift, kCount},
+                                         {7, 7},      {5, kPage / 3},        {kPage + 3, 3 * kPage - shift},
+                                         {0, 1},      {kPage - shift + 1, kCount - 1}};
+        for (const auto& [begin, end] : ranges) {
+            std::memset(base, 0xFF, (kCount + kPage) * sizeof(T));
+            mem::write_first(x, begin, end);
+            bool ok = true;
+            for (std::size_t i = 0; i < kCount; ++i) {
+                const bool boundary = reinterpret_cast<std::uintptr_t>(x + i) % mem::kHugePage == 0;
+                ok &= (x[i] == 0) == (boundary && i >= begin && i < end);
+            }
+            expect(ok, "write_first", sizeof(T) * 1000000 + shift * 1000 + begin);
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
     test_huge();
     test_arena();
+    test_write_first<std::uint32_t>();
+    test_write_first<std::uint64_t>();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

@@ -20,6 +20,7 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.36 ms on `lc-amd`.
   block of 25600 values: 10-byte fields if all are below 10^9, else 11-byte fields (w = v / 100
   as 8 digits, then tens, units, space; tens blank for v < 10). Same scheme as
   `../convolution_mod/fields.hpp`, with the `pshufb` controls generated for either width.
+  Shared, not copied: min_plus_convolution_convex_convex and concave_arbitrary include it.
 - `lib/io` input, `.preinit_array` start and `_exit`, huge-page arrays (text buffer included).
 
 ## Log

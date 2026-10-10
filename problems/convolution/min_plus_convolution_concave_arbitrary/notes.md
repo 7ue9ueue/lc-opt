@@ -19,8 +19,8 @@ Record when the issue opened: 117 ms.
   entry below. An insertion narrows the bracket of the entry it meets only until it can decide pop
   or push; the sweep moves lo up for free each row it checks the top.
 - Each stack entry caches its column's offset into a and its b value: one load per evaluation.
-- Output: `columns.hpp`, fixed-width fields (judge-specific; the checker compares tokens), a copy of
-  `../min_plus_convolution_convex_arbitrary/columns.hpp` (ours, round 1 of #28).
+- Output: `../min_plus_convolution_convex_arbitrary/columns.hpp` (ours, round 1 of #28),
+  fixed-width fields (judge-specific; the checker compares tokens).
 - a, b, c, the stack and the text buffer in 2 MiB pages (`MADV_HUGEPAGE`); `.preinit_array`
   start, `_exit` end; `lib/io` for input.
 
@@ -77,6 +77,9 @@ Record when the issue opened: 117 ms.
   - CI (#102), slowest 3 cases: EPYC 9V74 0.859, Xeon 6973P-C 0.874, EPYC 7763 0.869.
   - Submitted the merged `main.cpp` (#102): [409239](https://judge.yosupo.jp/submission/409239)
     AC 27 ms, 23.1 MiB (was 31 ms).
+- 2026-10-10, claude (issue #156): the local `columns.hpp` copy is gone; the solution includes
+  `../min_plus_convolution_convex_arbitrary/columns.hpp` (it was byte-identical). `main.cpp` changes in one comment line; the
+  judge's command builds byte-identical executables from main's and this `main.cpp` (`lc-amd`).
 - Next: monotone_01/02 sweeps (~16 ms over the others). Idea, untried: for consecutive columns
   (d = 1) the crossing is a rank in a's sorted slopes, and for distance d it lies in a window of
   d rows below the rank of b's gap / d; a value-bucketed rank table could set tight brackets.

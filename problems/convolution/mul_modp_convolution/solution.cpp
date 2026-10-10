@@ -8,7 +8,7 @@
 
 #include "lib/io/io.hpp"
 #include "lib/ntt/ntt.hpp"
-#include "fields.hpp"
+#include "../convolution_mod/fields.hpp"
 
 namespace {
 

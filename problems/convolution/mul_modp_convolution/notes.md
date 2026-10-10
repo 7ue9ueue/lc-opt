@@ -20,7 +20,7 @@ Record when opened (issue #35): 45 ms.
   memory beyond `ntt::Convolution`'s layout.
 - Gather: powers g^x, g^(x+16) by a vector Shoup multiply (16 lanes, step g^16), lane order
   0 1 4 5 2 3 6 7 so that two `vpgatherdq` and two `shufps` give A and B in natural order.
-- Output: scatter c[g^k] into b's buffer, `fields.hpp` (copied from `../convolution_mod`),
+- Output: scatter c[g^k] into b's buffer, `../convolution_mod/fields.hpp`,
   `.preinit_array` start, `_exit`.
 
 ## Log
@@ -62,6 +62,9 @@ Record when opened (issue #35): 45 ms.
   - Same partition by slice of c (2^14, 2^16, 2^17 values) into a prefaulted 4 MiB, then a
     sequential scatter, original output: product + scatter 6.32-6.34 against 5.14. The partition
     pass (scalar bucket tails, 8-byte entries) alone costs more than the random scatter. Dropped.
+- 2026-10-10, claude (issue #156): the local `fields.hpp` copy is gone; the solution includes
+  `../convolution_mod/fields.hpp` (it was byte-identical). `main.cpp` changes in one comment line; the
+  judge's command builds byte-identical executables from main's and this `main.cpp` (`lc-amd`).
 - Next: the product (4.46 ms) is `lib/ntt`'s. Gather and scatter (0.78 + 0.66) resisted
   prefetch, fusion and partitioning. No idea left outside `lib/` worth a round (guess).
 
@@ -69,4 +72,4 @@ Record when opened (issue #35): 45 ms.
 
 - Discrete log reduction of multiplicative convolution mod a prime: standard (Rader-style index
   map). No code read.
-- `lib/ntt`, `lib/io`; `../convolution_mod` for the radix-8 level and `fields.hpp` (copied).
+- `lib/ntt`, `lib/io`; `../convolution_mod` for the radix-8 level and `fields.hpp` (shared).

@@ -2,8 +2,9 @@
 
 c_k = sum over i j = k (mod 2^N) of a_i b_j mod 998244353, N <= 20. 5 s.
 
-Best judged: ours, 21 ms: [409247](https://judge.yosupo.jp/submission/409247) (`main.cpp` of #115).
-Earlier: 22 ms, [409243](https://judge.yosupo.jp/submission/409243) (#108).
+Best judged: ours, 17 ms: [409607](https://judge.yosupo.jp/submission/409607) (`main.cpp` of #295).
+Earlier: 21 ms, [409247](https://judge.yosupo.jp/submission/409247) (#115); 22 ms,
+[409243](https://judge.yosupo.jp/submission/409243) (#108).
 Record when opened (issue #30): 81 ms.
 
 ## Design
@@ -156,6 +157,10 @@ Record when opened (issue #30): 81 ms.
   - Checks: 47/47 official tests (`lc-amd`, slowest 17.1 ms); `stress.py` 300 rounds plus 10 known
     N = 20 cases (in the judge image); random N = 0..14 against `brute.cpp`; ASan/UBSan on all 47
     official cases, file and pipe input.
+  - CI (#295, three EPYC 7763 runners, 21 rounds): ratios 0.852, 0.819, 0.850.
+  - Submitted the merged `main.cpp` (#295): [409607](https://judge.yosupo.jp/submission/409607)
+    AC 17 ms, 22.9 MiB, and [409608](https://judge.yosupo.jp/submission/409608) AC 17 ms; both
+    clean 17 ms (`tools/spikes.py`), slowest case large_01 (n_equals_20, large_00: 16 ms).
 - Next: transforms run 0.69 ns per vector-stage in L1 against 0.63 for lib/ntt's scheduled asm
   (a problem-local generator from `lib/ntt/gen_kernels.py` could close it); levels with an odd
   stage count pay one more pass (radix-2 top); products sit at 13.5 cycles each against about 10

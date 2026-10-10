@@ -17,7 +17,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [convolution_mod_1000000007](problems/convolution/convolution_mod_1000000007) | [23 ms](https://judge.yosupo.jp/submission/409353) | 29 ms |
 | [convolution_mod_2_64](problems/convolution/convolution_mod_2_64) | [43 ms](https://judge.yosupo.jp/submission/409346) | 76 ms |
 | [convolution_F_2_64](problems/convolution/convolution_F_2_64) | [42 ms](https://judge.yosupo.jp/submission/409339) | 409 ms |
-| [bitwise_and_convolution](problems/convolution/bitwise_and_convolution) | [12 ms](https://judge.yosupo.jp/submission/409202) | 26 ms |
+| [bitwise_and_convolution](problems/convolution/bitwise_and_convolution) | [11 ms](https://judge.yosupo.jp/submission/409492) | 26 ms |
 | [bitwise_xor_convolution](problems/convolution/bitwise_xor_convolution) | [13 ms](https://judge.yosupo.jp/submission/409428) | 25 ms |
 | [gcd_convolution](problems/convolution/gcd_convolution) | [14 ms](https://judge.yosupo.jp/submission/409380) | 37 ms |
 | [lcm_convolution](problems/convolution/lcm_convolution) | [16 ms](https://judge.yosupo.jp/submission/409381) | 37 ms |

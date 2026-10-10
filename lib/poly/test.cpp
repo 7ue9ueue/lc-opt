@@ -13,6 +13,7 @@
 #include "lib/poly/calculus.hpp"
 #include "lib/poly/composition.hpp"
 #include "lib/poly/compositional_inverse.hpp"
+#include "lib/poly/divider.hpp"
 #include "lib/poly/exp.hpp"
 #include "lib/poly/holonomic.hpp"
 #include "lib/poly/inverse.hpp"
@@ -1180,6 +1181,36 @@ void test_compositional_inverse() {
     }
 }
 
+// Divider over [0, n) in calls of random multiples of kStep, into a separate array or in place;
+// G random, or P - 1 (kind 1), or zero but at a few indices (kind 2).
+void check_divider(std::size_t n, int kind, bool in_place) {
+    using poly::sparse::Divider;
+    static const auto inv = reciprocal_table(std::size_t(1) << 21);
+    const std::size_t padded = (n + Divider::kStep - 1) / Divider::kStep * Divider::kStep;
+    std::vector<u32> G(padded + 1), g(padded, P);
+    for (std::size_t i = 0; i < padded + 1; ++i) G[i] = kind == 1 ? P - 1 : kind == 2 && pick(100) ? 0 : u32(pick(P));
+    const std::vector<u32> input = G;
+    Divider divider(n);
+    for (std::size_t i = 0; i < n;) {
+        const std::size_t m = std::min(n - i, Divider::kStep * (1 + pick(i < 4096 ? 8 : 600)));
+        divider.divide(G.data() + i, in_place ? G.data() + i : g.data() + i, i, m);
+        i += m;
+    }
+    const std::vector<u32>& got = in_place ? G : g;
+    std::size_t wrong = 0;
+    for (std::size_t i = 0; i < n; ++i) wrong += got[i] != (i == 0 ? 0 : mul(input[i], inv[i]));
+    expect(wrong == 0, "divider", n, wrong);
+}
+
+void test_divider() {
+    for (std::size_t n = 1; n <= 300; ++n) check_divider(n, int(n % 3), n % 2);
+    for (int round = 0; round < 60; ++round) check_divider(1 + pick(round % 4 ? 20000 : 300000), round % 3, round % 2);
+    for (const std::size_t n : {std::size_t(1000000), std::size_t(1) << 20}) {
+        check_divider(n, 0, false);
+        check_divider(n, 1, true);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1195,6 +1226,7 @@ int main() {
     test_sqrt(fx);
     test_recurrence();
     test_holonomic();
+    test_divider();
     test_compose();
     test_projection();
     test_compositional_inverse();

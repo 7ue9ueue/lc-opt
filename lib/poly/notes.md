@@ -11,6 +11,7 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
 - `sparse.hpp`: linear recurrences with few taps, for series with few nonzero terms (issues
   #69-#73); independent of the transform layer. `holonomic.hpp` on top of it: recurrences with
   coefficients linear in n (exp, pow, sqrt of a sparse series) and bulk `inverses`.
+  `divider.hpp`: g = G / n range by range (log of a sparse series).
 - `composition.hpp`: f(g) mod x^n by Kinoshita and Li's algorithm (issue #67); its own bottoms
   and tables on top of the transform layer. `projection.hpp`: power projection, the same levels
   run forward (issue #68); `compositional_inverse.hpp` on top of it and `pow.hpp`.
@@ -225,7 +226,7 @@ it (a ring, or one array). For 1/f: taps (i_k, -a_k / a_0), r = [1 / a_0].
 `Holonomic` (`holonomic.hpp`): n g[n] = sum over taps (d, a, b) of (a + b n) g[n - d], g[0]
 given, at most 16 taps. exp: (d, d a_d, 0). pow f^e (f[0] = 1): (d, (e + 1) d f_d, -f_d); sqrt
 the same with e = 1/2. log is `Recurrence` on G = n g (taps (d, -f_d), r = n f_n) and then
-G ⊙ `inverses`. Same `next` contract as `Recurrence`; the constructor also takes the total count.
+`Divider` (below). Same `next` contract as `Recurrence`; the constructor also takes the total count.
 - The jump matrix of `Recurrence` depends on n here. Block of 16 at n, G = g[n, n + 16): with
   θ = x d/dx and A, B, B' the sums of a x^d, b x^d, b d x^d over short taps,
   (1 - B)(n + θ) G - (A + B') G = R, R the terms reaching before the block. F (the solution for
@@ -242,6 +243,25 @@ G ⊙ `inverses`. Same `next` contract as `Recurrence`; the constructor also tak
 - Reciprocals 2^32 / m: odd m by `batch_inverses` per `next` call (step 2); even m from a table
   of the first half, 2^32 / m = (2^32 / (m / 2)) / 2, with the 1/2 folded into the even lanes of
   V, V', Q (`columns(..., true)`). The table (2 MiB at N = 10^6) is in transparent huge pages.
+
+`Divider` (`divider.hpp`): g[n] = G[n] / n, called on consecutive ranges (multiples of 64 but
+the last), in place or not. For log: G from `Recurrence` in chunks, divided after the chunk's
+history is saved.
+- 2^32 / n: odd n by batch inversion, 4 chains of 8 lanes, a chain the 8 odd n of one block of
+  16; even n = 2m from a table of 2^32 / (2m) at m (2 MiB at N = 10^6, huge pages). Blocks write
+  the table below N / 2 and read it at n / 2, so a call is cut into pieces [a, b) with b <= 2a
+  (and at N / 2); the first 32 entries are filled at construction.
+- A piece: prefix products p_j = p_(j-1) x_j / 2^32 (Montgomery products, lazy in [0, 2P)),
+  stored; the 32 lane totals inverted by a vector product tree with one scalar inversion at the
+  root; backward, the odd reciprocals p_(j-1) q_j / 2^32 overwrite the prefixes; then the blocks
+  in order: G times the reciprocals, final values in [0, P).
+- Pieces below N / 2 invert 2x instead of x: that is the table's entry for odd m, so only the
+  even half of a table block is halved; their products take the doubled entries. Above N / 2,
+  both factors come widened from memory (`vpmovzxdq`) into the qword lanes of the products, with
+  no interleave.
+- Costs: 30 `vpmuludq` per 16 values (prefix 6, backward 12, products 12). `lc-amd`, 10^6 values
+  in chunks of 25600: 0.447 ms (forward ~0.09, backward ~0.13, blocks ~0.23); about 65% of the
+  two multiply pipes.
 
 ## Composition
 
@@ -654,6 +674,19 @@ products 1.77 and 1.69).
   is neutral either way); a radix-4 asm kernel with a stride separate from its count would let
   pruned levels (here, and in composition) run at asm speed; `power` at n = 8000 costs 251 µs
   (log_derivative 105, exp 146; inverse alone 84), a fifth of this problem.
+
+2026-10-10, claude (issue #71, log_of_formal_power_series_sparse):
+- New `divider.hpp` (`Divider`, design under Sparse); `sparse.hpp` and `holonomic.hpp`
+  unchanged, so the inv and exp bundles are unchanged. Tests: against G / n for every
+  n = 1 .. 300 and 60 random sizes up to 3 10^5, and 10^6, 2^20; calls of random multiples of 64,
+  in place and into a separate array; G random, all P - 1, or mostly zero. Mutations (no odd-lane
+  offsets, no halving of the table's even entries, no 1/2 in written pieces) fail them.
+- Steps and the probes that ruled out memory: problems/polynomial/log_of_formal_power_series_sparse/notes.md.
+  In process, 10^6 values: 0.58 -> 0.447 ms. GCC kept the 4 chains rolled with their vectors on
+  the stack until `#pragma GCC unroll`.
+- Zen 3 throughput (`lc-amd`, asm loops of 12 independent ops per iteration): `vpmuludq` 2 per
+  cycle, `vpsrlq` 2, `vpaddq` 4, `vpblendd` 4, `vperm2i128` 1; 6 `vpmuludq` + 6 `vpsrlq`
+  4.15 cycles (the shifts share a pipe with the multiplies), 6 `vpmuludq` + 6 `vpaddq` 4.28.
 
 ## Sources
 

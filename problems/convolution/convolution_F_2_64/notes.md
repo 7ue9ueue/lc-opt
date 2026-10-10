@@ -18,11 +18,23 @@ Best judged: ours, 44 ms: [409295](https://judge.yosupo.jp/submission/409295) (c
 - One transform length 2^l >= N + M - 1. Basis change of a and b (skipping their zero upper
   halves), forward transform of a, then one depth-first pass that transforms b, multiplies it into
   a and transforms a back block by block (32 KiB blocks in L1), then the basis change back.
-- Field multiply, 4 lanes: two `vpclmulqdq` (lanes 0/2 and 1/3), unpack, reduction by shifts plus
-  a `vpshufb` table for the top nibble. Fallbacks: xmm `pclmulqdq`, then portable (both tested).
-- Basis change: the top Taylor expansion (16 rows of 2^16) runs in one pass as a Taylor shift by
-  x with one carry, on 128-column blocks right to left; rows of 2^K <= 256 single words go four at
-  a time through a 4x4 transpose; column steps run on column blocks of at most 64 KiB.
+- Field multiply-add, 4 lanes: two `vpclmulqdq` (lanes 0/2 and 1/3), unpack, reduction by shifts
+  (`high << 1` as `vpaddq`) plus a `vpshufb` table for the top nibble; the last shift's term is
+  added last (an empty asm stops GCC reassociating it). Fallbacks: xmm `pclmulqdq`, then portable
+  (both tested).
+- Transform passes: three stages per pass (eight vectors, four independent products per stage)
+  above stage 5, then stages 5-4, then two passes over 16-word groups: stages 3-2, and stages 1-0
+  after a 4x4 transpose. Group twiddles step in registers (one XOR with a table entry chosen by
+  ctz(g + 1)). The forward transform leaves each 16-word group transposed; the inverse starts
+  there.
+- Basis change: change_basis<4> is a register kernel whose XOR list is recorded at compile time by
+  running the same recursion on element indices. L = 20: the column step (change_basis<4> across
+  16 rows) runs inside the one-pass top Taylor step (Taylor shift by x, 128-column blocks, right
+  to left). L = 16 (rows of 512 KiB, the size of L2) in three passes: the top four Taylor levels
+  in sheared columns (g_r[J] = f_r[J - r] turns the shift into a 16-element superset sum per
+  column, in place), then per 32 KiB block the bottom four levels and the row step (four rows at
+  a time through a 4x4 transpose), then the column step on slices of two lines per row gathered
+  into contiguous buffers.
 - `lib/io` input (`read_bulk`); `.preinit_array` start, `_exit`.
 - Output (`fields.hpp`, judge-specific): blocks of 3104 values. A block where at least 1/8 of
   the values are below 2^53 goes through `write_array`; otherwise every value is right-aligned in
@@ -32,12 +44,22 @@ Best judged: ours, 44 ms: [409295](https://judge.yosupo.jp/submission/409295) (c
 
 ## Costs (lc-amd, gen_max, ms, in-process stamps)
 
-read 2.4, basis change of a 2.1, of b 2.1, forward a 5.8, fused b forward + product + inverse
-11.8, basis change back 4.3, format 4.9, `write()` to tmpfs 7.4. Whole process ~44.
+Round 3 (TSC at 3.05 GHz; core about 3.49 GHz, TSC = 0.874 core cycles): read 2.55, basis change
+of a 1.25, of b 1.15, forward a 5.24, fused b forward + product + inverse 10.6, basis change back
+2.5, format and `write()` to tmpfs 11.2. Whole process ~38 (`judge.py`). Main before round 3,
+same harness: 2.55, 2.1, 2.05, 6.0, 12.1, 4.3, 11.2.
 
-- Zen 3 `vpclmulqdq` ymm: 4.5 TSC ticks per pair (one multiply of 4 lanes), the bottleneck;
-  the transforms do ~31.5M 64-bit products, ~14.5 ms at that rate, so they run at ~80% of it.
-  A reduction by two more clmul folds is 2.3x slower (10.5 ticks).
+- Zen 3, core cycles (`ub_mix`, round 3): `vpclmulqdq` ymm alone 2.0 each, so 4.0 per vector
+  multiply. The multiply's whole instruction mix, independent: 4.91; + load, store and two
+  butterfly XORs: 5.07. Shuffle-port ops (unpack, shift, `vpshufb`) beyond the four that the two
+  clmuls leave free cost ~0.45 each (without srl60 + `vpshufb`: 4.00). Loads, stores and XORs are
+  nearly free.
+- Multiply + XOR latency 12.8 cycles (13.7 before the late-shift order). Chains in registers: 1:
+  12.8, 2: 7.7, 3: 6.2, 4: 5.8, 8: 5.7 cycles per multiply. The transform loops run at one
+  iteration per iteration-latency (little overlap): radix-4 6.6-6.9, radix-8 6.35-6.45, group
+  passes 6.8 (stages 3-2) and 7.8 (1-0), in-place multiply 5.5.
+- Transforms: ~31.5M products; at 5.8 cycles per 4 they would take ~13 ms, now 15.8.
+- A reduction by two more clmul folds is 2.3x slower (round 1).
 - `write()` of 21 MB into tmpfs costs 7.4 ms; `lib/io/notes.md` found it irreducible.
 
 ## Log
@@ -79,5 +101,45 @@ read 2.4, basis change of a 2.1, of b 2.1, forward a 5.8, fused b forward + prod
   Best judged stays 46 ms (2/5 for this version).
 - 2026-10-09, audit (claude): resubmitted #119's `main.cpp`, [409295](https://judge.yosupo.jp/submission/409295)
   AC 44 ms (3/5), no spike: large cases 40-44 ms against 44.3 expected (`judge.py bench`).
-- Next: the basis change (~8.5 ms, ~20 XORs per element at the store limit would be ~2 ms per
-  change); `write()` (7.4 ms) and the transforms (~80% of the PCLMUL limit) are near their floors.
+- 2026-10-09, claude (round 3, assembly pass). Survey of candidates first (from each problem's
+  notes): gcd/lcm convolution (compute ~4.5 ms over an 11.3 ms floor, memory-bound sweeps),
+  mul_mod2n (~8 ms compute, half in lib/ntt asm kernels), min_plus concave (branchy, load-latency
+  bound), bitwise_xor (radix-16 already generated). Picked this one: ~26 of 44 ms compute, all
+  compiler-generated. lc-amd, judge flags; harness timings are medians of 15-31 runs on 2^20
+  random words (scratch harnesses `hb_cb`, `hb_stage`, `sp_test`, `ub_mix`).
+  - Pieces of the inverse basis change before: 4.20 = columns<20,16> 0.39 + 16 x change_basis<16>
+    3.24 (column step 1.67, row step 1.01, taylor<2^16,256> 0.61) + top Taylor 0.57. An 8 MiB copy
+    takes 0.2 ms: the cost is in-cache work, not DRAM.
+  - change_basis<4> as a register kernel (16 loads, 44 XORs, 16 stores): row step 1.01 -> 0.54;
+    on 512 KiB strides worse, 0.39 -> 1.07 (16 rows share one L1 set and one L2 set).
+  - Column slices of one line gathered into a buffer: column step 1.67 -> 0.86 (gather and
+    scatter alone 0.55). Software prefetch (T0, T1, next 1-2 slices) and `prefetchw` before the
+    scatter: no gain or worse. Two lines per row visit into two buffers: 0.82 (kept); one 16-word
+    buffer 0.90, four lines 0.86. Gather alone 0.24, scatter alone 0.35.
+  - L = 20 column step inside the top Taylor pass: inverse 3.16 -> 2.62.
+  - Top four levels of taylor<2^16,256> as one sheared pass: 0.39 -> 0.22; three-pass
+    change_basis<16>: inverse 2.59 -> 2.46.
+  - `high << 1` as `vpaddq`: forward transform 5.93 -> 5.77, fused pass 12.00 -> 11.70.
+  - Stages 2-0: the 8-word kernel was one dependency chain (12.1 cycles per vector multiply,
+    1.70 ms per transform). 32-word kernel after 4x4 transposes: 1.07; restructured to cut
+    spills: 1.14; output left transposed: 1.05. 16-word kernel for stages 3-0: 1.46 (chain four
+    multiplies deep). Pairs down to stage 2 plus a kernel for stages 1-0: forward 5.40, fused 10.93.
+  - Group passes for stages 3-2 and 1-0 with twiddles stepped in registers instead of scalar
+    lookups and GPR broadcasts: forward 5.27, fused 10.65.
+  - Radix-4 loop with two columns interleaved: 8.04 cycles per multiply (spills; worse).
+    Software-pipelined radix-4 (level 2 of column j with level 1 of j + 4): 6.31 vs 6.62 on long
+    loops, 7.09 vs 6.88 on 4-iteration calls. Not kept.
+  - Late shift term in the reduction (empty asm): latency 13.7 -> 12.8; forward 5.21, fused 10.56.
+  - Radix-8 passes: 6.35 vs 6.62 cycles per multiply; forward 5.14, fused 10.49.
+  - perf on lc-intel (x86-64-v3 + extensions, gen_max x10): triple_forward 15.8%, format 9.8%,
+    triple_inverse 7.2%, input parser 6.2%, kernel ~12%, group passes 4%, column steps 2.9%.
+  - Result: `judge.py bench` vs main, 21 rounds, 6 slowest cases: 43.79 -> 38.12 ms, ratio 0.867.
+    `judge.py test` 51/51 (slowest 37.2). Stress 400 rounds vs `brute.cpp` (judge flags,
+    ASan/UBSan, x86-64-v3 + PCLMUL, portable); 41 random cases at every length 2^4..2^20 against
+    main's binary for the judge, PCLMUL and portable builds; ASan exact on gen_max, small_values,
+    all_same, all_ones, many_ones.
+- Next: the transform loops run at ~6.4 cycles per vector multiply against 5.7 with eight
+  independent chains: a hand-scheduled asm loop with two columns in flight and no spills
+  (~1.5 ms if it reaches 5.8). Fuse the pointwise product into the stage 1-0 group passes (shared
+  twiddles, no store and reload). Column gather and scatter still ~0.4 ms per inverse change;
+  top Taylor and bottom four levels of taylor<2^16> as sheared passes with unaligned loads.

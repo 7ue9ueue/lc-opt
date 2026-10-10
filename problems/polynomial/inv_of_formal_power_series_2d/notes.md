@@ -8,7 +8,8 @@ Tests (pinned commit, 28): 707 x 707; randomSquare 1045 x 478, 550 x 909, 440 x 
 50000 x 10, 2 x 250000, 250000 x 2; 500000 x 1, 1 x 500000; maxDeg 389813 x 1, 463046 x 1,
 53336 x 9; random 389813 x 1, 463046 x 1, 53336 x 6, 429249 x 1, 277012 x 1; five with N, M <= 10.
 
-Best judged: none yet.
+Best judged: ours, 28 ms with a +8 ms launch spike, clean 20 ms:
+[409565](https://judge.yosupo.jp/submission/409565) (`main.cpp` of #276).
 Record when opened (issue #88): 197 ms.
 
 ## Design
@@ -30,8 +31,14 @@ Record when opened (issue #88): 197 ms.
   rows there (f is stored at that step's shift); g holds rows below that step's start; the
   scratch holds the transform of g_k and the earlier steps' work. 10 MB of arrays at 707 x 707
   (was 16).
+- Few rows (3 <= R <= 32, when the cost model says so; on the tests R = 9 and 10, and 6 for
+  53336 x 6): row by row in a transform domain of length n >= 2C - 1. g_i = -g_0 (sum over
+  0 < t <= i of f_t g_(i-t)) mod y^C: the transforms F_t of f's rows and G_t of g's rows (each
+  computed once), the sum as one inverse of a sum of leaf products (`detail::LeafProductSum`,
+  a bottom for `inverse_with`), truncated, then a cyclic product with G_0. 5 (R - 1) transforms
+  and (R - 1)(R + 2) / 2 leaf products of length n, against ~10 transforms of length 2RC.
 - Orientation: the plan's cost model (transform word-levels and leaf products) picks Newton in x
-  or in y (f transposed). A single row or column is the 1-D inverse.
+  or in y (f transposed), and the method. A single row or column is the 1-D inverse.
 - Cost against the 1-D inverse of N M coefficients: twice the transform length (the y padding of
   products truncated mod y^C), the same count. At 707 x 707: run 15.13 ms in process (`lc-bench`,
   warm), of which the last step (2^20) 8.04 (forward of g_k 1.30, product with f 3.36, product
@@ -82,7 +89,22 @@ mapping and exit, as in the floor.
     1536 points for 1413) would bring 707 x 707 to ~160M (guess). Blocked last step in the
     Kronecker layout (two halves at 2^19): 11 transforms and 7 leaf products of 2^19 against 5
     and 2 of 2^20, worse. A third-order last step from N/3: the step before stays at 2^19, no gain.
-- Next: small row counts (N or M <= ~12: 10 x 50000, 53336 x 9, 53336 x 6) by products of
-  rows in a y transform domain (relaxed in x: ~5R transforms of length 2M and R^2/2 leaf
-  products against ~10 transforms of 2NM); the tensor layout with truncated y transforms for
-  the square-ish shapes.
+  - Merged as #276 (CI: correctness only, no baseline). Submitted its `main.cpp` twice:
+    [409565](https://judge.yosupo.jp/submission/409565) AC 28 ms, 17.3 MiB (spike: randomSquare_03
+    28, peers 20); [409566](https://judge.yosupo.jp/submission/409566) AC 28 ms (spikes:
+    degX100_00 28, random_02 26, random_04 19). Clean score 20 ms both times (`tools/spikes.py`);
+    16 cases within 9 ms of the max, so P(clean run) ~0.45.
+  - Row by row for few rows (Design): `lc-bench`, `timeall.py` 11 rounds, whole process (ms),
+    Newton -> row by row: degX10 19.97 -> 17.10, degX100 19.96 -> 17.04, degY10 20.32 -> 17.33,
+    maxDeg_02 (53336 x 9) 20.27 -> 15.41, random_02 (53336 x 6) 17.15 -> 9.99; square_00 20.07,
+    20.13 (unchanged). The cost model's estimates track the runs within ~5% (both methods, both
+    orientations, 10 shapes; in process). Checks: 28/28 official tests, `stress.py` 300 rounds,
+    ASan/UBSan of main.cpp on all cases and of the lib/poly tests (which run both methods on
+    every shape with 3 <= rows <= 12 and on the large shapes with rows <= 16); 4 more mutations
+    (row-by-row pairs shifted, no negation, one term short, the next group's windows from the
+    current group) fail them.
+- Next: the square-ish shapes and 5000 x 100 (~20 ms, all at a 2^20 last step) need another
+  algorithm: the tensor layout (y transforms once per row, x transforms on columns; ~18% fewer
+  word-levels at 707 x 707 with a truncated y transform of 1536 points and a blocked last step
+  at X = 512, estimate). Row by row: F_t's windows [w a, a] stored once (each is used up to R - 1
+  times; fill_windows is ~15% of a leaf product, guess).

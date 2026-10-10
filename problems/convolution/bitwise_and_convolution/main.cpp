@@ -1234,9 +1234,9 @@ template <bool Inverse, int K>
             if (!(k & bit)) x[k] = step<Inverse>(x[k], x[k | bit]);
 }
 
-// x[i] lane j <-> x[j] lane i.
-[[gnu::always_inline]] inline void transpose(Vec* x) {
-    Vec t[8], u[8];
+// The 4x4 transposes of x[0, 4) and of x[4, 8) inside each 128-bit lane.
+[[gnu::always_inline]] inline void transpose_lanes(Vec* x) {
+    Vec t[8];
 #pragma GCC unroll 4
     for (int k = 0; k < 8; k += 2) {
         t[k] = _mm256_unpacklo_epi32(x[k], x[k + 1]);
@@ -1244,16 +1244,24 @@ template <bool Inverse, int K>
     }
 #pragma GCC unroll 2
     for (int k = 0; k < 8; k += 4) {
-        u[k] = _mm256_unpacklo_epi64(t[k], t[k + 2]);
-        u[k + 1] = _mm256_unpackhi_epi64(t[k], t[k + 2]);
-        u[k + 2] = _mm256_unpacklo_epi64(t[k + 1], t[k + 3]);
-        u[k + 3] = _mm256_unpackhi_epi64(t[k + 1], t[k + 3]);
+        x[k] = _mm256_unpacklo_epi64(t[k], t[k + 2]);
+        x[k + 1] = _mm256_unpackhi_epi64(t[k], t[k + 2]);
+        x[k + 2] = _mm256_unpacklo_epi64(t[k + 1], t[k + 3]);
+        x[k + 3] = _mm256_unpackhi_epi64(t[k + 1], t[k + 3]);
     }
+}
+
+// x[i] lane j = f[j] lane i. The loads swap the two off-diagonal 4x4 blocks with 128-bit broadcasts
+// and blends, which run on any of Zen 3's 4 vector pipes (shuffles run on 2); then each 128-bit
+// lane is transposed.
+[[gnu::always_inline]] inline void load_transposed(const Vec* f, Vec* x) {
+    const auto* half = reinterpret_cast<const __m128i*>(f);  // half[2k], half[2k + 1]: f[k] low, high
 #pragma GCC unroll 4
     for (int k = 0; k < 4; ++k) {
-        x[k] = _mm256_permute2x128_si256(u[k], u[k + 4], 0x20);
-        x[k + 4] = _mm256_permute2x128_si256(u[k], u[k + 4], 0x31);
+        x[k] = _mm256_blend_epi32(f[k], _mm256_broadcastsi128_si256(half[2 * k + 8]), 0xF0);
+        x[k + 4] = _mm256_blend_epi32(_mm256_broadcastsi128_si256(half[2 * k + 1]), f[k + 4], 0xF0);
     }
+    transpose_lanes(x);
 }
 
 // Levels of K vector-index bits from stride h (vectors) on f[0, count).
@@ -1279,17 +1287,21 @@ void sweeps(Vec* f, std::size_t count, int from, int to) {
     if (to - from == 1) sweep<Inverse, 1>(f, count, std::size_t(1) << from);
 }
 
-// The lane bits and the 3 vector-index bits above them, tile by tile (8 vectors): the vector bits,
-// a transpose, then the former lane bits. The transform leaves each tile transposed; the inverse
-// takes transposed tiles and restores them.
+// The lane bits and the 3 vector-index bits above them in each tile of 8 vectors: a sweep does the
+// vector bits, then each tile is transposed and its former lane bits done. The transform leaves
+// each tile transposed; the inverse takes transposed tiles and restores them. On Zen 3, one pass
+// doing both took 32 cycles per tile in L1; these two take 27.5. The transform also prefetches
+// `next` (count vectors): its first pass is light, and its pieces come from L3 right after parsing.
 template <bool Inverse>
-void tiles(Vec* f, std::size_t count) {
+void tiles(Vec* f, std::size_t count, const Vec* next) {
+    sweep<Inverse, 3>(f, count, 1);
     for (std::size_t g = 0; g < count; g += 8) {
+        if constexpr (!Inverse)
+#pragma GCC unroll 4
+            for (int line = 0; line < 4; ++line)
+                _mm_prefetch(reinterpret_cast<const char*>(next + g) + 64 * line, _MM_HINT_T0);
         Vec x[8];
-#pragma GCC unroll 8
-        for (int k = 0; k < 8; ++k) x[k] = f[g + k];
-        butterflies<Inverse, 3>(x);
-        transpose(x);
+        load_transposed(f + g, x);
         butterflies<Inverse, 3>(x);
 #pragma GCC unroll 8
         for (int k = 0; k < 8; ++k) f[g + k] = x[k];
@@ -1306,7 +1318,7 @@ void row_levels(std::uint32_t* row, int bits) {
     const std::size_t piece = std::size_t(1) << piece_bits;
     if constexpr (Inverse) sweeps<true>(f, count, piece_bits, bits - 3);
     for (std::size_t p = 0; p < count; p += piece) {
-        tiles<Inverse>(f + p, piece);
+        tiles<Inverse>(f + p, piece, f + p + piece);  // past the last piece: prefetches never fault
         sweeps<Inverse>(f + p, piece, 3, piece_bits);
     }
     if constexpr (!Inverse) sweeps<false>(f, count, piece_bits, bits - 3);

@@ -19,6 +19,7 @@
 #include "lib/poly/divider.hpp"
 #include "lib/poly/evaluation.hpp"
 #include "lib/poly/exp.hpp"
+#include "lib/poly/factorials.hpp"
 #include "lib/poly/holonomic.hpp"
 #include "lib/poly/interpolation.hpp"
 #include "lib/poly/inverse.hpp"
@@ -1917,6 +1918,84 @@ void test_interpolation() {
     for (int trial = 0; trial < 30; ++trial) check_interpolation(1 + pick(20000), trial % 4);
 }
 
+// Factorials and product chains (factorials.hpp).
+
+// factorial and factorials against running products for every n < kFactorialLimit at random,
+// table boundaries and the limit; invert against products; scan_chunk's bounds.
+void test_factorial_values() {
+    static std::vector<u32> fact(poly::kFactorialLimit);
+    fact[0] = 1;
+    for (u32 i = 1; i < poly::kFactorialLimit; ++i) fact[i] = mul(fact[i - 1], i);
+    for (u32 n : {0u, 1u, 2u, 1023u, 1024u, 1025u, 2047u, 2048u, poly::kFactorialLimit - 1})
+        expect(poly::factorial(n) == fact[n], "factorial", n);
+    for (int trial = 0; trial < 300; ++trial) {
+        poly::Lanes n;
+        for (u32& x : n) x = trial % 3 == 0 ? u32(pick(3000)) : trial % 3 == 1 ? u32(1024 * pick(1025)) : u32(pick(poly::kFactorialLimit));
+        if (trial % 7 == 0) n[pick(32)] = poly::kFactorialLimit - 1;
+        const poly::Lanes f = poly::factorials(n);
+        bool ok = true;
+        for (int s = 0; s < 32; ++s) ok &= f[s] == fact[n[s]];
+        expect(ok, "factorials", trial);
+        poly::Lanes g = f;
+        poly::invert(g);
+        ok = true;
+        for (int s = 0; s < 32; ++s) ok &= mul(f[s], g[s]) == 1;
+        expect(ok, "invert lanes", trial);
+    }
+    for (std::size_t size : {0, 1, 2, 33, 1000}) {
+        std::vector<u32> x(size);
+        for (u32& v : x) v = rng() % 4 ? 1 + u32(rng() % (P - 1)) : rng() % 2 ? 1 : P - 1;
+        std::vector<u32> y = x;
+        poly::invert(y);
+        bool ok = true;
+        for (std::size_t i = 0; i < size; ++i) ok &= mul(x[i], y[i]) == 1;
+        expect(ok, "invert", size);
+    }
+    for (std::size_t n = 1; n < 1 << 21; n = n < 5000 ? n + 1 : n * 3 / 2 + pick(100)) {
+        const std::size_t c = poly::detail::scan_chunk(n);
+        const bool minimal = c == 16 || 32 * (c - 32) < n;  // the previous candidate is c - 32
+        expect(c % 16 == 0 && c / 16 % 2 == 1 && 32 * c >= n && 32 * c <= n + 1023 && minimal, "scan_chunk", n);
+    }
+}
+
+// Chains through scan, forward and reversed, against scalar products: lane s multiplies by
+// (base_s + j step) / 2^32 at step j. Starts below 2P, bases and steps random or near 0 and P.
+void test_chains() {
+    const u32 r_inverse = power(to_m(1), P - 2);
+    for (int trial = 0; trial < 40; ++trial) {
+        const std::size_t steps = 8 * (1 + pick(trial < 20 ? 4 : 64));
+        poly::Lanes x, base;
+        for (int s = 0; s < 32; ++s) {
+            x[s] = trial % 5 == 0 ? 2 * P - 1 - u32(pick(4)) : u32(rng() % (2 * P));
+            base[s] = trial % 4 == 0 ? P - 1 - u32(pick(4)) : u32(rng() % P);
+        }
+        const u32 step = trial % 3 == 0 ? P - to_m(1) : trial % 3 == 1 ? to_m(1) : u32(rng() % P);
+        poly::detail::Chain<> up(x, base, step);
+        poly::detail::Chain<true> down(x, base, step);
+        std::vector<u32> forward(32 * steps), reversed(32 * steps);
+        poly::detail::scan(steps, [&](std::size_t j, int s, poly::detail::Vec a, poly::detail::Vec b) {
+            poly::detail::store_unaligned(forward.data() + s * steps + j, a);
+            poly::detail::store_unaligned(reversed.data() + s * steps + j, b);
+        }, up, down);
+        bool ok = true;
+        for (int s = 0; s < 32; ++s) {
+            u32 term = x[s] % P;
+            for (std::size_t j = 0; j < steps; ++j) {
+                const std::size_t block = j / 8 * 8, t = j % 8;
+                ok &= forward[s * steps + j] < 2 * P && forward[s * steps + j] % P == term;
+                ok &= reversed[s * steps + block + 7 - t] % P == term;
+                term = mul(mul(term, u32((base[s] + u64(j) * step) % P)), r_inverse);
+            }
+        }
+        expect(ok, "chains", trial, steps);
+    }
+}
+
+void test_factorials() {
+    test_factorial_values();
+    test_chains();
+}
+
 int main() {
     static Fixture fx;
     test_leaf_kernels(fx);
@@ -1941,6 +2020,7 @@ int main() {
     test_chirp();
     test_evaluation();
     test_interpolation();
+    test_factorials();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

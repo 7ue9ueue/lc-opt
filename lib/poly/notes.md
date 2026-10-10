@@ -1117,6 +1117,20 @@ products 1.77 and 1.69).
   composition_of_formal_power_series 0.9831 (0.9573), compositional_inverse_of_formal_power_series
   0.9977 (1.0056). Tests: `test.cpp` at -O2 and ASan/UBSan, both `stress.py` 400 rounds, all
   official tests.
+- Merged as #248. CI: composition_of_formal_power_series 0.9795, _large 0.9876,
+  compositional_inverse_of_formal_power_series 0.9922; all 3 0.9864.
+
+2026-10-10, claude (issue #86, third change): composition's coefficient loops in AVX2 (the f
+reversal, level 1's setup of q1 and Q_2, the additions of levels 1, T - 2 and T - 1, the final
+h = p1(x^2) - r). At -O2, GCC 15 left them scalar (very cheap cost model: no runtime alias checks);
+h's loop alone took 125 µs at n = 131072 (data-dependent branch). Rewriting them as branch-free
+scalar code (min instead of ?:) made compose slower (29.86 -> 30.08 ms): still scalar, and
+`std::min` gave worse code than the branches in some loops. With intrinsics: compose in process
+29.86 -> 29.40 ms at n = 131072, 1146 -> 1115 µs at 8000. `judge.py bench` (21 rounds, against
+#248), `lc-amd` (`lc-intel`): composition_of_formal_power_series_large 0.9879 (0.9912),
+composition_of_formal_power_series 0.9929 (0.9922), compositional_inverse_of_formal_power_series
+1.0007 (1.0057). Tests: `test.cpp` at -O2 and ASan/UBSan, both `stress.py` 400 rounds, all
+official tests. projection.hpp has loops of the same kind (for #87).
 
 ## Sources
 

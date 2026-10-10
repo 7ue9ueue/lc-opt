@@ -49,8 +49,11 @@ sqrt 7.72 ms warm (median of 14), 7.9 ms on first use; tables 0.06-0.1 ms.
   - Merged as #148 (CI: correctness only, no baseline). Submitted its `main.cpp`:
     [409316](https://judge.yosupo.jp/submission/409316) AC 16 ms, 13.6 MiB; clean score 12 ms
     (spikes on near_262144_01 16 ms, monomial_02 11 ms, lower_deg_zero_00 10 ms).
-- Next: the leaf-product kernel (#95, shared); a leaf square for g^2 (36 of 64 products);
-  fusing the residual pass into the inverse of g^2.
+- 2026-10-09, claude (lib/poly round, issue #95): faster leaf products (#158; lib/poly/notes.md).
+  `judge.py bench` (21 rounds): `lc-amd` 12.82 -> 12.17 ms (0.9490), `lc-intel` 0.9826; CI
+  0.9561. Not submitted (0.65 ms).
+- Next: a leaf square for g^2 (36 of 64 products); fusing the residual pass into the inverse
+  of g^2.
 
 ## Sources
 

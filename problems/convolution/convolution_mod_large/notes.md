@@ -3,9 +3,11 @@
 N, M <= 2^24 coefficients mod 998244353; print the N + M - 1 coefficients of the product. 10 s,
 1 GiB (the output file's tmpfs pages count). Inputs and outputs are ~331 MB at the maximum.
 
-Best judged: ours, [409616](https://judge.yosupo.jp/submission/409616), 427 ms (`main.cpp` of
-#247; no spike; fft_killer_01 427 and fft_killer_07 422, the other large cases 404-415).
-Before: [409343](https://judge.yosupo.jp/submission/409343), 430 ms (`main.cpp` of #127; no spike).
+Best judged: ours, [409657](https://judge.yosupo.jp/submission/409657), 418 ms (`main.cpp` of
+#310; no spike; max_random_00/01 416/418 and max_ans_zero_00 416 set it, fft_killer 403-405).
+Before: [409616](https://judge.yosupo.jp/submission/409616), 427 ms (`main.cpp` of #247; no spike;
+fft_killer_01 427 and fft_killer_07 422, the other large cases 404-415).
+Earlier: [409343](https://judge.yosupo.jp/submission/409343), 430 ms (`main.cpp` of #127; no spike).
 Same version: [409265](https://judge.yosupo.jp/submission/409265), 439 ms (clean 429).
 Earlier: [409233](https://judge.yosupo.jp/submission/409233), 448 ms.
 Before: [408888](https://judge.yosupo.jp/submission/408888), 452 ms, the QPoly exploration-014
@@ -174,3 +176,16 @@ transform (all large tests), else `ntt::Convolution`. `lib/io` input, output by
     123); `fallocate` first 134.
   - Next: find why fft_killer is judged 13 ms above `lc-k68` (median of 10) while the other
     large cases sit 4-5 ms above. The judged score is the slowest of ~15 cases within 25 ms.
+- 2026-10-10, claude (round 4, after #310):
+  - Submitted `main.cpp` of #310: [409657](https://judge.yosupo.jp/submission/409657) AC 418 ms
+    (2/5), no spike. Against 409616: small_and_large 341-345 -> 312-315, random_00/01/02
+    192/227/386 -> 180/209/374, fft_killer median 412 -> 404 (max 427 -> 405), max_random 414/415
+    -> 416/418, max_ans_zero 414 -> 416. `lc-k68` predicted max_random_00 410.2 and
+    small_and_large_01 310.3.
+  - `lc-k68` against the judge for 409343's source (static build, medians of 3, ms): fft_killer_01
+    428.4 (judged 429), fft_killer_07 427.8 (426), max_random_00 427.1 (428), small_and_large_01
+    354.8 (355). The +23 and +28 of fft_killer_01 and _07 in 409616 did not recur: judge noise.
+    On `lc-k68`, a second large case running on another core adds 4-15 ms (4 pairs).
+  - Next: the score is now the mixed-length parse (max_random_00/01, max_ans_zero_00: 410 on
+    `lc-k68`, judged 416-418) against the fixed path (fft_killer: 399, judged 403-405). A parse as
+    fast as the fixed path is worth up to ~12 ms; time it on `lc-k68`.

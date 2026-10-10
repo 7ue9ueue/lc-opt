@@ -255,9 +255,8 @@ template <std::uint32_t kStage, class T, class Term>
     return sum_large<kStage>(i, k, last, sum + other, term);
 }
 
-// pairs[i] = (a[i], b[i] R mod P) for 0 <= i < count. a may lie in the same memory, ahead of
-// pairs by more than count + 8 dwords: i ascends, so pairs[i] only overwrites values of a read
-// already.
+// pairs[i] = (a[i], b[i] R mod P) for 0 <= i < count. a may lie in the same memory, count + 8
+// dwords or more ahead of pairs: i ascends, so pairs[i] only overwrites values of a read already.
 void interleave(const AliasWord* a, const std::uint32_t* b, std::uint64_t* pairs, std::uint32_t count) {
     const Vec r2 = broadcast(kR2);
     std::uint32_t i = 0;
@@ -401,8 +400,8 @@ private:
 // Zeta passes of 3 and 2 fused with the product and the Moebius pass of 2, targets descending:
 // c_i = A_i B_i - A_2i B_2i (the second term for i <= n / 2). The pass of 3 runs a factor 3
 // ahead: its targets [8q, 8q + 8) go just before the targets [24q, 24q + 24) of the pass of 2,
-// which are its sources (so it reads them before the pass of 2 changes them, and the product pass
-// brings them into the cache for both).
+// which are its sources. So it reads them before the pass of 2 changes them, and the pass of 2
+// finds them in L1.
 void zeta32_product_moebius2(std::uint64_t* pairs, std::uint32_t* c, std::uint32_t n) {
     const std::uint32_t half = n / 2, third = n / 3;
     auto product = [](std::uint32_t x, std::uint32_t yr) {
@@ -570,11 +569,11 @@ void solve() {
     io::Reader in;
     const auto n = in.read<std::uint32_t>();
     io::advise_sequential(in);
-    // One region, in dwords (W >= n + 65): the pairs [0, 2W), with a parsed into [W, 2W); b's
-    // chunks at [2W, 2W + B), then the stage-2 zeta sums t2; c at [K, K + n] with K >= 1.5 n + 130,
-    // over the pairs' last quarter, the chunk buffer and t2 (the product pass descends, so c_i lands
-    // on pairs above 2i + 16, dead); then the stage-2 Moebius sums b2. The output text goes to the
-    // start (dead pairs). 5 huge pages for n = 10^6.
+    // One region, in dwords (W = words >= n + 64): the pairs [0, 2W), with a parsed into [W, 2W);
+    // b's chunks at [2W, 2W + B), then the stage-2 zeta sums t2; c at [K, K + n] with
+    // K >= 2W - n / 2, over the pairs' last quarter, the chunk buffer and t2 (the product pass
+    // descends, so c_i lands on pairs above 2i + 16, dead); then the stage-2 Moebius sums b2. The
+    // output text goes to the start (dead pairs). 5 huge pages for n = 10^6.
     constexpr std::size_t kPad = 64;
     const std::size_t words = (n + kPad + 1) / 2 * 2, sums = n / kStage2Min + 1;
     const std::size_t t2_start = (2 * words + std::min<std::size_t>(n, chunked::kChunkTokens) + 31) / 16 * 16;

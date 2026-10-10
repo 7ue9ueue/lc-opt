@@ -1,8 +1,8 @@
 // Tests for lib/poly against O(n^2) references: transforms leaf by leaf against their definition,
 // products against schoolbook multiplication, the inverse, exp, log, power and sqrt against their recurrences,
-// composition against Horner's rule and identities, product trees against naive products,
-// coefficient-wise operations against scalar code. Long results are checked at random
-// coefficients (each an O(n) sum).
+// composition against Horner's rule and identities, product trees against naive products, chirps
+// against their recurrence, coefficient-wise operations against scalar code. Long results are
+// checked at random coefficients (each an O(n) sum).
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "lib/poly/calculus.hpp"
+#include "lib/poly/chirp.hpp"
 #include "lib/poly/composition.hpp"
 #include "lib/poly/compositional_inverse.hpp"
 #include "lib/poly/divider.hpp"
@@ -1567,6 +1568,34 @@ void test_product_tree(Fixture& fx) {
     expect(ok, "lane_columns");
 }
 
+// x_k = c s^k q^t(k) by x_(k+1) = x_k s q^k.
+std::vector<u32> chirp_reference(u32 c, u32 s, u32 q, std::size_t n) {
+    std::vector<u32> x(n);
+    u32 term = c, ratio = s;
+    for (std::size_t k = 0; k < n; ++k) x[k] = term, term = mul(term, ratio), ratio = mul(ratio, q);
+    return x;
+}
+
+void test_chirp() {
+    static constexpr u32 special[] = {0, 1, 2, P - 1};
+    for (int trial = 0; trial < 400; ++trial) {
+        const std::size_t n = trial < 100 ? std::size_t(trial) : trial % 10 == 0 ? (1 << 16) + pick(100) : pick(3000);
+        const std::size_t offset = trial % 2;  // unaligned spans too
+        const auto value = [trial](int which) { return trial % 5 == which ? special[pick(4)] : u32(rng() % P); };
+        const u32 c = value(0), s = value(1), q = value(2);
+        const auto want = chirp_reference(c, s, q, n);
+        std::vector<u32> out(n + 2, 7);
+        poly::chirp(c, s, q, std::span(out).subspan(offset, n));
+        expect(std::equal(want.begin(), want.end(), out.begin() + offset) && out[offset + n] == 7, "chirp", n, trial);
+        auto f = random_poly(n + 2, trial % 3);
+        const auto g = f;
+        poly::multiply_chirp(c, s, q, std::span(f).subspan(offset, n));
+        bool ok = f[offset + n] == g[offset + n];
+        for (std::size_t k = 0; k < n; ++k) ok &= f[offset + k] == mul(g[offset + k], want[k]);
+        expect(ok, "multiply_chirp", n, trial);
+    }
+}
+
 int main() {
     static Fixture fx;
     test_leaf_kernels(fx);
@@ -1586,6 +1615,7 @@ int main() {
     test_projection();
     test_compositional_inverse();
     test_product_tree(fx);
+    test_chirp();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

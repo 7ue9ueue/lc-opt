@@ -17,6 +17,8 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
   run forward (issue #68); `compositional_inverse.hpp` on top of it and `pow.hpp`.
 - `product_tree.hpp`: products of many polynomials (issue #74), for multipoint evaluation and
   interpolation next; its own tables and transforms (`TreeTransform`) on the transform layer.
+- `chirp.hpp`: the sequences c s^k q^(k (k - 1) / 2) of the chirp z-transform (issue #76), for
+  evaluation and interpolation on geometric sequences; uses `montgomery` from `calculus.hpp`.
 
 APIs and usage: the header of each file. Tests: `test.cpp` (O(n^2) references; sizes 1..64,
 powers of two and their neighbours up to 2^20, random sizes; also run under ASan/UBSan in CI).
@@ -416,6 +418,23 @@ exponentiation per call: ~500 cycles, more than a whole transform of 64 words), 
   1x1 17, 2x2 31, 4x4 68, 8x8 196, 16x16 734.
 - Keep(lo, hi, transform) sees every node's final transform at its parent's length: for the
   downward passes of multipoint evaluation (#75) and interpolation (#77).
+
+## Chirp
+
+`chirp.hpp`: x_k = c s^k q^t(k), t(k) = k (k - 1) / 2. With i j = t(i + j) - t(i) - t(j),
+f(a r^i) = r^-t(i) sum_j (c_j a^j r^-t(j)) r^t(i + j): evaluation on a geometric sequence is
+one middle product between two chirp-weighted sequences (no square root of r needed).
+- `detail::Chirp`: 32 terms per step in 4 vectors; x_(k+32) = x_k g_k with g_k = s^32
+  q^(32 k + 496) kept times 2^32, so the step is `montgomery(x, g)` and a Shoup product
+  g_(k+32) = g_k q^1024. Terms in [0, 2P). Passing c 2^32 gives factors for `montgomery(f, x)`.
+- `chirp` (fill) and `multiply_chirp` (f[k] x_k, c 2^32 inside): spans of any size and
+  alignment; the last partial step goes through a 32-word buffer.
+- Cost (`lc-amd`, in a 2^20-term fill): 6.3 cycles per vector, near the bound of its 10
+  multiplies (8 `vpmuludq`, 2 `vpmulld`) on two pipes. A split x_(32v+l) = D_v E_l(v) (per-lane
+  geometric E, scalar D_v whose Shoup quotient is computed on the scalar side) needs 8; not
+  built.
+- Tests: terms against the recurrence x_(k+1) = x_k s q^k, sizes 0..99, random up to 3000 and
+  2^16 + small, c, s, q in {0, 1, 2, P - 1} or random, aligned and unaligned spans.
 
 ## Measurements
 
@@ -861,6 +880,17 @@ products 1.77 and 1.69).
   Judged: log [409452](https://judge.yosupo.jp/submission/409452) AC 13 ms (was 14; four
   earlier runs had launch spikes, clean 13).
 
+2026-10-10, claude (issue #76, multipoint_evaluation_on_geometric_sequence; one-convolution lane):
+- Added `chirp.hpp` (new header; no existing header changed) and its tests. The problem uses
+  `chirp` for its reversed chirp B, `multiply_chirp` for the weights c_j a^j r^-t(j) and
+  `detail::Chirp` for the outputs' factors r^-t(i), fused into its last transform level.
+- For a single middle product at 2^20 (A in the lower half, B full, upper half wanted),
+  `forward` of B plus `cyclic_product(..., Half::kUpper)` took 1.3 + 3.27 ms against 4.70 for
+  `ntt::Convolution`'s full product; the problem uses convolution_mod's transform instead
+  (problem notes).
+- Checks: `test.cpp` PASS at -O2 (`-march=native` and `-march=x86-64-v3`) and ASan/UBSan
+  (`lc-intel`).
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -899,3 +929,7 @@ products 1.77 and 1.69).
   transform of p mod (x^L + 1)) and the wrap at length = degree: standard techniques (as in
   Bernstein's survey "Fast multiplication and its applications", 2008, from memory; not
   consulted in this round). Lanes, the base and the code derived and written here; no code read.
+- Chirp z-transform: L. Bluestein, "A linear filtering approach to the computation of the
+  discrete Fourier transform", 1968; L. Rabiner, R. Schafer, C. Rader, "The chirp z-transform
+  algorithm", IEEE Trans. Audio Electroacoustics 17 (1969). The identity i j = t(i + j) - t(i)
+  - t(j) (no square root of r) is standard; derived and written here, no code read.

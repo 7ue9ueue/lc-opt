@@ -1031,6 +1031,7 @@ inline void read_bulk(Reader& in, std::uint32_t* dst, std::size_t count) {
 //   t.inverse_product(b, c, a);                // a = b c mod (x^n - 1) from transforms b, c
 //   t.inverse_product_sum(pairs, a);           // a = the sum of the pairs' products, up to 3 pairs
 //   t.forward_product(a, 0, c, b);             // c = the transform of a b mod (x^n - 1)
+//   t.inverse_with(bottom, a);                 // a = the inverse of leaves a caller's bottom computes
 //   t.forward(f.first(m), 0, a);               // out of place: a = transform of f[0, m), m <= n
 //   t.cyclic_product(a.subspan(n / 2), n / 2, a, b, poly::Half::kUpper);
 //                                              // a = x^(n/2) a[n/2, n) b mod (x^n - 1), upper half
@@ -4987,6 +4988,8 @@ inline Vec low_difference(Vec x, Vec y) {
     const Vec t = _mm256_sub_epi32(x, y);
     return _mm256_min_epu32(t, _mm256_add_epi32(t, broadcast(2 * kP)));
 }
+// x - y mod P for canonical x, y.
+inline Vec difference(Vec x, Vec y) { return reduce(_mm256_sub_epi32(add(x, broadcast(kP)), y), kP); }
 
 // x w mod P in [0, 2P), any x < 2^32.
 inline Vec times(Vec x, const Factor& w) { return ntt::detail::multiply(x, w); }
@@ -5007,11 +5010,14 @@ inline Factor leaf_weight(const std::uint32_t* roots, std::size_t p) {
 // leaves 4g .. 4g + 3. x, y, z: entries g, 2g, 2g + 1 of the table (or of the inverse table).
 struct Group {
     Factor x, y, z;
-    Group(const std::uint32_t* table, std::size_t g) : x(entry(table, g)), y(entry(table, 2 * g)), z(entry(table, 2 * g + 1)) {}
+    [[gnu::always_inline]] Group(const std::uint32_t* table, std::size_t g)
+        : x(entry(table, g)), y(entry(table, 2 * g)), z(entry(table, 2 * g + 1)) {}
 };
 
-// Forward butterfly, inputs and outputs < 4P.
-inline void forward_h1(Vec (&f)[4], const Group& w) {
+// Forward butterfly, inputs and outputs < 4P. The butterflies and Group are always inlined: in a
+// large program GCC's unit growth limit left them as calls in the bottoms (pow: power() 3% slower,
+// lib/poly/notes.md).
+[[gnu::always_inline]] inline void forward_h1(Vec (&f)[4], const Group& w) {
     const Vec a = low(f[0]), b = low(f[1]), c = times(f[2], w.x), d = times(f[3], w.x);
     const Vec ac = low(add(a, c)), amc = low_difference(a, c);
     const Vec bd = times(add(b, d), w.y), bmd = times(diff(b, d), w.z);
@@ -5020,7 +5026,7 @@ inline void forward_h1(Vec (&f)[4], const Group& w) {
 
 // Inverse butterfly with inverse twiddles, inputs and outputs < 2P; outputs 4 times the input
 // polynomial's coefficients.
-inline void inverse_h1(Vec (&f)[4], const Group& w) {
+[[gnu::always_inline]] inline void inverse_h1(Vec (&f)[4], const Group& w) {
     const Vec ab = low(add(f[0], f[1])), cd = low(add(f[2], f[3]));
     const Vec amb = times(diff(f[0], f[1]), w.y), cmd = times(diff(f[2], f[3]), w.z);
     f[0] = low(add(ab, cd)), f[1] = low(add(amb, cmd));
@@ -5461,6 +5467,10 @@ public:
 
     int lg_max() const { return lg_max_; }
 
+    // The tables, for bottoms built outside this class (inverse_with).
+    const std::uint32_t* roots() const { return roots_; }
+    const std::uint32_t* inverse_roots() const { return inverse_roots_; }
+
     // out = the transform of x^shift in, of length n = out.size(): coefficients in [0, P), those
     // outside [shift, shift + in.size()) zero (shift + in.size() <= n). in may lie inside out at
     // offset shift (in place); otherwise the two must not overlap.
@@ -5543,6 +5553,17 @@ public:
             case 3: return inverse_products<3>(pairs, out, output);
             default: std::abort();
         }
+    }
+
+    // out = the coefficients of the transform of length n = out.size() whose leaves, times 2^-32
+    // (as leaf products carry), bottom(out, count, first) writes for groups first .. first +
+    // count - 1 with the inverse butterflies at h = 1 applied (outputs < 2P), as
+    // InverseProductBottom does for a b. Only the output half of out is computed.
+    template <class Bottom>
+    void inverse_with(const Bottom& bottom, std::span<std::uint32_t> out, Half output = Half::kBoth) const {
+        using namespace ntt::detail;
+        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
+        run(out, detail::Source(nullptr, 0, 0), bottom, scale, output);
     }
 
     // out = the transform of (x^shift in) b mod (x^n - 1) for b a transform of length
@@ -5878,9 +5899,6 @@ inline std::size_t exp_length(std::size_t n) {
 inline int exp_log(std::size_t n) { return std::countr_zero(detail::exp_length(n)) - 1; }
 
 namespace detail {
-
-// x - y mod P for canonical x, y.
-inline Vec difference(Vec x, Vec y) { return reduce(_mm256_sub_epi32(add(x, broadcast(kP)), y), kP); }
 
 // The last Newton step of exp_newton() below, from g mod x^m to g mod x^n, m < n <= 2m, with
 // transforms of length m only. From the previous step: H = T_m(h0), h0 = 1 / g mod x^(m/2), and

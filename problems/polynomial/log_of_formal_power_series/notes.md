@@ -12,11 +12,12 @@ Record when opened (issue #64): 32 ms.
 
 - `lib/poly/log.hpp`: log f = integral of q = f'/f. h = 1/f mod x^k by `lib/poly/inverse.hpp`
   (k = 2^17 for N = 500000), then q in 4 blocks of k coefficients, each from h and a residual
-  (middle products of f's windows with the earlier blocks), transforms of length 2k
-  (lib/poly/notes.md).
-- `lib/io` input; output in 10-byte fixed-width fields (`problems/convolution/convolution_mod/fields.hpp`,
-  judge-specific: the checker compares tokens). One `poly::Arena` (huge pages) for the tables,
-  f (log runs in place), the scratch and the text.
+  (middle products of f's windows with the earlier blocks), transforms of length 2k; blocks 2
+  and 3 share a 2 x 2 Toeplitz product (3 leaf products for 4) (lib/poly/notes.md).
+- `lib/io` input (`io::read_bulk`); output in 10-byte fixed-width fields
+  (`problems/convolution/convolution_mod/fields.hpp`, judge-specific: the checker compares
+  tokens). One `poly::Arena` (huge pages) for the tables, f (log runs in place) and the scratch
+  (6 MB); the text goes page-aligned into the scratch once log is done.
 - The program runs from `.preinit_array` and ends with `_exit` (as inv_of_formal_power_series).
 
 ## Floor
@@ -70,6 +71,28 @@ blocked division 15.26 ms. So log itself takes ~10.5 ms of 15.3.
   01:57 UTC: AC 16 ms, 17.0 MiB, clean 14 (spike on near_262144_01);
   [409363](https://judge.yosupo.jp/submission/409363) 01:59: AC 14 ms, 17.3 MiB, no spike on the
   slowest case. New best judged: 14 ms (was 15, 409264).
-- Next: the transform levels (lib/ntt's kernels) are now the largest cost. Smaller: 7 buffers
-  instead of 8 (T(q_2) in the work buffer), the text buffer in the scratch
-  (~1.3 MB less first touch; first use costs ~0.5 ms over warm runs).
+- 2026-10-10, claude (round 2; lib/poly owner lane, issue #95).
+  - Phases on main (`lc-amd`, in process, ms, medians of 31): inverse 1.61, T(h) 0.28, T(W) 0.90,
+    q products 4 x 0.74, T(q_j) 3 x 0.28, residuals 0.47 / 0.67 / 0.90, subtractions 0.11,
+    divisions 0.39; 9.23 warm, 9.78 first use. Whole process 14.45 ms (runner, max_random_00,
+    31 rounds); floor (read and write) ~4.6.
+  - Kept: blocks 2 and 3 by the 2 x 2 Toeplitz product (`ToeplitzBottom`, `SideProductBottom`
+    in log.hpp; 11 leaf products of length 2^18 instead of 12): residuals 0.47 / 0.89 / 0.48,
+    8.91 warm, 9.32 first use. In-process A/B: 0.975 warm, 0.970 with a fresh arena.
+  - Kept: blocks 1-3 in one buffer (residual over T(q_(j-1)), q_j and T(q_j) in place): 6
+    buffers of 1 MB instead of 8.
+  - Kept: `io::read_bulk` (whole process 14.15 -> 14.06 ms, 31 rounds); the text page-aligned in
+    the dead scratch (no own 250 KB). Writes of whole pages (24576 values per call): no change
+    (14.05 vs 14.05).
+  - Kept: `always_inline` on the h = 1 butterflies and `Group` (lib/poly/notes.md): the Toeplitz
+    bottoms had pushed pow's unit over GCC's inline growth limit (pow 1.5-1.8% slower until then).
+  - Whole process (runner, 31 rounds): 14.45 -> 14.18 (lib) -> 14.03 ms (with the I/O changes).
+    `judge.py bench` (21 rounds, new/main): `lc-amd` 0.9702 (14.68 -> 14.24 ms), `lc-intel` 0.9802.
+  - Checks: 25/25 official tests (`lc-amd`); `stress.py` 300 rounds (judge image); lib/poly
+    tests at -O2 and ASan/UBSan (`lc-intel`, native and x86-64-v3).
+  - Considered, not built: B = 8 blocks of 2^16 with Toeplitz blocks at two levels (19 leaf
+    products of 2^17 instead of 28, inverse to 2^16 only): ~9.0 ms estimated against 8.9 now.
+    Fusing the residual's inverse top level, the subtraction of d and the q product's forward
+    top level into one pass: ~0.04 ms per block estimated (three passes of ~0.02-0.04 ms each).
+- Next: the transform levels (lib/ntt's kernels) and the leaf products (~0.2 ms each at 2^18,
+  11 of them) are the cost; the fused top levels above (~0.15 ms in all).

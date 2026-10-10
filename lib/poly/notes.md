@@ -40,7 +40,12 @@ powers of two and their neighbours up to 2^20, random sizes; also run under ASan
   of a, leaf products with a stored transform b, inverse), `inverse_product` (leaf products of
   two stored transforms, inverse), `inverse_product_sum` (the same for a sum of up to 3
   products; each leaf product reduced, then added), `forward_product` (forward of a, leaf
-  products with b, kept as a transform).
+  products with b, kept as a transform). `inverse_with` runs an inverse whose bottom the caller
+  supplies (log's Toeplitz blocks); `roots()` and `inverse_roots()` give such bottoms the tables.
+- Inlining: GCC limits how much a translation unit may grow by inlining. In a large program it
+  left `forward_h1` and `Group`'s constructor as calls in the bottoms (pow after log's Toeplitz
+  blocks: power() 3% slower); they, `inverse_h1` and the product bottoms' pieces are
+  `always_inline`.
 - Sources: the forward top level reads x^shift in[0, size) from any span (in place or not);
   coefficients outside are zero and not read. Outputs: `Half` computes one half only;
   `cyclic_product` multiplies its output by a constant c at no cost (c is folded into the
@@ -135,11 +140,19 @@ divisible by x^(jk), and
   Markstein's division (h to n/2, 13 U + 5 V). For n - 1 = 499999: B = 4 at k = 2^17 gives
   23 U + 12 V, i.e. 11.5 T(2^19) + 6 LP(2^19), against 13 T + 5 LP for B = 2 at k = 2^18;
   B = 8 at 2^16 would be 10.75 T + 9.5 LP (worse with LP ~0.7 T).
+- B = 4: the residual sums of blocks 2 and 3 share a 2 x 2 Toeplitz product,
+  [W_2 W_1; W_3 W_2] [q_0; q_1] = [m1 + m2; m1 + m3] with m1 = W_2 (q_0 + q_1),
+  m2 = (W_1 - W_2) q_1, m3 = (W_3 - W_2) q_0: three leaf products instead of four. Block 2's
+  bottom (`ToeplitzBottom`, through `Transform::inverse_with`) builds the windows of the sum and
+  the differences on the fly, sends m1 + m2 through the inverse butterflies and stores m1 + m3
+  (with the products' 2^-32) over T(W_3); block 3's (`SideProductBottom`) adds W_1 q_2 to it.
+  23 U + 11 V.
 - In place: g may be f. f is read by the inverse and the forwards of W_t first; block j reads
   f[jk + 1, (j+1)k + 1) (d on the fly) before it writes g[jk + 1, (j+1)k + 1).
-- Scratch: 2 B buffers of length 2k (H, W_1 .. W_(B-1), q_0 .. q_(B-2), work); the inverse's
-  scratch overlaps them. The integral divides by index with `divide_by_index`, whose loader
-  reads q_j.
+- Scratch: B + 2 buffers of length 2k, at least 3: H, W_1 .. W_(B-1), q_0's, and one that
+  blocks 1 .. B-1 share (the residual, over T(q_(j-1)) for j >= 2; q_j in place; T(q_j) in
+  place after the sink). 6 MB at n = 500000 (was 8). The inverse's scratch overlaps them. The
+  integral divides by index with `divide_by_index`, whose loader reads q_j.
 - Code: `detail::log_derivative(t, f, n, scratch, sink)` computes the blocks of q for any
   f[0] != 0 and hands each to sink(first, q); `log` integrates them in its sink, `power` scales
   them into its d.
@@ -814,6 +827,36 @@ products 1.77 and 1.69).
 - product_of_polynomial_sequence on `lc-amd`: 35.3 -> 30.0 ms whole process (floor 7.9); the lane
   tree 14.4 ms and the top tree 5.7 ms of it (problem notes).
 
+2026-10-10, claude (issue #64, log round 2; owner lane):
+- Phases on main (`lc-amd`, N = 500000, in process, ms, medians of 31): inverse to 2^17 1.61,
+  T(h) 0.28, T(W_1..3) 0.90, q products 4 x 0.74, T(q_j) 3 x 0.28, residuals 0.47 / 0.67 / 0.90
+  (1, 2, 3 leaf products), subtractions 0.11, divisions 0.39; 9.23 warm, 9.78 first use.
+- Kept: the 2 x 2 Toeplitz product for blocks 2 and 3 (Log above): residuals 0.47 / 0.89 /
+  0.48; 8.91 warm, 9.32 first use. Blocks 1 .. 3 in one buffer: 6 buffers instead of 8.
+  In-process A/B (41 alternating calls): 9.14 -> 8.90 ms (0.975); fresh arena per call 9.41 ->
+  9.12 (0.970); N = 7999 0.969. power(): 0.988, fresh 0.983. Tests unchanged (log and power
+  sizes cover B = 3 and 4). Mutations fail them: m1 alone stored, W_3 - W_1, no side term,
+  block 3 in the wrong buffer. Not caught: q_0 + q_1 unreduced (window words up to 2P overflow
+  the 64-bit sums only for leaves far above average; random data cannot reach it).
+- Found: with the Toeplitz bottoms, pow's whole process was 1.5-1.8% slower (`lc-amd`, 25.56 ->
+  26.07 ms, 31 runs) while its power() in a separate A/B program was faster. Inside pow's own
+  binary, power() was 0.47 ms slower per call even on pre-faulted memory (log part +0.17,
+  exp part +0.30, exp unchanged). `nm`: `forward_h1` and `Group::Group` had become out-of-line
+  functions called from the bottoms (GCC's inline-unit-growth limit, reached by the larger
+  unit). Not page faults: a padded arena changed nothing, minor faults equal. With
+  `always_inline` on both and on `inverse_h1`: power() 20.40-20.49 against main's
+  20.60-20.69 ms per call, log part 8.70-8.75 against 8.95. The same mechanism may explain
+  #170's composition and #185's compositional_inverse slowdowns (unexplained then):
+  composition is 0.976 / 0.986 faster here with no change of its own.
+- `.text` after (bytes, main -> new): inv 39892 -> 35903, exp 81933 -> 77642, sqrt 57336 ->
+  49334, composition 88851 -> 77128, log 75451 -> 73759, pow 92031 -> 93135,
+  compositional_inverse 145606 -> 154300.
+- `judge.py bench`, 21 rounds, new/main, `lc-amd` (`lc-intel`): log 0.9702 (0.9802), pow 0.9852
+  (0.9897), compositional_inverse 1.0004 (0.9957), inv 1.0000 (0.9947), exp 0.9938 (1.0019),
+  sqrt 0.9935 (0.9997), composition 0.9761 (0.9858). All official tests pass (`lc-amd`);
+  `test.cpp` at -O2 and ASan/UBSan, `-march=native` and `-march=x86-64-v3` (`lc-intel`).
+- Huge pages on `lc-amd`: first touch ~0.035 ms per 2 MB (map, touch, unmap; 2-12 MB).
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -830,7 +873,10 @@ products 1.77 and 1.69).
 - Division with the inverse's last Newton step merged: A. Karp, P. Markstein, "High-precision
   division and square root", ACM TOMS 23 (1997) (the idea, as described by Hanrot and
   Zimmermann above). The blocked form (residuals by middle products of stored transforms) is
-  the usual blockwise division; derived and written here, no code read.
+  the usual blockwise division; derived and written here, no code read. The 2 x 2 Toeplitz
+  product by three multiplications (log's blocks 2 and 3) is the Karatsuba-style identity for
+  Toeplitz matrices (as used in relaxed multiplication, J. van der Hoeven, "Relax, but don't be
+  too lazy", J. Symbolic Comput. 34 (2002)); no code read.
 - Linear recurrences in blocks by jump matrices (the state times A = M^t rows) and the impulse
   response of the short part: standard linear algebra, derived here; no code read.
 - `Holonomic`'s block step: variation of constants for the first-order ODE of a block

@@ -3119,28 +3119,83 @@ inline void fill_window(Window& window, Vec a, const Factor& w) {
     store(window.word, reduce(times(a, w), kP));
 }
 
-// a b mod (x^8 - w) / 2^32 in [0, 2P) for canonical a (as a window) and b. Each output is a sum
-// of 8 products < P^2, plus the Montgomery term < 2^32 P: below 2^64.
-inline Vec leaf_product(const Window& window, const std::uint32_t* b) {
-    const auto at = [&window](int k) { return _mm256_loadu_si256(reinterpret_cast<const Vec*>(window.word + k)); };
-    const auto by = [b](int i) { return broadcast(b[i]); };
-    // Even outputs 2m from windows k = 8 .. 1 (b[8 - k]), odd outputs from k = 9 .. 2 (b[9 - k]).
-    Vec x = at(9);
-    Vec odd = _mm256_mul_epu32(x, by(0));
-    x = at(8);
-    Vec even = _mm256_mul_epu32(x, by(0));
-    odd = _mm256_add_epi64(odd, _mm256_mul_epu32(x, by(1)));
-#pragma GCC unroll 8
-    for (int k = 7; k >= 2; --k) {
-        x = at(k);
-        even = _mm256_add_epi64(even, _mm256_mul_epu32(x, by(8 - k)));
-        odd = _mm256_add_epi64(odd, _mm256_mul_epu32(x, by(9 - k)));
+// The windows of leaves 4g .. 4g + 3 from canonical a: weights y, -y, z, -z (y, z: entries 2g,
+// 2g + 1 of roots). The odd leaves' w a is 2P - y a (or z a), in (0, P] after the reduction.
+[[gnu::always_inline]] inline void fill_windows(Window (&window)[4], const Vec (&a)[4], const std::uint32_t* roots,
+                                                std::size_t g) {
+    const Factor y = entry(roots, 2 * g), z = entry(roots, 2 * g + 1);
+#pragma GCC unroll 4
+    for (int t = 0; t < 4; ++t) {
+        store(window[t].word + 8, a[t]);
+        const Vec wa = times(a[t], t < 2 ? y : z);
+        store(window[t].word, reduce(t % 2 ? _mm256_sub_epi32(broadcast(2 * kP), wa) : wa, kP));
     }
-    even = _mm256_add_epi64(even, _mm256_mul_epu32(at(1), by(7)));
-    const Vec ni = broadcast(ntt::kernels::kNI), p = broadcast(kP);
-    even = _mm256_add_epi64(even, _mm256_mul_epu32(_mm256_mul_epu32(even, ni), p));
-    odd = _mm256_add_epi64(odd, _mm256_mul_epu32(_mm256_mul_epu32(odd, ni), p));
-    return low(_mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA));
+}
+
+// a b mod (x^8 - w) / 2^32 in [0, 2P) for a as a window (words <= P) and canonical b. Even
+// outputs 2m are the sums over windows k = 8 .. 1 times b[8 - k], odd outputs over k = 9 .. 2
+// times b[9 - k]. Step i = 0 .. 7 broadcasts b[i], multiplies it with windows 9 - i (odd) and
+// 8 - i (even), then adds step i - 1's products. Each output is a sum of 8 products < P^2, plus
+// the Montgomery term < 2^32 P: below 2^64. Assembly keeps this order; GCC's schedule of the same
+// intrinsics was 2-5% slower in the bottoms below (lib/poly/notes.md).
+[[gnu::always_inline]] inline Vec leaf_product(const Window& window, const std::uint32_t* b) {
+    const Vec ni = broadcast(ntt::kernels::kNI), p = broadcast(kP), p2 = broadcast(2 * kP);
+    Vec even, odd, bi, t0, t1, t2, t3;
+    asm("vpbroadcastd (%[b]), %[bi]\n\t"
+        "vpmuludq 36(%[w]), %[bi], %[odd]\n\t"
+        "vpmuludq 32(%[w]), %[bi], %[even]\n\t"
+        "vpbroadcastd 4(%[b]), %[bi]\n\t"
+        "vpmuludq 32(%[w]), %[bi], %[t0]\n\t"
+        "vpmuludq 28(%[w]), %[bi], %[t1]\n\t"
+        "vpbroadcastd 8(%[b]), %[bi]\n\t"
+        "vpmuludq 28(%[w]), %[bi], %[t2]\n\t"
+        "vpmuludq 24(%[w]), %[bi], %[t3]\n\t"
+        "vpaddq %[t0], %[odd], %[odd]\n\t"
+        "vpaddq %[t1], %[even], %[even]\n\t"
+        "vpbroadcastd 12(%[b]), %[bi]\n\t"
+        "vpmuludq 24(%[w]), %[bi], %[t0]\n\t"
+        "vpmuludq 20(%[w]), %[bi], %[t1]\n\t"
+        "vpaddq %[t2], %[odd], %[odd]\n\t"
+        "vpaddq %[t3], %[even], %[even]\n\t"
+        "vpbroadcastd 16(%[b]), %[bi]\n\t"
+        "vpmuludq 20(%[w]), %[bi], %[t2]\n\t"
+        "vpmuludq 16(%[w]), %[bi], %[t3]\n\t"
+        "vpaddq %[t0], %[odd], %[odd]\n\t"
+        "vpaddq %[t1], %[even], %[even]\n\t"
+        "vpbroadcastd 20(%[b]), %[bi]\n\t"
+        "vpmuludq 16(%[w]), %[bi], %[t0]\n\t"
+        "vpmuludq 12(%[w]), %[bi], %[t1]\n\t"
+        "vpaddq %[t2], %[odd], %[odd]\n\t"
+        "vpaddq %[t3], %[even], %[even]\n\t"
+        "vpbroadcastd 24(%[b]), %[bi]\n\t"
+        "vpmuludq 12(%[w]), %[bi], %[t2]\n\t"
+        "vpmuludq 8(%[w]), %[bi], %[t3]\n\t"
+        "vpaddq %[t0], %[odd], %[odd]\n\t"
+        "vpaddq %[t1], %[even], %[even]\n\t"
+        "vpbroadcastd 28(%[b]), %[bi]\n\t"
+        "vpmuludq 8(%[w]), %[bi], %[t0]\n\t"
+        "vpmuludq 4(%[w]), %[bi], %[t1]\n\t"
+        "vpaddq %[t2], %[odd], %[odd]\n\t"
+        "vpaddq %[t3], %[even], %[even]\n\t"
+        "vpaddq %[t0], %[odd], %[odd]\n\t"
+        "vpaddq %[t1], %[even], %[even]\n\t"
+        // Montgomery: (s + (s / -P mod 2^32) P) / 2^32 in [0, 3P), then [0, 2P).
+        "vpmuludq %[ni], %[even], %[t0]\n\t"
+        "vpmuludq %[ni], %[odd], %[t1]\n\t"
+        "vpmuludq %[p], %[t0], %[t0]\n\t"
+        "vpmuludq %[p], %[t1], %[t1]\n\t"
+        "vpaddq %[t0], %[even], %[even]\n\t"
+        "vpaddq %[t1], %[odd], %[odd]\n\t"
+        "vpsrlq $32, %[even], %[even]\n\t"
+        "vpblendd $0xaa, %[odd], %[even], %[even]\n\t"
+        "vpsubd %[p2], %[even], %[t0]\n\t"
+        "vpminud %[t0], %[even], %[even]"
+        : [even] "=&x"(even), [odd] "=&x"(odd), [bi] "=&x"(bi), [t0] "=&x"(t0), [t1] "=&x"(t1), [t2] "=&x"(t2),
+          [t3] "=&x"(t3)
+        : [w] "r"(window.word), [b] "r"(b), [ni] "x"(ni), [p] "x"(p), [p2] "x"(p2),
+          "m"(*reinterpret_cast<const std::uint32_t(*)[17]>(window.word)),
+          "m"(*reinterpret_cast<const std::uint32_t(*)[8]>(b)));
+    return even;
 }
 
 // The bottom of a subtree: count groups at h = 1 (4 vectors each, at a), the first with index
@@ -3155,6 +3210,7 @@ struct ForwardBottom {
             const Group w(roots, first + j);
             Vec f[4] = {load(a), load(a + 8), load(a + 16), load(a + 24)};
             forward_h1(f, w);
+#pragma GCC unroll 4
             for (int t = 0; t < 4; ++t) store(a + 8 * t, canonical(f[t]));
         }
     }
@@ -3179,21 +3235,25 @@ struct InverseBottom {
 
 // Product: forward butterflies of a, leaf products with b (a transform; each product carries a
 // factor 2^-32 that the final scale undoes), inverse butterflies. The windows of group j + 1 are
-// written before the products of group j read those of group j.
+// written before the products of group j read those of group j. prepare and finish are inlined
+// and unrolled (as calls with rolled loops they cost 4-9% of the products, lib/poly/notes.md).
 struct ProductBottom {
     static constexpr bool kForward = true, kInverse = true;
     const std::uint32_t* roots;
     const std::uint32_t* inverse_roots;
     const std::uint32_t* b;
 
-    void prepare(const std::uint32_t* a, std::size_t g, Window (&window)[4]) const {
+    [[gnu::always_inline]] void prepare(const std::uint32_t* a, std::size_t g, Window (&window)[4]) const {
         Vec f[4] = {load(a), load(a + 8), load(a + 16), load(a + 24)};
         forward_h1(f, Group(roots, g));
-        for (int t = 0; t < 4; ++t) fill_window(window[t], canonical(f[t]), leaf_weight(roots, 4 * g + t));
+#pragma GCC unroll 4
+        for (int t = 0; t < 4; ++t) f[t] = canonical(f[t]);
+        fill_windows(window, f, roots, g);
     }
 
-    void finish(std::uint32_t* a, std::size_t g, const Window (&window)[4]) const {
+    [[gnu::always_inline]] void finish(std::uint32_t* a, std::size_t g, const Window (&window)[4]) const {
         Vec f[4];
+#pragma GCC unroll 4
         for (int t = 0; t < 4; ++t) f[t] = leaf_product(window[t], b + 8 * (4 * g + t));
         inverse_h1(f, Group(inverse_roots, g));
         for (int t = 0; t < 4; ++t) store(a + 8 * t, f[t]);
@@ -3216,8 +3276,10 @@ struct InverseProductBottom {
     ProductBottom product;  // holds b
     const std::uint32_t* a;
 
-    void prepare(std::size_t g, Window (&window)[4]) const {
-        for (std::size_t p = 4 * g; p < 4 * g + 4; ++p) fill_window(window[p % 4], load(a + 8 * p), leaf_weight(product.roots, p));
+    [[gnu::always_inline]] void prepare(std::size_t g, Window (&window)[4]) const {
+        const std::uint32_t* leaves = a + 32 * g;
+        const Vec f[4] = {load(leaves), load(leaves + 8), load(leaves + 16), load(leaves + 24)};
+        fill_windows(window, f, product.roots, g);
     }
 
     void operator()(std::uint32_t* out, std::size_t count, std::size_t first) const {
@@ -3248,12 +3310,14 @@ struct InverseProductSumBottom {
             if (j + 1 < count) prepare(first + j + 1, window[(j + 1) & 1]);
             const std::size_t g = first + j;
             Vec f[4];
+#pragma GCC unroll 4
             for (std::size_t t = 0; t < 4; ++t) {
                 f[t] = leaf_product(window[j & 1][0][t], terms[0].product.b + 8 * (4 * g + t));
                 for (std::size_t k = 1; k < K; ++k)
                     f[t] = low(add(f[t], leaf_product(window[j & 1][k][t], terms[k].product.b + 8 * (4 * g + t))));
             }
             inverse_h1(f, Group(terms[0].product.inverse_roots, g));
+#pragma GCC unroll 4
             for (std::size_t t = 0; t < 4; ++t) store(out + 8 * t, f[t]);
         }
     }
@@ -3272,6 +3336,7 @@ struct ForwardProductBottom {
         for (std::size_t j = 0; j < count; ++j, a += 32) {
             if (j + 1 < count) product.prepare(a + 32, first + j + 1, window[(j + 1) & 1]);
             const std::uint32_t* b = product.b + 32 * (first + j);
+#pragma GCC unroll 4
             for (int t = 0; t < 4; ++t)
                 store(a + 8 * t, reduce(times(leaf_product(window[j & 1][t], b + 8 * t), undo_montgomery), kP));
         }
@@ -3764,6 +3829,14 @@ inline Vec negate(Vec x) {
     return _mm256_min_epu32(_mm256_sub_epi32(broadcast(kP), x), _mm256_sub_epi32(_mm256_setzero_si256(), x));
 }
 
+// x w mod P in [0, 2P) for any x < 2^32 and a factor per lane (times() needs one factor).
+inline Vec times_lanes(Vec x, const Factor& f) {
+    const Vec even = _mm256_srli_epi64(_mm256_mul_epu32(x, f.q), 32);
+    const Vec odd = _mm256_mul_epu32(_mm256_srli_epi64(x, 32), _mm256_srli_epi64(f.q, 32));
+    const Vec q = _mm256_blend_epi32(even, odd, 0xAA);
+    return _mm256_sub_epi32(_mm256_mullo_epi32(x, f.w), _mm256_mullo_epi32(q, broadcast(kP)));
+}
+
 // Lane j of r[i] <-> lane i of r[j].
 inline void transpose(Vec (&r)[8]) {
     Vec t[8], u[8];
@@ -3899,52 +3972,74 @@ struct LevelBottom {
 };
 
 // The bottom of the inverse transform of R = P(z^2) Q_s(-z) (length 4m), from f, the transform of
-// length 2m of P, and q, that of Q_s. For leaves 2p, 2p + 1 (moduli z^8 - w, w = +-s), with
-// u = z^2: P(z^2) mod (z^8 -+ s) = lo +- s hi, where leaf p of f is P mod (u^8 - s^2) =
-// lo + u^4 hi; and with c = Q_s mod (z^8 - w) = ce(u) + z co(u), R mod (z^8 - w) =
-// p(u) ce(u) - z p(u) co(u) mod (u^4 - w). A pair works in one vector, a leaf per 128-bit lane.
-// Products times 2^-32 (undone by the scale), then inverse butterflies.
+// length 2m of P, and q, that of Q_s. For leaves 2p, 2p + 1 (moduli z^8 - w, w = +-s, s = r[p]),
+// with u = z^2: P(z^2) mod (z^8 - w) = p(u) = lo + w hi, where leaf p of f is
+// P mod (u^8 - s^2) = lo + u^4 hi; and with c = Q_s mod (z^8 - w) = ce(u) + z co(u),
+// R mod (z^8 - w) = p(u) ce(u) - z p(u) co(u) mod (u^4 - w). Pairs go 8 at a time, one per lane
+// (coefficients transposed); tiles hold at least 16 vectors (4m >= 256). Products times 2^-32
+// (undone by the scale), then inverse butterflies.
 struct CompositionBottom {
     static constexpr bool kForward = false, kInverse = true;
     const Tables* tables;
     const std::uint32_t *f, *q;
 
-    // Leaves 2p and 2p + 1 of R, in [0, 2P).
-    [[gnu::always_inline]] void pair(std::size_t p, Vec& r0, Vec& r1) const {
-        const Vec x = load(f + 8 * p), lo = _mm256_permute2x128_si256(x, x, 0x00);
-        const Factor s = entry(tables->roots, p);
-        const Vec t = times(_mm256_permute2x128_si256(x, x, 0x11), s);
-        const Vec v = canonical(_mm256_blend_epi32(add(lo, t), diff(lo, t), 0xF0));  // p(u) per lane
-        const Vec sv = reduce(times(v, s), kP), wv = _mm256_blend_epi32(sv, negate(sv), 0xF0);
-        // u^i p mod (u^4 - w): words 4 - i .. 7 - i of [w p, p]
-        const Vec rot[4] = {v, _mm256_alignr_epi8(v, wv, 12), _mm256_alignr_epi8(v, wv, 8), _mm256_alignr_epi8(v, wv, 4)};
-        const Vec qa = load(q + 16 * p), qb = load(q + 16 * p + 8);
-        const Vec c03 = _mm256_permute2x128_si256(qa, qb, 0x20), c47 = _mm256_permute2x128_si256(qa, qb, 0x31);
-        const Vec ce[4] = {_mm256_shuffle_epi32(c03, 0x00), _mm256_shuffle_epi32(c03, 0xAA), _mm256_shuffle_epi32(c47, 0x00),
-                           _mm256_shuffle_epi32(c47, 0xAA)};
-        const Vec co[4] = {_mm256_shuffle_epi32(c03, 0x55), _mm256_shuffle_epi32(c03, 0xFF), _mm256_shuffle_epi32(c47, 0x55),
-                           _mm256_shuffle_epi32(c47, 0xFF)};
-        Wide even{}, odd{};
+    // One leaf per lane: c[k] = coefficient k of Q_s mod (z^8 - w), p[i] = p_i and wp[i] = w p_i
+    // (canonical). out[k] = coefficient k of R mod (z^8 - w), in [0, 2P). Each sum has 4 products.
+    static void leaf(const Vec (&p)[4], const Vec (&wp)[4], const Vec (&c)[8], Vec (&out)[8]) {
+        Lanes pl[4], wl[4], cl[8];
+#pragma GCC unroll 4
+        for (int i = 0; i < 4; ++i) pl[i] = lanes(p[i]), wl[i] = lanes(wp[i]);
+#pragma GCC unroll 8
+        for (int k = 0; k < 8; ++k) cl[k] = lanes(c[k]);
+#pragma GCC unroll 4
+        for (int k = 0; k < 4; ++k) {
+            Wide even{}, odd{};  // u^i c_(k-i): p_i c_(k-i) for i <= k, w p_i c_(k-i+4) for i > k
+#pragma GCC unroll 4
+            for (int i = 0; i < 4; ++i) {
+                const Lanes& x = i <= k ? pl[i] : wl[i];
+                const int j = (k - i + 4) % 4;
+                even = even + wide(x, cl[2 * j]);
+                odd = odd + wide(x, cl[2 * j + 1]);
+            }
+            out[2 * k] = reduce_wide(even);
+            out[2 * k + 1] = reduce(_mm256_sub_epi32(broadcast(2 * kP), reduce_wide(odd)), 2 * kP);
+        }
+    }
+
+    // Leaves 2p .. 2p + 15 of R into r.
+    void products(std::size_t p, Vec (&r)[16]) const {
+        Vec x[8], a[8], b[8];
+#pragma GCC unroll 8
+        for (int i = 0; i < 8; ++i) x[i] = load(f + 8 * (p + i)), a[i] = load(q + 16 * (p + i)), b[i] = load(q + 16 * (p + i) + 8);
+        transpose(x), transpose(a), transpose(b);
+        Factor s(0);  // r[p + lane]
+        s.w = load(tables->roots + slot(p)), s.q = load(tables->roots + slot(p) + 8);
+        Vec pa[4], pb[4], spa[4], spb[4];
 #pragma GCC unroll 4
         for (int i = 0; i < 4; ++i) {
-            const Lanes r = lanes(rot[i]);  // ce[i], co[i] are broadcasts: their odd lanes equal the even ones
-            even = even + wide(r, {ce[i], ce[i]});
-            odd = odd + wide(r, {co[i], co[i]});
+            const Vec t = times_lanes(x[i + 4], s);
+            pa[i] = canonical(add(x[i], t)), pb[i] = canonical(diff(x[i], t));
+            spa[i] = reduce(times_lanes(pa[i], s), kP), spb[i] = negate(reduce(times_lanes(pb[i], s), kP));
         }
-        const Vec e = reduce_wide(even);  // sums of 4 products: below 2P
-        const Vec o = reduce(_mm256_sub_epi32(broadcast(2 * kP), reduce_wide(odd)), 2 * kP);
-        const Vec l = _mm256_unpacklo_epi32(e, o), h = _mm256_unpackhi_epi32(e, o);
-        r0 = _mm256_permute2x128_si256(l, h, 0x20), r1 = _mm256_permute2x128_si256(l, h, 0x31);
+        Vec ra[8], rb[8];
+        leaf(pa, spa, a, ra);
+        leaf(pb, spb, b, rb);
+        transpose(ra), transpose(rb);
+#pragma GCC unroll 8
+        for (int i = 0; i < 8; ++i) r[2 * i] = ra[i], r[2 * i + 1] = rb[i];
     }
 
     void operator()(std::uint32_t* out, std::size_t count, std::size_t first) const {
-        for (std::size_t j = 0; j < count; ++j, out += 32) {
-            const std::size_t g = first + j;
-            Vec r[4];
-            pair(2 * g, r[0], r[1]);
-            pair(2 * g + 1, r[2], r[3]);
-            inverse_h1(r, Group(tables->inverse_roots, g));
-            for (int t = 0; t < 4; ++t) store(out + 8 * t, r[t]);
+        for (std::size_t j = 0; j < count; j += 4, out += 128) {
+            Vec r[16];
+            products(2 * (first + j), r);
+#pragma GCC unroll 4
+            for (int i = 0; i < 4; ++i) {
+                Vec g[4] = {r[4 * i], r[4 * i + 1], r[4 * i + 2], r[4 * i + 3]};
+                inverse_h1(g, Group(tables->inverse_roots, first + j + i));
+#pragma GCC unroll 4
+                for (int t = 0; t < 4; ++t) store(out + 32 * i + 8 * t, g[t]);
+            }
         }
     }
 };

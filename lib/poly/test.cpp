@@ -119,6 +119,47 @@ std::vector<std::size_t> leaves_to_check(std::size_t n) {
     return ps;
 }
 
+// The leaf kernels against scalar code: leaf_product on windows with any words in [0, P] (the
+// kernel reads only words 1 .. 16) and canonical b, including all-zero, all-(P - 1) and all-P
+// inputs; fill_windows on canonical leaves, including 0 and P - 1.
+void test_leaf_kernels(Fixture& fx) {
+    using poly::detail::Vec;
+    const u32 inverse_r = power(u32((u64(1) << 32) % P), P - 2);  // 2^-32
+    const auto word = [](int kind) {
+        const u64 r = rng();
+        return kind == 0 ? u32(r % (P + 1)) : kind == 1 ? 0 : kind == 2 ? P - 1 : kind == 3 ? P : u32(r % 2 ? P : r % 3);
+    };
+    for (int trial = 0; trial < 20000; ++trial) {
+        const int kind = trial < 100 ? trial % 5 : 0;
+        poly::detail::Window window;
+        for (u32& x : window.word) x = word(kind);
+        alignas(32) u32 b[8], out[8];
+        for (u32& x : b) x = kind == 3 || kind == 4 ? (rng() % 2 ? P - 1 : 0) : std::min(word(kind), P - 1);
+        poly::detail::store(out, poly::detail::leaf_product(window, b));
+        for (int j = 0; j < 8; ++j) {
+            u64 s = 0;
+            for (int i = 0; i < 8; ++i) s = (s + u64(b[i]) * window.word[8 - i + j]) % P;
+            expect(out[j] < 2 * P && out[j] % P == mul(u32(s), inverse_r), "leaf_product", trial, j);
+        }
+    }
+    for (int trial = 0; trial < 2000; ++trial) {
+        const std::size_t g = trial < 1000 ? std::size_t(trial) : pick(std::size_t(1) << (kLgMax - 5));
+        alignas(32) u32 a[4][8];
+        for (auto& leaf : a)
+            for (u32& x : leaf) x = trial % 3 == 0 ? u32(rng() % 2 ? 0 : P - 1) : u32(rng() % P);
+        const Vec f[4] = {poly::detail::load(a[0]), poly::detail::load(a[1]), poly::detail::load(a[2]), poly::detail::load(a[3])};
+        poly::detail::Window window[4];
+        poly::detail::fill_windows(window, f, fx.roots.data(), g);
+        for (int t = 0; t < 4; ++t) {
+            const u32 r = fx.roots[ntt::detail::slot(2 * g + t / 2)], w = t % 2 ? P - r : r;
+            for (int j = 0; j < 8; ++j) {
+                expect(window[t].word[8 + j] == a[t][j], "fill_windows: leaf", g, j);
+                expect(window[t].word[j] <= P && window[t].word[j] % P == mul(w, a[t][j]), "fill_windows: w a", g, j);
+            }
+        }
+    }
+}
+
 void test_transforms(Fixture& fx) {
     for (int lg = poly::Transform::kMinLog; lg <= kLgMax; ++lg) {
         const std::size_t n = std::size_t(1) << lg;
@@ -636,6 +677,7 @@ void test_sqrt(Fixture& fx) {
 
 int main() {
     static Fixture fx;
+    test_leaf_kernels(fx);
     test_transforms(fx);
     test_inverse(fx);
     test_derivative();

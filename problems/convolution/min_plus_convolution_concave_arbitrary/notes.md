@@ -3,7 +3,7 @@
 c_k = min over i + j = k of a_i + b_j; a concave, b arbitrary. N, M <= 2^19, values in
 [0, 10^9], so c_k < 2^31 fits uint32. 5 s.
 
-Best judged: 27 ms, [409239](https://judge.yosupo.jp/submission/409239) (`main.cpp` of #102).
+Best judged: 24 ms, [409555](https://judge.yosupo.jp/submission/409555) (`main.cpp` of #270).
 Record when the issue opened: 117 ms.
 
 ## Design
@@ -151,6 +151,11 @@ Record when the issue opened: 117 ms.
     columns more than 1024 apart occur; the far path forced (near limit 2) and the near path
     forced with a 4-bucket rank table: 2000 stress rounds and 41/41 each; ASan/UBSan on 15
     official cases, file and pipe input.
+  - CI (#270), 3 slowest cases: EPYC 9V45 0.853, EPYC 7763 0.886, EPYC 9V74 0.845.
+  - After the merge: prefetching, at each push, the row where the next column would cross the
+    new top (d = 1, rank without division): sweeps 15.3 -> 16.0 (slower).
+  - Submitted the merged `main.cpp` (#270): [409555](https://judge.yosupo.jp/submission/409555)
+    AC 24 ms, 25.4 MiB (was 27 ms). `spikes.py`: clean 24 ms (large_small_00 spiked to 16 ms).
 - Next: monotone_01/02 (~24 ms) against ~11 ms for the rest. The insertions are bound by branch
   misses (pop or not, near or far) and the chain through each entry's end; removing branches
   made it slower. Untried: two independent half-sweeps interleaved (round 2's forward/backward

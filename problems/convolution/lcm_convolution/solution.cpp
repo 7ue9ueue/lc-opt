@@ -6,7 +6,6 @@
 // stages (prime factors below and above 100).
 // a and b are interleaved as pairs, so one load fetches both. Design and measurements: notes.md.
 #include <immintrin.h>
-#include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -18,6 +17,7 @@
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
+#include "lib/mem/huge.hpp"
 #include "../convolution_mod/fields.hpp"
 
 namespace {
@@ -95,19 +95,6 @@ Vec spread(Vec x) {
 }
 
 void add_pair(std::uint64_t* dst, const std::uint64_t* src) { store_pair(dst, add(load_pair(dst), load_pair(src))); }
-
-// Zeroed memory in 2 MiB pages where the kernel allows. Never freed.
-char* allocate(std::size_t bytes) {
-    constexpr std::size_t kHuge = std::size_t(1) << 21;
-    bytes = (bytes + kHuge - 1) / kHuge * kHuge;
-    void* p = ::mmap(nullptr, bytes + kHuge, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) std::abort();
-    const std::uintptr_t aligned = (reinterpret_cast<std::uintptr_t>(p) + kHuge - 1) & ~(kHuge - 1);
-#ifdef MADV_HUGEPAGE
-    ::madvise(reinterpret_cast<void*>(aligned), bytes, MADV_HUGEPAGE);
-#endif
-    return reinterpret_cast<char*>(aligned);
-}
 
 // The rough numbers (coprime to 30030 = 2 3 5 7 11 13) as a wheel: the one with index t is
 // (t / kSpokes) kWheel + spoke[t % kSpokes]. Index 0 is 1, index 1 is 17.
@@ -455,7 +442,7 @@ void solve() {
     constexpr std::size_t kPad = 64;
     const std::size_t words = n + kPad;
     const std::size_t text_offset = (3 * words * sizeof(std::uint32_t) + 63) / 64 * 64;
-    char* const base = allocate(text_offset + fields::kTextBytes);
+    char* const base = mem::huge<char>(text_offset + fields::kTextBytes);
     auto* const region = reinterpret_cast<std::uint32_t*>(base);
     auto* const pairs = reinterpret_cast<std::uint64_t*>(region);
     std::uint32_t* const a = region + words;

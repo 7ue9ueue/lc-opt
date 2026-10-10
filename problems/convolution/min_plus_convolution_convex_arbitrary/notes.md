@@ -66,3 +66,6 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.36 ms on `lc-amd`.
 - 2026-10-10, claude (lib/io #21, round 3): submitted the #176 `main.cpp`,
   [409383](https://judge.yosupo.jp/submission/409383): AC 15 ms, 21.3 MiB; seven launch spikes,
   clean 11 ms (`tools/spikes.py`). Best judged stays 11 ms.
+- 2026-10-10, claude (lib, issue #156 round 2): the huge-page allocation comes from
+  `lib/mem/huge.hpp` instead of a local copy. Same stripped executable as before (judge flags,
+  `lc-amd`).

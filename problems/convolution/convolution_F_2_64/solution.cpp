@@ -7,7 +7,6 @@
 // (Taylor expansions in x^tau + x). The transform evaluates f = sum d_j X_j at omega_k =
 // sum_{bits of k} beta_b, k < 2^l; stage i uses the twiddle s_i(omega_c) = omega_{c >> i} for the
 // block at c.
-#include <sys/mman.h>
 #include <unistd.h>
 
 #include <array>
@@ -16,6 +15,7 @@
 
 #include "lib/io/bulk64.hpp"
 #include "lib/io/io.hpp"
+#include "lib/mem/huge.hpp"
 #include "fields.hpp"
 #include "../text_buffer.hpp"
 
@@ -865,19 +865,6 @@ void multiply_transformed(u64* a, u64* b, std::size_t c, int i) {
     }
 }
 
-// words u64 words, 2 MiB aligned and zeroed, in huge pages where the kernel allows.
-u64* allocate(std::size_t words) {
-    constexpr std::size_t kHuge = std::size_t(1) << 21;
-    const std::size_t bytes = (words * sizeof(u64) + kHuge - 1) / kHuge * kHuge + kHuge;
-    void* region = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (region == MAP_FAILED) std::abort();
-    const std::uintptr_t start = (reinterpret_cast<std::uintptr_t>(region) + kHuge - 1) & ~(kHuge - 1);
-#ifdef MADV_HUGEPAGE
-    ::madvise(reinterpret_cast<void*>(start), bytes - kHuge, MADV_HUGEPAGE);
-#endif
-    return reinterpret_cast<u64*>(start);
-}
-
 // a * b, the product left in a[0, n + m - 1). a and b hold 2^l words each, zero past n and m.
 void convolve(u64* a, std::size_t n, u64* b, std::size_t m, int l) {
     const std::size_t half = std::size_t(1) << (l - 1);
@@ -909,7 +896,7 @@ void solve() {
     // At least 2^15 words each: once the product is in a, b holds the output text.
     static_assert(fields64::kTextBytes <= (std::size_t(1) << 15) * sizeof(u64));
     const std::size_t words = std::size_t(1) << std::max(l, 15);
-    u64* a = allocate(2 * words);
+    u64* a = mem::huge<u64>(2 * words);
     u64* b = a + words;
     io::read_bulk(in, a, n);
     io::read_bulk(in, b, m);

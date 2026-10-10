@@ -373,9 +373,8 @@ files on tmpfs.
   pointer chains. Tried and lost: more streams, four tokens per step, a bitmap of separators.
 - A faster uint64 write: only if a problem's floor becomes a large share of its time
   (convolution_mod_2_64 and convolution_F_2_64 are at 25% and 5% now).
-- Huge-page arrays (2 MiB-aligned mapping, `MADV_HUGEPAGE`) are copied in three solutions and cut
-  floors by 15-20%: a shared helper may belong in `lib/`. It gains nothing on solved problems
-  (all allocate this way already); add it with the next problem that needs it.
+- Huge-page arrays (2 MiB-aligned mapping, `MADV_HUGEPAGE`) cut floors by 15-20%: now
+  `lib/mem/huge.hpp` (issue #156), used by `floor.cpp` and 9 convolution solutions.
 - Streamed input lost to the mapping on all four solved convolution problems (round 2); the rest
   of the floors is kernel time (`write()`, input faults, `munmap`, huge-page zeroing), the parser
   (~1.0 ns per token on Zen 3 with `bulk32.hpp`) and the formatter. Round 4 found no cheaper

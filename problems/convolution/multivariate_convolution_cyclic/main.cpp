@@ -5,7 +5,6 @@
 // point of the short axes' spectrum, the exact product over Z by Kronecker substitution (factor
 // r padded to 2 D_r - 1), modulo three NTT primes (lib/multimod), the CRT straight to residues
 // mod p, then folded back to cyclic.
-#include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -993,6 +992,63 @@ inline void read_bulk(Reader& in, std::uint32_t* dst, std::size_t count) {
 }
 
 }  // namespace io
+// lib/mem/huge.hpp
+// Zero-filled memory in transparent huge pages (2 MiB) where the kernel allows. Never freed: the
+// programs end with _exit. Linux or macOS. Measurements: lib/mem/notes.md.
+//
+//   auto* a = mem::huge<std::uint32_t>(n);   // n zeroed values, 2 MiB aligned
+//   mem::Arena arena(bytes);                 // one mapping for several arrays
+//   auto* b = arena.take<std::uint64_t>(m);  // m zeroed values, 64-byte aligned
+//
+// Pages fault in on first touch. An arena of B bytes holds takes whose sizes, each rounded up to
+// 64 bytes, sum to at most B; it does not check.
+
+#include <sys/mman.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+
+namespace mem {
+
+inline constexpr std::size_t kHugePage = std::size_t(1) << 21;
+
+// bytes rounded up to whole huge pages, 2 MiB aligned.
+inline void* map_huge(std::size_t bytes) {
+    bytes = (bytes + kHugePage - 1) / kHugePage * kHugePage;
+    void* region = ::mmap(nullptr, bytes + kHugePage, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (region == MAP_FAILED) std::abort();
+    const std::uintptr_t aligned = (reinterpret_cast<std::uintptr_t>(region) + kHugePage - 1) & ~(kHugePage - 1);
+#ifdef MADV_HUGEPAGE
+    ::madvise(reinterpret_cast<void*>(aligned), bytes, MADV_HUGEPAGE);
+#endif
+    return reinterpret_cast<void*>(aligned);
+}
+
+// count values of T.
+template <class T>
+T* huge(std::size_t count) {
+    return static_cast<T*>(map_huge(count * sizeof(T)));
+}
+
+// Bump allocation from one map_huge() mapping.
+class Arena {
+public:
+    explicit Arena(std::size_t bytes) : cur_(reinterpret_cast<std::uintptr_t>(map_huge(bytes))) {}
+
+    // count values of T; the next take starts at the next multiple of 64 bytes.
+    template <class T>
+    T* take(std::size_t count) {
+        T* p = reinterpret_cast<T*>(cur_);
+        cur_ += (count * sizeof(T) + 63) & ~std::size_t(63);
+        return p;
+    }
+
+private:
+    std::uintptr_t cur_;
+};
+
+}  // namespace mem
 // problems/convolution/convolution_mod/fields.hpp
 // Fixed-width output of residues < 10^9, byte for byte as ../fixed_width.hpp: each value
 // right-aligned in 9 characters, then a space; the last separator is a newline. Judge-specific:
@@ -3509,33 +3565,8 @@ std::uint32_t primitive_root(const Field& field) {
     }
 }
 
-// Bump allocation in one mapping with transparent huge pages; memory starts zeroed. Never freed:
-// the program ends with _exit.
-class Arena {
-public:
-    explicit Arena(std::size_t bytes) {
-        constexpr std::size_t kHuge = std::size_t(1) << 21;
-        bytes = (bytes + kHuge - 1) / kHuge * kHuge + kHuge;
-        void* region = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (region == MAP_FAILED) std::abort();
-        cur_ = (reinterpret_cast<std::uintptr_t>(region) + kHuge - 1) & ~(kHuge - 1);
-#ifdef MADV_HUGEPAGE
-        ::madvise(reinterpret_cast<void*>(cur_), bytes - kHuge, MADV_HUGEPAGE);
-#endif
-    }
-
-    template <class T>
-    T* take(std::size_t count) {
-        T* p = reinterpret_cast<T*>(cur_);
-        cur_ += (count * sizeof(T) + 63) & ~std::size_t(63);
-        return p;
-    }
-
-    static std::size_t bytes(std::size_t words) { return 4 * words + 64; }
-
-private:
-    std::uintptr_t cur_;
-};
+// Arena bytes that a take of `words` words may use (mem::Arena rounds takes up to 64 bytes).
+std::size_t take_bytes(std::size_t words) { return 4 * words + 64; }
 
 struct Axis {
     std::size_t length, stride;
@@ -3811,7 +3842,7 @@ int transform_log(std::size_t padded) { return std::max(6, int(std::bit_width(pa
 class LongProduct {
 public:
     // The long axes' cyclic factors have a padded extent of at most 2^kMaxLog.
-    LongProduct(const std::vector<Axis>& axes, const Field& field, std::uint32_t scale, Arena& arena)
+    LongProduct(const std::vector<Axis>& axes, const Field& field, std::uint32_t scale, mem::Arena& arena)
         : crt_(field, scale), p_(field.p), axes_(axes), direct_(axes.size() == 1 && axes[0].stride == 1) {
         CyclicFactors factors(axes);
         lengths_ = std::move(factors.length);
@@ -3834,7 +3865,7 @@ public:
     static std::size_t arena_bytes(const std::vector<Axis>& axes) {
         const int lg = transform_log(CyclicFactors(axes).padded());
         const std::size_t words = (std::size_t(1) << lg) + multimod::Transform::kPadding;
-        return (2 + kPrimes) * Arena::bytes(words) + Arena::bytes(multimod::Transform::table_words(lg));
+        return (2 + kPrimes) * take_bytes(words) + take_bytes(multimod::Transform::table_words(lg));
     }
 
     // f[base + offset] <- (f * g)[base + offset] over the long axes, times the scale. With several
@@ -4050,8 +4081,8 @@ void solve() {
 
     const std::size_t rows = 8 * narrow_row(short_axes);
     const std::size_t padded_total = (total + rows - 1) / rows * rows;
-    Arena arena(2 * Arena::bytes(padded_total) + Arena::bytes(fields::kTextBytes / 4 + 1) +
-                (long_axes.empty() ? 0 : LongProduct::arena_bytes(long_axes)));
+    mem::Arena arena(2 * take_bytes(padded_total) + take_bytes(fields::kTextBytes / 4 + 1) +
+                     (long_axes.empty() ? 0 : LongProduct::arena_bytes(long_axes)));
     auto* f = arena.take<std::uint32_t>(padded_total);
     auto* g = arena.take<std::uint32_t>(padded_total);
     io::read_bulk(in, f, total);

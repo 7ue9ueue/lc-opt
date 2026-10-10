@@ -7,27 +7,16 @@
 //   LAYOUT 5: "P K", then as LAYOUT 4
 // VALUE is the element type. With SUMS, answer values are sums of two inputs (min-plus
 // convolutions). With FIXED, the answer goes out in fixed-width fields (values < 10^9).
-#include <sys/mman.h>
 
 #include "lib/io/io.hpp"
 #include "lib/io/bulk64.hpp"
+#include "lib/mem/huge.hpp"
 #include "convolution_mod/fields.hpp"
 #include "text_buffer.hpp"
 
 namespace {
 
 using Value = VALUE;
-
-// count values, 2 MiB aligned, in huge pages where the kernel allows, as the solutions allocate.
-Value* allocate(std::size_t count) {
-    constexpr std::size_t kHuge = std::size_t(1) << 21;
-    const std::size_t bytes = (count * sizeof(Value) + kHuge - 1) / kHuge * kHuge + kHuge;
-    void* region = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (region == MAP_FAILED) std::abort();
-    const std::uintptr_t start = (reinterpret_cast<std::uintptr_t>(region) + kHuge - 1) & ~(kHuge - 1);
-    ::madvise(reinterpret_cast<void*>(start), bytes - kHuge, MADV_HUGEPAGE);
-    return reinterpret_cast<Value*>(start);
-}
 
 // count values into dst with lib/io's bulk parsers. A template, so the branch not taken is discarded.
 template <class T>
@@ -53,7 +42,7 @@ int main() {
         for (auto k = in.read<std::uint32_t>(); k; --k) n *= in.read<std::uint32_t>();
         m = n;
     }
-    Value* const a = allocate(n + m);  // a, then b
+    Value* const a = mem::huge<Value>(n + m);  // a, then b; in huge pages, as the solutions
     read_values(in, a, n);
     read_values(in, a + n, m);
     const std::size_t answer = LAYOUT == 1 ? n + m - 1 : n;  // a, then b without its last value

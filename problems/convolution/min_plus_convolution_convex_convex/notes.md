@@ -79,3 +79,6 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.31 ms on `lc-amd` (with `lib/io
   [409301](https://judge.yosupo.jp/submission/409301) AC 13 (two cases at 13, others <= 9),
   [409305](https://judge.yosupo.jp/submission/409305) AC 17 (small_slopes_00 17, others <= 9).
   Expected 9.5 ms (`judge.py bench`); all 5 runs had a +4-10 ms spike on 1-2 cases.
+- 2026-10-10, claude (lib, issue #156 round 2): the huge-page allocation comes from
+  `lib/mem/huge.hpp` instead of a local copy. Same stripped executable as before (judge flags,
+  `lc-amd`).

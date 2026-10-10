@@ -8,7 +8,6 @@
 // (Taylor expansions in x^tau + x). The transform evaluates f = sum d_j X_j at omega_k =
 // sum_{bits of k} beta_b, k < 2^l; stage i uses the twiddle s_i(omega_c) = omega_{c >> i} for the
 // block at c.
-#include <sys/mman.h>
 #include <unistd.h>
 
 #include <array>
@@ -972,6 +971,63 @@ inline void read_bulk(Reader& in, std::uint64_t* dst, std::size_t count) {
 }
 
 }  // namespace io
+// lib/mem/huge.hpp
+// Zero-filled memory in transparent huge pages (2 MiB) where the kernel allows. Never freed: the
+// programs end with _exit. Linux or macOS. Measurements: lib/mem/notes.md.
+//
+//   auto* a = mem::huge<std::uint32_t>(n);   // n zeroed values, 2 MiB aligned
+//   mem::Arena arena(bytes);                 // one mapping for several arrays
+//   auto* b = arena.take<std::uint64_t>(m);  // m zeroed values, 64-byte aligned
+//
+// Pages fault in on first touch. An arena of B bytes holds takes whose sizes, each rounded up to
+// 64 bytes, sum to at most B; it does not check.
+
+#include <sys/mman.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+
+namespace mem {
+
+inline constexpr std::size_t kHugePage = std::size_t(1) << 21;
+
+// bytes rounded up to whole huge pages, 2 MiB aligned.
+inline void* map_huge(std::size_t bytes) {
+    bytes = (bytes + kHugePage - 1) / kHugePage * kHugePage;
+    void* region = ::mmap(nullptr, bytes + kHugePage, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (region == MAP_FAILED) std::abort();
+    const std::uintptr_t aligned = (reinterpret_cast<std::uintptr_t>(region) + kHugePage - 1) & ~(kHugePage - 1);
+#ifdef MADV_HUGEPAGE
+    ::madvise(reinterpret_cast<void*>(aligned), bytes, MADV_HUGEPAGE);
+#endif
+    return reinterpret_cast<void*>(aligned);
+}
+
+// count values of T.
+template <class T>
+T* huge(std::size_t count) {
+    return static_cast<T*>(map_huge(count * sizeof(T)));
+}
+
+// Bump allocation from one map_huge() mapping.
+class Arena {
+public:
+    explicit Arena(std::size_t bytes) : cur_(reinterpret_cast<std::uintptr_t>(map_huge(bytes))) {}
+
+    // count values of T; the next take starts at the next multiple of 64 bytes.
+    template <class T>
+    T* take(std::size_t count) {
+        T* p = reinterpret_cast<T*>(cur_);
+        cur_ += (count * sizeof(T) + 63) & ~std::size_t(63);
+        return p;
+    }
+
+private:
+    std::uintptr_t cur_;
+};
+
+}  // namespace mem
 // problems/convolution/convolution_F_2_64/fields.hpp
 // Output of uint64 values separated by whitespace, then a newline. Blocks of mostly large values
 // are printed in fixed width by ../convolution_mod_2_64/fields64.hpp: a space, then each value
@@ -2065,19 +2121,6 @@ void multiply_transformed(u64* a, u64* b, std::size_t c, int i) {
     }
 }
 
-// words u64 words, 2 MiB aligned and zeroed, in huge pages where the kernel allows.
-u64* allocate(std::size_t words) {
-    constexpr std::size_t kHuge = std::size_t(1) << 21;
-    const std::size_t bytes = (words * sizeof(u64) + kHuge - 1) / kHuge * kHuge + kHuge;
-    void* region = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (region == MAP_FAILED) std::abort();
-    const std::uintptr_t start = (reinterpret_cast<std::uintptr_t>(region) + kHuge - 1) & ~(kHuge - 1);
-#ifdef MADV_HUGEPAGE
-    ::madvise(reinterpret_cast<void*>(start), bytes - kHuge, MADV_HUGEPAGE);
-#endif
-    return reinterpret_cast<u64*>(start);
-}
-
 // a * b, the product left in a[0, n + m - 1). a and b hold 2^l words each, zero past n and m.
 void convolve(u64* a, std::size_t n, u64* b, std::size_t m, int l) {
     const std::size_t half = std::size_t(1) << (l - 1);
@@ -2109,7 +2152,7 @@ void solve() {
     // At least 2^15 words each: once the product is in a, b holds the output text.
     static_assert(fields64::kTextBytes <= (std::size_t(1) << 15) * sizeof(u64));
     const std::size_t words = std::size_t(1) << std::max(l, 15);
-    u64* a = allocate(2 * words);
+    u64* a = mem::huge<u64>(2 * words);
     u64* b = a + words;
     io::read_bulk(in, a, n);
     io::read_bulk(in, b, m);

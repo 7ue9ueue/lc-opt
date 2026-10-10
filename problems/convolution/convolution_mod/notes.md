@@ -132,6 +132,9 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
   - Bottom stage in isolation (one 256-vector tile): `bottom_first` 76, `bottom_last` 93,
     `bottom_both` 146 cycles per group (~100 by slot count). Leaf windows read 2 or 3 batches
     after they are written (store forwarding): 1.42 and 1.39 vs 1.35-1.39 ms. Not kept.
+    `gen_kernels.py` knobs for `bottom_both` (15 seeds, window 8/16, shift -0.15 to 0.05,
+    jitter 0/1/6, margin 1/2; 26 sets): 145-152 cycles per group, the committed set (seed 540)
+    the fastest. The limit is not the schedule.
   - Formatter in memory (2^20 values, cycles per 16 values): GCC 34.2; blanks by `and`/`sub`
     instead of `vpblendvb` 34.7; odd lanes from loads instead of shifts 34.9; stages interleaved
     in source order 38.5; text blocks of 1600 to 25600 values 33.8-34.3. A list-scheduled inline
@@ -148,10 +151,17 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
   - Huge page first touch: 0.04-0.11 ms per 2 MiB (5 per run); 4 KiB pages 0.8 ms per 2 MiB.
   - `write()` of 10 MB to tmpfs, `perf` on `lc-intel` (kernel 7.0): `shmem_add_to_page_cache`
     30% of the call, the copy 10%. Nothing to change from user code.
+  - Page faults per phase (`getrusage`): parse of a 97 with `io::read_bulk`, 94 with
+    `Reader::read`; `bulk32.hpp`'s static buffers add 3.
   - Checks: 53/53 official tests, stress 500 rounds (pipe input), ASan/UBSan on 11 official
     cases (file and pipe input).
+  - CI (#181): geomean 0.9929 (EPYC 9V45 0.9945 and 0.9897, EPYC 7763 0.9946).
+  - Submitted the merged `main.cpp` (#181) twice (2 of 5 this session):
+    [409392](https://judge.yosupo.jp/submission/409392) AC 21 ms and
+    [409394](https://judge.yosupo.jp/submission/409394) AC 21 ms. `spikes.py`: both clean 13 ms;
+    the 21 and 20 ms cases (fft_killer_01, all_same_01; fft_killer_03, all_same_02) are launch
+    spikes. Large cases without spikes: 3 and 1 at 13 ms, the rest 9-12 (409226: 7 at 13 ms).
+    Best judged stays 13 ms (409226).
 - Next: the bottom stage (31% of the transform, ~68% of its slot bound) is the largest
   inefficiency left; its leaf products need 20 multiplies per leaf on 2 pipes. The formatter is
-  at 34 cycles per 16 values whatever the instruction order. `bulk32.hpp`'s static buffers
-  (512 KB) fault in 4 KiB pages: ~110 KB touched per chunk here, ~30 faults (a guess, not
-  measured); in a huge page they might cost less.
+  at 34 cycles per 16 values whatever the instruction order.

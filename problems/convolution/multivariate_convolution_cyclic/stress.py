@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Compare main.cpp with brute.cpp on random inputs (tokens, since the output is padded), then
 main.cpp built with -DSHORT_LIMIT=1 (every axis long where the transform allows) and
--DSHORT_LIMIT=100000 (every axis short) against the default build on larger inputs.
+-DSHORT_LIMIT=100000 (every axis short) against the default build on larger inputs. Some inputs
+have two coprime axes (one cyclic factor), with up to two short ones.
 Needs g++ on x86-64 with AVX2.
 
 Usage: stress.py [ROUNDS] [CXXFLAGS ...]
@@ -42,10 +43,28 @@ def values(rng: random.Random, p: int, n: int) -> list[int]:
     return [rng.randrange(p) if rng.random() < 0.1 else 0 for _ in range(n)]
 
 
+def coprime_dims(rng: random.Random, limit: int) -> list[int]:
+    """Two coprime axes (one cyclic factor: the skewed transpose), and up to two of length 2..4."""
+    extra = [rng.randint(2, 4) for _ in range(rng.randint(0, 2))]
+    room = limit // math.prod(extra)
+    while True:
+        x = rng.randint(2, min(400, room // 2))
+        y = rng.randint(2, min(400, room // x))
+        if math.gcd(x, y) == 1:
+            break
+    dims = [x, y]
+    for d in extra:
+        dims.insert(rng.randint(0, len(dims)), d)
+    return dims
+
+
 def case(rng: random.Random, limit: int) -> str:
     longest = 400 if rng.random() < 0.5 else 12
     dims, total = [], 1
-    for _ in range(rng.randint(0, 6)):
+    if rng.random() < 0.3:
+        dims = coprime_dims(rng, limit)
+        total = math.prod(dims)
+    for _ in range(0 if dims else rng.randint(0, 6)):
         top = min(limit // total, longest)
         if top < 2:
             break

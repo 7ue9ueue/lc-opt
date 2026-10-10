@@ -327,7 +327,9 @@ private:
 };
 
 // The levels of g and work spans. Level 0 holds the transform of length 2m of g, levels
-// 1 .. T - 2 that of length 4m of Q_s, level T - 1 that of length m of -q, Q_(T-1) = 1 + x q(y).
+// 1 .. T - 3 that of length 4m of Q_s, level T - 2 those of length m/2 of -q1, q2, -q3 for
+// Q_(T-2) = 1 + x q1(y) + x^2 q2(y) + x^3 q3(y), level T - 1 that of length m of -q,
+// Q_(T-1) = 1 + x q(y).
 struct Levels {
     std::size_t m;  // 2^T >= 128
     int lg;         // T
@@ -366,8 +368,9 @@ inline void next_level(std::span<std::uint32_t> a, std::size_t stride, std::size
 // The transforms of all levels of g. t: lg_max >= levels.lg + 1.
 //  - Level 0, Q_0 = 1 - y g: G = T_2m(g); with u = x^2, g(x) g(-x) = v(u) from G by LevelBottom's
 //    pairs, and Q_1 = 1 - 2y ge(u) + y^2 v(u) mod u^(m/2), g = ge(x^2) + x go(x^2).
-//  - Level T - 2 (stride 4): Q_(T-1) = 1 + x q(y), deg q <= m/2, from v at stride 4: q[i] = v[4i + 1]
-//    for 0 < i < m/2 and the wrapped q[m/2] = v[1].
+//  - Level T - 3 (stride 8): Q_(T-2) = 1 + x q1 + x^2 q2 + x^3 q3, deg q_k <= m/4, from v at stride 8:
+//    q_k[i] = v[8i + k] for 0 < i < m/4 and the wrapped q_k[m/4] = v[k]. Then Q_(T-1) = 1 + x q with
+//    q = 2 q2 - q1^2 (deg <= m/2; q1^2 has no y^0 term, so its y^(m/2) wraps onto y^0).
 inline void build_levels(const Transform& t, std::span<const std::uint32_t> g, Levels& levels) {
     const std::size_t m = levels.m;
     const std::span<std::uint32_t> v = levels.work[0].first(2 * m), q0 = levels.level(0).first(2 * m);
@@ -384,18 +387,33 @@ inline void build_levels(const Transform& t, std::span<const std::uint32_t> g, L
         q1[m + j] = minus_2e >= kP ? minus_2e - kP : minus_2e;
         q1[2 * m + j] = v[j];
     }
-    for (int s = 1; s + 1 < levels.lg; ++s) {
+    for (int s = 1; s + 2 < levels.lg; ++s) {
         forward_with(levels.level(s), levels.tables, LevelBottom{&levels.tables, v.data()});
-        if (s + 2 < levels.lg) {
+        if (s + 3 < levels.lg) {
             t.inverse(v, levels.level(s + 1).first(2 * m));
             next_level(levels.level(s + 1), m >> s, std::size_t(2) << s);
         }
     }
-    t.inverse(v);  // stride 4
-    const std::span<std::uint32_t> q = levels.level(levels.lg - 1).first(m);
+    t.inverse(v);  // stride 8
+    const std::span<std::uint32_t> q = levels.level(levels.lg - 1).first(m);  // -q_(T-1)
+    std::span<std::uint32_t> c[4];
+    for (std::size_t k = 1; k < 4; ++k) {  // c[k] = (-1)^k q_k
+        c[k] = levels.level(levels.lg - 2).subspan((k - 1) * Arena::footprint(m / 2), m / 2);
+        std::fill(c[k].begin(), c[k].end(), 0);
+        for (std::size_t i = 1; i <= m / 4; ++i) {
+            const std::uint32_t x = v[8 * (i % (m / 4)) + k];
+            c[k][i] = k % 2 && x ? kP - x : x;
+        }
+    }
     std::fill(q.begin(), q.end(), 0);
-    for (std::size_t i = 1; i < m / 2; ++i) q[i] = v[4 * i + 1] ? kP - v[4 * i + 1] : 0;
-    q[m / 2] = v[1] ? kP - v[1] : 0;
+    for (std::size_t i = 1; i <= m / 4; ++i) q[i] = c[2][i] ? 2 * kP - 2 * c[2][i] - (2 * c[2][i] <= kP ? kP : 0) : 0;
+    const std::span<std::uint32_t> square = levels.work[1].first(m / 2);  // q1^2 mod (y^(m/2) - 1)
+    for (std::size_t k = 1; k < 4; ++k) t.forward(c[k]);
+    t.inverse_product(c[1], c[1], square);
+    for (std::size_t i = 1; i <= m / 2; ++i) {
+        const std::uint32_t x = q[i] + square[i % (m / 2)];
+        q[i] = x >= kP ? x - kP : x;
+    }
     t.forward(q);
 }
 
@@ -423,8 +441,9 @@ inline std::size_t compose_scratch(std::size_t n) {
 // reversed in x and y (stored at stride L), this is R = P(z^2) Q_s(-z) mod (z^4m - 1): P_s[a][b] =
 // R[L - 1 - a][2Y - 1 - b], so rows Y .. 2Y - 1 of R, x below L, are P_s reversed in x and y, the
 // input of level s - 1. P_T = f (one row in x); h[k] = P_0[m - 1 - k][0] = R[k][1] at level 0.
-// The first and last levels are one-dimensional:
+// The first and the last two levels are one-dimensional:
 //  - level T - 1: P = f reversed, R = p(y) (1 - x q(y)): rows y in [m/2, m) of p and -p q;
+//  - level T - 2: P = p0(y) + x^2 p1(y), R = P Q_(T-2)(-x) mod x^4 by columns;
 //  - level 0: P = p0(x) + y p1(x), R's row 1 = p1(x^2) - p0(x^2) g(-x) = h.
 inline void compose(const Transform& t, std::span<const std::uint32_t> f, std::span<const std::uint32_t> g,
                     std::span<std::uint32_t> h, std::span<std::uint32_t> scratch) {
@@ -435,16 +454,33 @@ inline void compose(const Transform& t, std::span<const std::uint32_t> f, std::s
     detail::build_levels(t, g, levels);
     const std::size_t m = levels.m;
     std::span<std::uint32_t> in = levels.work[0], out = levels.work[1];
-    // Level T - 1 into in[2m, 4m) at stride 4: rows [p[m/2 + i], (-p q)[m/2 + i], 0, 0].
+    // Level T - 1: columns p0 = p[m/2, m), p1 = (-p q)[m/2, m) of P_(T-2).
     const std::span<std::uint32_t> p = out.first(m), pq = out.subspan(m, m);
     for (std::size_t i = 0; i < m; ++i) p[i] = m - 1 - i < f.size() ? f[m - 1 - i] : 0;
     t.cyclic_product(p, 0, pq, levels.level(levels.lg - 1).first(m), Half::kUpper);
-    for (std::size_t i = 0; i < m / 2; ++i) {
-        in[2 * m + 4 * i] = p[m / 2 + i], in[2 * m + 4 * i + 1] = pq[m / 2 + i];
-        in[2 * m + 4 * i + 2] = in[2 * m + 4 * i + 3] = 0;
+    // Level T - 2, length m/2: columns r0 = p0, r1 = -p0 q1, r2 = p1 + p0 q2, r3 = -p1 q1 - p0 q3,
+    // rows [m/4, m/2), into in[2m, 4m) at stride 8 (columns 4 .. 7 zero).
+    {
+        const std::size_t h = m / 2;
+        const std::span<std::uint32_t> p0 = p.subspan(h), p1 = pq.subspan(h), t0 = in.first(h), t1 = in.subspan(m, h);
+        const std::span<std::uint32_t> c = levels.level(levels.lg - 2);
+        const auto column = [&](std::size_t k) { return c.subspan((k - 1) * Arena::footprint(h), h); };
+        const std::span<std::uint32_t> r1 = out.subspan(2 * m, h), r3 = out.subspan(2 * m + h, h), r2 = out.subspan(3 * m, h);
+        t.forward(p0, 0, t0);
+        t.forward(p1, 0, t1);
+        t.inverse_product(t0, column(1), r1, Half::kUpper);
+        t.inverse_product(t0, column(2), r2, Half::kUpper);
+        const Transform::Pair pairs[2] = {{t1, column(1)}, {t0, column(3)}};
+        t.inverse_product_sum(pairs, r3, Half::kUpper);
+        for (std::size_t i = h / 2; i < h; ++i) {
+            std::uint32_t* row = &in[2 * m + 8 * (i - h / 2)];
+            const std::uint32_t x = p1[i] + r2[i], y = r3[i];
+            row[0] = p0[i], row[1] = r1[i], row[2] = x >= kModulus ? x - kModulus : x, row[3] = y;
+            std::fill(row + 4, row + 8, 0);
+        }
     }
     const std::uint32_t scale = multiply_mod(power(std::uint32_t(m / 2), kModulus - 2), ntt::detail::kR);
-    for (int s = levels.lg - 2; s >= 1; --s) {
+    for (int s = levels.lg - 3; s >= 1; --s) {
         const std::span<std::uint32_t> x = in.subspan(2 * m);
         t.forward(x);
         detail::inverse_with(out, levels.tables, detail::CompositionBottom{&levels.tables, x.data(), levels.level(s).data()},

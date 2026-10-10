@@ -4,8 +4,9 @@ N <= 500000 coefficients of f mod 998244353 and 0 <= M <= 10^18; print the first
 of f^M. 10 s. Largest tests: max_random, binary_exp_max, lower_deg_zero2_00 (f[0] != 0 or few
 leading zeros, so u^M has close to 500000 coefficients; transforms up to 2^19).
 
-Best judged: ours, 26 ms, no spike: [409358](https://judge.yosupo.jp/submission/409358) (`main.cpp`
-of #166). Earlier: 29 ms, [409299](https://judge.yosupo.jp/submission/409299) (#137);
+Best judged: ours, 23 ms: [409718](https://judge.yosupo.jp/submission/409718) (`main.cpp` of
+#348; a spike on M_zero_00 only). Earlier: 26 ms, [409358](https://judge.yosupo.jp/submission/409358)
+(#166); 29 ms, [409299](https://judge.yosupo.jp/submission/409299) (#137);
 #140 also 29 ms ([409311](https://judge.yosupo.jp/submission/409311),
 [409312](https://judge.yosupo.jp/submission/409312)). #158: [409328](https://judge.yosupo.jp/submission/409328)
 32 ms with launch spikes, clean 27 ms.
@@ -94,5 +95,13 @@ unreliable; same-run ratios (`judge.py bench`) still hold.
   - Checks: 37/37 official tests (`lc-amd`, slowest 24.5 ms); `stress.py` 300 rounds; ASan/UBSan
     on all 37 cases, file and pipe input; exp, log, compositional_inverse (both) official tests,
     stress and ASan as well.
+  - Merged as #348. CI: pow 0.9839, compositional_inverse 0.9917, _large 0.9942, exp 0.9980, log
+    1.0066 (identical code); all 5 0.9948.
+  - Submitted the merged `main.cpp` 4 times, all AC, 17.3-17.5 MiB, each with launch spikes
+    (`tools/spikes.py`): [409715](https://judge.yosupo.jp/submission/409715) 28 ms
+    (monomial_ans_low_deg_03 28, peers 19), [409716](https://judge.yosupo.jp/submission/409716)
+    35 ms (max_random_00 35, lower_deg_zero2_01 27), [409717](https://judge.yosupo.jp/submission/409717)
+    34 ms (random_01 34), [409718](https://judge.yosupo.jp/submission/409718) 23 ms (spike on
+    M_zero_00 only). Clean 24, 24, 24, 23 ms; the large cases 23-24 ms (409358: 25-26).
 - Next: a cheaper division or exp step (the transform levels, lib/ntt's kernels, are the largest
   cost); T_k(q mod x^k) for exp's full step at m = k from T(d_0) (~0.05 ms, lib/poly/notes.md).

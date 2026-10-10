@@ -3,9 +3,9 @@
 // the slopes of a and b merged in ascending order, so c[k] is c[0] plus the k smallest slopes.
 // Output blocks of columns::kBlock values are computed and written in turn. In a block, kChains
 // independent chains each cover a range of k, interleaved so their latencies overlap. A chain
-// starts from an argmin (i, k - i) of c[k], found by binary search: the slopes before it in a and
-// b are k smallest ones, and the rest are no smaller. It then merges slopes eight at a time with
-// a bitonic network (AVX2 min/max) and adds them up.
+// starts from an argmin (i, k - i) of c[k], found by binary search, and then moves eight values
+// at a time: the merge from an argmin passes through an argmin of each later c[k + p], so
+// c[k + 1..k + 8] are minima over a window of 9 splits next to (i, k - i) (AVX2 add and min).
 #include <array>
 #include <bit>
 #include <climits>
@@ -1126,21 +1126,14 @@ using u32 = std::uint32_t;
 using i32 = std::int32_t;
 
 constexpr std::size_t kChains = 4;
-constexpr u32 kEnd = INT32_MAX;   // slope past the last element; above every real slope
-constexpr std::size_t kPad = 96;  // elements after a and b with slope kEnd; chains read < 64 past
+// Value of a and b outside their ends: above any value, and two of them add up without wrapping.
+// So window terms out of range never win, and real values (sums <= 2e9) compare as u32.
+constexpr u32 kEnd = INT32_MAX;
+constexpr std::size_t kPad = 96;   // elements kEnd after a and b; chains read < 64 past
+constexpr std::size_t kFront = 8;  // elements kEnd before b; windows read 3 before
 
 // Slopes are differences mod 2^32 read as i32: values are <= 1e9, so real slopes fit.
 i32 slope(const u32* p) { return i32(p[1] - p[0]); }
-
-__m256i slopes(const u32* p) {
-    const auto at = [p](int i) { return _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i)); };
-    return _mm256_sub_epi32(at(1), at(0));
-}
-
-// x[size, size + kPad): slope kEnd after x[size - 1].
-void extend(u32* x, std::size_t size) {
-    for (std::size_t i = size; i < size + kPad; ++i) x[i] = x[i - 1] + kEnd;
-}
 
 struct Chain {
     const u32* a;  // c[k] = *a + *b
@@ -1158,62 +1151,51 @@ Chain start(const u32* a, std::size_t n, const u32* b, std::size_t m, std::size_
     return {a + lo, b + (k - lo)};
 }
 
-// A bitonic vector sorted ascending, or descending with Descending: half-cleaners at distances
-// 4, 2, 1.
-template <bool Descending = false>
-__m256i sort_bitonic(__m256i v) {
-    constexpr int f = Descending ? 0xFF : 0;
-    __m256i p = _mm256_permute2x128_si256(v, v, 0x01);
-    v = _mm256_blend_epi32(_mm256_min_epi32(v, p), _mm256_max_epi32(v, p), 0xF0 ^ f);
-    p = _mm256_shuffle_epi32(v, 0x4E);
-    v = _mm256_blend_epi32(_mm256_min_epi32(v, p), _mm256_max_epi32(v, p), 0xCC ^ f);
-    p = _mm256_shuffle_epi32(v, 0xB1);
-    return _mm256_blend_epi32(_mm256_min_epi32(v, p), _mm256_max_epi32(v, p), 0xAA ^ f);
-}
-
-// carry + inclusive prefix sums of s.
-__m256i prefix_sums(__m256i s, __m256i carry) {
-    s = _mm256_add_epi32(s, _mm256_slli_si256(s, 4));
-    s = _mm256_add_epi32(s, _mm256_slli_si256(s, 8));
-    const __m256i low_total = _mm256_shuffle_epi32(s, 0xFF);
-    s = _mm256_add_epi32(s, _mm256_permute2x128_si256(low_total, low_total, 0x08));  // into the high half
-    return _mm256_add_epi32(s, carry);
+// [c[k + 1], ..., c[k + 8]] for an argmin (x - a, y - b) of c[k]: lane p - 1 is the minimum of
+// x[q] + y[p - q] over q in [0, 8]. Each term is a[i'] + b[k + p - i'] for some i', or holds
+// kEnd; the merge from (x, y) passes through an argmin of c[k + p] with q <= p. Terms with q in
+// [5, 8] matter only for p >= 5, the high half.
+__m256i minima(const u32* x, const u32* y) {
+    const auto low = [x, y](int q) {
+        return _mm256_add_epi32(_mm256_set1_epi32(i32(x[q])), _mm256_loadu_si256(reinterpret_cast<const __m256i*>(y + 1 - q)));
+    };
+    const auto high = [x, y](int q) {
+        return _mm_add_epi32(_mm_set1_epi32(i32(x[q])), _mm_loadu_si128(reinterpret_cast<const __m128i*>(y + 5 - q)));
+    };
+    const auto min = [](__m256i u, __m256i v) { return _mm256_min_epu32(u, v); };
+    const __m128i high_min = _mm_min_epu32(_mm_min_epu32(high(5), high(6)), _mm_min_epu32(high(7), high(8)));
+    const __m256i low_min = min(min(min(low(0), low(1)), min(low(2), low(3))), low(4));
+    return min(low_min, _mm256_inserti128_si256(_mm256_set1_epi32(-1), high_min, 1));
 }
 
 // c[0, size) = values k0 + [0, size) for 1 <= size <= columns::kBlock, k0 + size <= n + m - 1;
 // c[size, size + 8 * kChains + 1) receives garbage. Chain s writes c[t + 1, t + length + 1) from
-// its start k0 + t, t = s * length (clamped to the block). Per chain, `held` keeps the 8 largest
-// slopes seen, sorted descending; each step loads 8 slopes (ascending) from the input with the
-// smaller next one; min and max with held are bitonic, and the
-// 8 smallest of the 16 are the next slopes (the classic SIMD merge).
+// its start k0 + t, t = s * length (clamped to the block). Each step moves the chain from an
+// argmin (x, y) of c[k] to one of c[k + 8]: (x + q, y + 8 - q) for the first q in [0, 8) with
+// x[q] + y[8 - q] = c[k + 8], else q = 8.
 void block(const u32* a, std::size_t n, const u32* b, std::size_t m, std::size_t k0, std::size_t size, u32* c) {
     const __m256i reverse = _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0), last = _mm256_set1_epi32(7);
     const std::size_t length = ((size - 1 + kChains - 1) / kChains + 7) / 8 * 8;
     const u32* pa[kChains];
     const u32* pb[kChains];
-    __m256i held[kChains], carry[kChains];
     for (std::size_t s = 0; s < kChains; ++s) {
         const Chain first = start(a, n, b, m, k0 + std::min(s * length, size - 1));
         pa[s] = first.a, pb[s] = first.b;
-        carry[s] = _mm256_set1_epi32(i32(*pa[s] + *pb[s]));
-        held[s] = _mm256_permutevar8x32_epi32(slopes(pa[s]), reverse), pa[s] += 8;
     }
-    c[0] = u32(_mm256_cvtsi256_si32(carry[0]));
+    c[0] = *pa[0] + *pb[0];
     for (std::size_t step = 0; step < length; step += 8) {
 #pragma GCC unroll 16
         for (std::size_t s = 0; s < kChains; ++s) {
-            // Which input to read is data-dependent and unpredictable: select it with masks, not a branch.
-            const std::size_t take_b = slope(pa[s]) > slope(pb[s]);
-            const std::uintptr_t mask = 0 - take_b;
-            const auto* from = reinterpret_cast<const u32*>((reinterpret_cast<std::uintptr_t>(pa[s]) & ~mask) |
-                                                            (reinterpret_cast<std::uintptr_t>(pb[s]) & mask));
-            const __m256i next = slopes(from);
-            pa[s] += 8 - 8 * take_b, pb[s] += 8 * take_b;
-            const __m256i low = sort_bitonic(_mm256_min_epi32(held[s], next));
-            held[s] = sort_bitonic<true>(_mm256_max_epi32(held[s], next));
-            const __m256i values = prefix_sums(low, carry[s]);
+            const u32* const x = pa[s];
+            const u32* const y = pb[s];
+            const __m256i values = minima(x, y);
             _mm256_storeu_si256(reinterpret_cast<__m256i*>(c + s * length + step + 1), values);
-            carry[s] = _mm256_permutevar8x32_epi32(values, last);
+            const __m256i ahead = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(y + 1));
+            const __m256i diagonal = _mm256_add_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(x)),
+                                                      _mm256_permutevar8x32_epi32(ahead, reverse));
+            const __m256i on_path = _mm256_cmpeq_epi32(diagonal, _mm256_permutevar8x32_epi32(values, last));
+            const unsigned q = unsigned(std::countr_zero(unsigned(_mm256_movemask_ps(_mm256_castsi256_ps(on_path))) | 0x100u));
+            pa[s] = x + q, pb[s] = y + 8 - q;
         }
     }
 }
@@ -1308,16 +1290,16 @@ void solve() {
     const std::size_t n = in.read<u32>(), m = in.read<u32>(), count = n + m - 1;
     constexpr std::size_t kValues = (columns::kBlock + 8 * kChains + 1 + 15) / 16 * 16;  // block, garbage
     const std::size_t text_words = columns::kTextBytes / sizeof(u32);
-    u32* const memory = mem::huge<u32>(text_words + kValues + (n + kPad) + (m + kPad));
+    u32* const memory = mem::huge<u32>(text_words + kValues + (n + kPad) + (kFront + m + kPad));
     char* const text = reinterpret_cast<char*>(memory);
     u32* const c = memory + text_words;
     u32* const a = c + kValues;
-    u32* const b = a + n + kPad;
+    u32* const b = a + n + kPad + kFront;
     const char* p = in.scan().cur;
     read_values(p, a, n);
     read_values(p, b, m);
-    extend(a, n);
-    extend(b, m);
+    std::fill_n(a + n, kPad + kFront, kEnd);  // after a, then before b
+    std::fill_n(b + m, kPad, kEnd);
 
     io::Writer out;
     for (std::size_t k0 = 0; k0 < count; k0 += columns::kBlock) {

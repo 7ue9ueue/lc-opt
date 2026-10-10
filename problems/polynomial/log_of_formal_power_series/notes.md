@@ -134,5 +134,10 @@ blocked division 15.26 ms. So log itself takes ~10.5 ms of 15.3.
     0.9927, pow 0.9964, sqrt 1.0027, inv 1.0005; `lc-intel`: log 0.9873, exp 0.9992, pow
     0.9934, sqrt 1.0021. 5 of the 22 bundles build to the same `.text` (bench 0.996-1.0065:
     noise).
+  - Merged as #334. CI: log 0.9867 (3 x EPYC 7763: 0.9896, 0.9844, 0.9859), pow 0.9931, exp
+    0.9942, sqrt 0.9963, division 0.9931; all 22 0.9980.
+  - Not submitted: whole process `lc-k68` (judge-like kernel, 31 rounds, max_random_00) 14.02 ->
+    13.86 ms and `lc-bench` 13.89 -> 13.76. The old code judged 13 ms in all 5 runs of 409447-409452
+    (clean); 0.16 ms is an eighth of a judge tick, too little to move the slowest case's 13.
 - Next: the leaf products (~0.2 ms each at 2^18, 11 of them) and the transform levels below
   the top; the radix-8 inverse above if a kernel with fewer products is found.

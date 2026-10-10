@@ -56,7 +56,7 @@ first version 8.49 (w = 3), 8.55 (w = 4), 8.63 (w = 5), 8.96 (w = 8).
     reciprocals 1.98, 2.03, 2.10, 2.37 (it costs 0.1-0.2); without the triangle G = F H and its
     two reductions 1.24, 1.32, 1.41, 1.69 (it costs 0.85, the largest part). Per block at w = 8
     the loop has 361 instructions (140 `vpmuludq`, 116 `vpaddq`); at w = 3, 280 (100, 76).
-    Variants, bench and scripts: `~/explore/sqrt_of_formal_power_series_sparse` on `lc-amd`.
+    Variants, bench and scripts: `lc-opt-explore/sqrt_of_formal_power_series_sparse/lc-amd`.
   - Not tried, estimated from op counts: the triangle in a layout of consecutive qwords
     (40 `vpmuludq` instead of 46) or as products of broadcast F[u] with windows of H (40, and
     12 shuffles instead of 24) both need y interleaved and G repacked, a net 4 to 12 fewer ops

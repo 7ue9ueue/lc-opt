@@ -6,7 +6,7 @@ N <= 11.
 
 Best judged: ours, 9 ms: [409373](https://judge.yosupo.jp/submission/409373) (`main.cpp` of #174),
 with a +9 ms launch spike on small_degree_02 (`tools/spikes.py`): clean score 2 ms; large cases
-2 ms.
+2 ms. Current `main.cpp` (#178): clean 2-3 ms, every submission so far spiked (P(clean) 0.29).
 Record when opened (issue #68): 14 ms.
 
 ## Design
@@ -84,6 +84,18 @@ g = f) 1.22 ms. main.cpp 2.70 ms (#174's 2.76).
     half; straight into level 2's layout): generic level 1 cost 101 us. Both steps against #174:
     in process 1492 -> 1438 us (0.963); whole process 2.755 -> 2.697 ms (0.976), with 4 KiB pages
     2.995 -> 2.831; `lc-intel` (`judge.py bench`, 21 rounds) 0.968.
+  - Merged as #178 (CI 0.9774: EPYC 9V45 0.9725, 0.9752; EPYC 7763 0.9845). Submitted its
+    `main.cpp`: [409385](https://judge.yosupo.jp/submission/409385) AC 10 ms, spike on
+    small_degree_00 (clean 2 ms, large cases all 2 ms); same file
+    [409386](https://judge.yosupo.jp/submission/409386) AC 11 ms, spikes on random_00 and
+    small_degree_08 (clean 3 ms). 4 of the session's 5 submissions used.
+- Next: the pruned y levels as generated asm (`lib/poly/gen_kernels.py`'s scheduler; the
+  intrinsics run a radix-4 level 19% slower, and since #170 P's pruned forward only matches the
+  plain one); `power` at N - 1 = 7999 (262 us, a fifth of the time; owner lane); the last levels
+  (100 us: 7 strided column copies, 6 forwards at m/2, 3 products, one cyclic product at m).
+  Counted, not built: level 2 one-dimensional (Q_3 and P_3 from 35 row products at m/2: ~57m
+  leaf products against the generic level's 26m); the leaf math by 8-point transforms inside the
+  leaves (~480 instructions per 8 leaves against ~350 for the 64-bit sums).
 
 ## Sources
 

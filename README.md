@@ -46,7 +46,8 @@ Open problems: [issues](https://github.com/7ue9ueue/lc-opt/issues).
 
 ## How it works
 
-**The human side.** One person, one Claude Max plan ($200/month, the 20x tier), about five agents at a time.
+**The human side.** One person, one Claude Max plan ($200/month, the 20x tier), as many agents at a time as the
+5-hour usage window allows.
 The human built the workbench and the agents use it:
 
 - **Rules.** [`AGENTS.md`](AGENTS.md) sets the standards: code style, how to measure, what counts as a win.

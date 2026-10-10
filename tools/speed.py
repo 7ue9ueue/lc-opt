@@ -37,6 +37,7 @@ LOCK = '/tmp/bench.lock'
 PORTABLE = '-march=x86-64-v3 -madx -mpclmul -mvpclmulqdq -maes -mvaes'
 MACHINES = {'lc-amd': 'AMD', 'lc-intel': 'Intel'}  # host -> column; others use the host name
 MAIN, FLOOR = 'main', 'floor'
+HOST = socket.gethostname().split('.')[0]
 
 
 def problem_dirs() -> dict[str, Path]:
@@ -86,7 +87,7 @@ def bench_problem(name: str, source: Path, rounds: int) -> dict:
         if prog == MAIN:
             cases[case]['verdicts'].append(verdict)
     env = judge.environment([str(source)])
-    return {'problem': name, 'host': socket.gethostname(), 'cpu': env['cpu'], 'compile': judge.COMPILE,
+    return {'problem': name, 'host': HOST, 'cpu': env['cpu'], 'compile': judge.COMPILE,
             'commit': env['commit'], 'main_sha': digest(source), 'rounds': rounds,
             'date': datetime.date.today().isoformat(), 'cases': cases}
 
@@ -97,7 +98,7 @@ def bench(args) -> int:
         judge.COMPILE = judge.COMPILE.replace('-march=native', PORTABLE)
     dirs = problem_dirs()
     names = args.problems or list(dirs)
-    out = DATA / socket.gethostname()
+    out = DATA / HOST
     out.mkdir(parents=True, exist_ok=True)
     for name in names:
         report = bench_problem(name, dirs[name] / 'main.cpp', args.rounds)

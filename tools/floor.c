@@ -1,7 +1,7 @@
 // I/O floor of any problem: maps the input and touches every cache line of it, then writes an
-// output of the expected size from a buffer in huge pages (as the solutions do), computing nothing. The runner gives no arguments, so the case comes
-// from stdin's path (/in/CASE.in) and the output size from the file sizes/CASE in the working
-// directory. Used by tools/speed.py.
+// output of the expected size from a buffer in huge pages, as the solutions do. Computes nothing.
+// The runner gives no arguments, so the case comes from stdin's path (/in/CASE.in) and the output
+// size from the file sizes/CASE in the working directory. Used by tools/speed.py.
 #define _GNU_SOURCE
 #include <stdint.h>
 #include <stdio.h>

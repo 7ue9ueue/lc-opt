@@ -28,7 +28,7 @@ program 0.55; an empty program whose `.preinit_array` entry calls `_exit` 0.96.
 convolution_mod_2_64, convolution_mod_large, gcd, lcm, min_plus concave_arbitrary, convex_arbitrary
 and convex_convex, mul_mod2n, mul_modp, multivariate_convolution and its cyclic variant.
 
-Not moved yet, with the same block: bitwise_and_convolution (its round was running) and 14
+Not moved yet, with the same block: bitwise_and_convolution (its round was running) and 17
 polynomial problems (another session's lane; lib/poly #95).
 
 ## Log

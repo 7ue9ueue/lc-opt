@@ -3,7 +3,8 @@
 f with K <= 10 nonzero terms (i_0 = 0, a_0 != 0), N <= 10^6; print the first N coefficients of
 1/f mod 998244353. 10 s. Input is tiny; output up to 10 MB.
 
-Best judged: none yet. Record when opened (issue #69): 24 ms.
+Best judged: ours, 13 ms: [409329](https://judge.yosupo.jp/submission/409329) (`main.cpp` of
+#159); one launch spike, the clean score is 5 ms. Record when opened (issue #69): 24 ms.
 
 ## Tests
 
@@ -55,6 +56,11 @@ The gap is the solve.
     64; GCC spilled the state anyway); 4 KiB pages for the ring and text (whole process 1.019);
     chunks of 12800 or 6400 with direct `write(2)` (within noise, ±2%; 6400 through the Writer
     +5%, it copies blocks below 64 KiB).
+  - Each column of the kernel as asm in the order M M A A (lib/poly's leaf-product finding):
+    w = 7 0.480 vs 0.466 ns per coefficient; not kept.
+  - Submitted the merged `main.cpp` (#159): [409329](https://judge.yosupo.jp/submission/409329)
+    AC 13 ms, 10.3 MiB. small_dense_00 13 ms (launch spike), small_dense_01 4, _02 5, _04 5;
+    all other cases at most 3. Clean score 5 ms.
 - Next: the solve is at the products' pipe bound; what is left is format (0.66 ms, shared
   `fields.hpp`) and `write()` (2.9 ms, kernel). max_random's long-tap path (0.9 ms) could skip
   zero sources; it is not the slowest case.

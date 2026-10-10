@@ -8,17 +8,13 @@
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
-#include "lib/ntt/ntt.hpp"
+#include "lib/ntt/product.hpp"
 #include "../convolution_mod/fields.hpp"
 
 namespace {
 
-using ntt::detail::add;
 using ntt::detail::broadcast;
-using ntt::detail::diff;
-using ntt::detail::Factor;
 using ntt::detail::kP;
-using ntt::detail::reduce;
 using ntt::detail::Vec;
 
 Vec load(const std::uint32_t* p) { return _mm256_loadu_si256(reinterpret_cast<const Vec*>(p)); }
@@ -137,33 +133,6 @@ std::uint32_t read_pairs(io::Reader& in, std::uint32_t n, std::uint32_t* a, std:
     return b0;
 }
 
-// Shoup product, < 2P for any x < 2^32.
-Vec times(Vec x, const Factor& f) { return ntt::detail::multiply(x, f); }
-
-// x - y + P for y < P.
-Vec diff_canonical(Vec x, Vec y) { return _mm256_sub_epi32(_mm256_add_epi32(x, broadcast(kP)), y); }
-
-// First level of a factor f[0, 4q) whose upper half f[4q, 8q) is zero (and not read): one pass
-// reads the lower half once and writes the first radix-4 group of both halves of the transform:
-// group 0 to f[0, 4q), group 1 to f[4q, 8q). Inputs canonical; outputs < 4P.
-void forward_radix8(Vec* f, std::size_t q, const std::uint32_t* roots) {
-    const Factor i(roots[1], roots[9]), y(roots[2], roots[10]), z(roots[3], roots[11]);
-    for (std::size_t j = 0; j < q; ++j) {
-        const Vec f0 = f[j], f1 = f[j + q], f2 = f[j + 2 * q], f3 = f[j + 3 * q];
-        // Group 0 (twiddles 1, 1, i): every term < 2P.
-        const Vec g0 = add(f0, f2), g1 = add(f1, f3);
-        const Vec h0 = diff_canonical(f0, f2), ih1 = times(diff_canonical(f1, f3), i);
-        f[j] = add(g0, g1), f[j + q] = diff(g0, g1);
-        f[j + 2 * q] = add(h0, ih1), f[j + 3 * q] = diff(h0, ih1);
-        // Group 1 (twiddles i, y, z).
-        const Vec if2 = times(f2, i), if3 = times(f3, i);
-        const Vec u0 = reduce(add(f0, if2), 2 * kP), v0 = reduce(diff(f0, if2), 2 * kP);
-        const Vec yu1 = times(add(f1, if3), y), zv1 = times(diff(f1, if3), z);
-        f[j + 4 * q] = add(u0, yu1), f[j + 5 * q] = diff(u0, yu1);
-        f[j + 6 * q] = add(v0, zv1), f[j + 7 * q] = diff(v0, zv1);
-    }
-}
-
 // Pairs i for the lanes i of index (in Powers lane order) as a and b in natural order: one load
 // serves both factors.
 class Fetch {
@@ -231,87 +200,35 @@ void scatter(std::uint32_t* c, const std::uint32_t* d, std::uint32_t p, std::uin
     }
 }
 
-int log_length(std::size_t n) { return std::max(6, int(std::bit_width(2 * n - 2))); }
-
-// A * B for factors of n coefficients when the transform length 2^lg is 2 * 4^j >= 256: the top
-// level is forward_radix8, the rest is lib/ntt. Same layout as ntt::Convolution; single use.
+// A * B for factors of n coefficients when ntt::Product takes them (transform length >= 512).
+// Single use.
 class Product {
 public:
-    static bool fits(std::size_t n) {
-        const int lg = log_length(n);
-        return lg % 2 == 0 && lg >= 8;
-    }
+    static bool fits(std::size_t n) { return ntt::Product::fits(n, n); }
 
-    explicit Product(std::size_t n) : lg_(log_length(n)) {
-        const std::size_t len = length(), words = 2 * (len + kPadding) + 2 * ntt::detail::table_words(lg_);
-        constexpr std::size_t kHuge = std::size_t(1) << 21;
-        bytes_ = (words * sizeof(std::uint32_t) + fields::kTextBytes + kHuge - 1) / kHuge * kHuge + kHuge;
-        region_ = ::mmap(nullptr, bytes_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (region_ == MAP_FAILED) std::abort();
-        const std::uintptr_t aligned = (reinterpret_cast<std::uintptr_t>(region_) + kHuge - 1) & ~(kHuge - 1);
-        a_ = reinterpret_cast<std::uint32_t*>(aligned);
-#ifdef MADV_HUGEPAGE
-        ::madvise(a_, bytes_ - kHuge, MADV_HUGEPAGE);
-#endif
-        b_ = a_ + len + kPadding;  // a different cache set from a at equal offsets
-        roots_ = b_ + len + kPadding;
-        inverse_roots_ = roots_ + ntt::detail::table_words(lg_);
-        text_ = reinterpret_cast<char*>(inverse_roots_ + ntt::detail::table_words(lg_));
-    }
-
-    ~Product() { ::munmap(region_, bytes_); }
-
-    Product(const Product&) = delete;
-    Product& operator=(const Product&) = delete;
+    explicit Product(std::size_t n) : product_(n, n, fields::kTextBytes) {}
 
     // Room for the input until load(): the pairs in the factors' upper halves (2^lg / 4 each),
-    // a_i and b_i in their lower halves.
+    // which ntt::Product does not read, a_i and b_i in their lower halves.
     Pairs pairs() {
-        const std::size_t quarter = length() / 4;
-        return {reinterpret_cast<std::uint64_t*>(a_ + 2 * quarter), std::uint32_t(quarter),
-                std::uint32_t((b_ - a_) / 2 - quarter)};
+        const std::size_t quarter = product_.length() / 4;
+        std::uint32_t *a = product_.a(), *b = product_.b();
+        return {reinterpret_cast<std::uint64_t*>(a + 2 * quarter), std::uint32_t(quarter),
+                std::uint32_t((b - a) / 2 - quarter)};
     }
-    std::uint32_t* scratch_a() { return a_; }
-    std::uint32_t* scratch_b() { return b_; }
-    std::uint32_t* b() { return b_; }
-    // fields::kTextBytes bytes for the output, 16-byte aligned, after the tables (in their huge page).
-    char* text() { return text_; }
+    std::uint32_t* scratch_a() { return product_.a(); }
+    std::uint32_t* scratch_b() { return product_.b(); }
+    std::uint32_t* b() { return product_.b(); }
+    // fields::kTextBytes bytes for the output, after the tables (in their huge page).
+    char* text() { return static_cast<char*>(product_.extra()); }
 
-    Sums load(const Input& in) { return gather(a_, b_, in); }
+    Sums load(const Input& in) { return gather(product_.a(), product_.b(), in); }
 
-    // The coefficients of A * B, canonical, in a(); b() is destroyed.
-    const std::uint32_t* multiply() {
-        using namespace ntt::detail;
-        const std::size_t len = length(), nv = len / 8, h = nv / 2, q = nv / 8;
-        build_table(roots_, len / 16, kRoots[0]);
-        build_table(inverse_roots_, len / 16, kRoots[1]);
-        auto* a = reinterpret_cast<Vec*>(a_);
-        auto* b = reinterpret_cast<Vec*>(b_);
-        forward_radix8(a, q, roots_);
-        forward_radix8(b, q, roots_);
-        const Recursion recursion(roots_, inverse_roots_);
-        for (std::size_t c = 0; c < 4; ++c) recursion.visit(a + c * q, b + c * q, q, c);
-        ntt::kernels::inverse_identity(a, q, inverse_roots_);
-        for (std::size_t c = 4; c < 8; ++c) recursion.visit(a + c * q, b + c * q, q, c);
-        ntt::kernels::inverse(a + h, q, inverse_roots_ + slot(1), inverse_roots_ + slot(2));
-        const std::uint32_t scale = multiply_mod(power(std::uint32_t(nv), kP - 2), kR);  // undoes nv / 2^32
-        alignas(32) std::uint32_t s[16] = {};  // table layout: s at entry 1
-        s[1] = scale;
-        s[9] = quotient(scale);
-        ntt::kernels::scale_radix2(a, h, s);
-        return a_;
-    }
+    // The coefficients of A * B, canonical; b() is destroyed.
+    const std::uint32_t* multiply() { return product_.multiply(); }
 
 private:
-    static constexpr std::size_t kPadding = 16;  // words after each factor: the kernels read 4 bytes past
-
-    std::size_t length() const { return std::size_t(1) << lg_; }
-
-    int lg_;
-    void* region_;
-    std::size_t bytes_;
-    std::uint32_t *a_, *b_, *roots_, *inverse_roots_;
-    char* text_;
+    ntt::Product product_;
 };
 
 // Other lengths: gather, then ntt::Convolution.

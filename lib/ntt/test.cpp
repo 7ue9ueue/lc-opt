@@ -291,6 +291,18 @@ void test_products() {
     }
 }
 
+// ntt::Product with garbage in the factors' upper halves, which it must not read.
+void test_upper_halves_unread(std::size_t n, std::size_t m) {
+    const auto a = random_poly(n, 0), b = random_poly(m, 0);
+    ntt::Product p(n, m);
+    std::copy(a.begin(), a.end(), p.a());
+    std::copy(b.begin(), b.end(), p.b());
+    const std::size_t half = p.length() / 2;
+    for (std::size_t i = half; i < 2 * half; ++i) p.a()[i] = u32(rng()), p.b()[i] = u32(rng());
+    const u32* c = p.multiply();
+    expect(std::vector<u32>(c, c + n + m - 1) == schoolbook(a, b), "upper halves unread", n * 100000000 + m);
+}
+
 // ntt::Product: the bounds of fits(), the extra bytes, and every length it takes (both top levels:
 // radix 4 at odd lg, radix 8 and the fused inverse top at even lg).
 void test_product_class() {
@@ -311,6 +323,11 @@ void test_product_class() {
         bool kept = c[0] == 1 && c[299] == 300 && c[598] == 1;
         for (std::size_t i = 0; i < kExtra; ++i) kept &= extra[i] == u8(i * 7);
         expect(zero && kept, "extra bytes: aligned, zeroed, kept");
+    }
+    for (int lg = 9; lg <= 11; ++lg) {
+        const std::size_t len = std::size_t(1) << lg;
+        test_upper_halves_unread(len / 2, len / 2);
+        test_upper_halves_unread(len / 2 - 3, len / 4 + 9);
     }
     for (int lg = 9; lg <= ntt::kMaxLog; ++lg) {
         const std::size_t len = std::size_t(1) << lg;

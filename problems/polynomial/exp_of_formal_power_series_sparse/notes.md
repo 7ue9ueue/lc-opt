@@ -3,7 +3,8 @@
 f with K <= 10 nonzero terms (f[0] = 0), N <= 10^6; print the first N coefficients of exp(f)
 mod 998244353. 10 s. Input is tiny; output up to 10 MB.
 
-Best judged: none yet. Record when opened (issue #70): 39 ms.
+Best judged: ours, 7 ms: [409367](https://judge.yosupo.jp/submission/409367) (`main.cpp` of
+#169); no launch spike, clean score 7 ms. Record when opened (issue #70): 39 ms.
 
 ## Tests
 
@@ -44,6 +45,11 @@ ours 8.69 (min 7.42): 1.36 times the floor. In process, small_dense_02 (11 runs)
     reciprocals from a half-size table). In a fresh process the table's page faults cost 0.9 ms
     until it moved to huge pages.
   - `judge.py test`, small_dense: 8.4 ms (first version) -> 7.3 .. 7.7 ms.
+  - Not kept: the triangle's two multiplies of each column before its two adds (order M M A A,
+    an empty asm between): w = 7 2.245 against 2.213 ms, w = 3 2.081 against 2.089.
+  - Merged as #169. Submitted: [409367](https://judge.yosupo.jp/submission/409367) AC 7 ms,
+    14.3 MiB. small_dense_00, 01, 02, 04 7 ms; max_random 3; all others at most 2. No spike
+    (`tools/spikes.py`: clean 7 ms). inv_of_formal_power_series_sparse's small_dense: 4-5 ms.
 - Next: the solve (2.36 ms in process) is ~260 vector ops per block of 16, throughput-bound
   (1.975 ms without the dependency between blocks, 2.21 with it). Ideas: the triangle in a
   consecutive-qword layout (40 instead of 46 `vpmuludq`), multiplies and adds in the order

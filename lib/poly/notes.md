@@ -1731,6 +1731,10 @@ product-tree lanes):
   even rows not halved, a packed column's odd lanes unshifted, V0 replaced by V, M0 from V.
 - Not kept (problem notes): the text formatted by a sink inside the kernel loop (slower by
   0.3-0.4 ms); G = F H deferred one block with broadcasts from memory (2.26 -> 2.41).
+- Merged as #344. CI: pow 0.9639, sqrt 0.9551, exp 1.0001, log 1.0067 (identical executable);
+  all 4 0.9812. pow sparse judged [409705](https://judge.yosupo.jp/submission/409705) and
+  [409706](https://judge.yosupo.jp/submission/409706) AC 10 ms, each with a launch spike; clean
+  7 ms, as before.
 
 ## Sources
 

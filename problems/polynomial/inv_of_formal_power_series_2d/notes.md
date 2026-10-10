@@ -8,8 +8,8 @@ Tests (pinned commit, 28): 707 x 707; randomSquare 1045 x 478, 550 x 909, 440 x 
 50000 x 10, 2 x 250000, 250000 x 2; 500000 x 1, 1 x 500000; maxDeg 389813 x 1, 463046 x 1,
 53336 x 9; random 389813 x 1, 463046 x 1, 53336 x 6, 429249 x 1, 277012 x 1; five with N, M <= 10.
 
-Best judged: ours, 28 ms with a +8 ms launch spike, clean 20 ms:
-[409565](https://judge.yosupo.jp/submission/409565) (`main.cpp` of #276).
+Best judged: ours, 21 ms: [409570](https://judge.yosupo.jp/submission/409570) (`main.cpp` of #281;
+slowest randomSquare_01 21 ms, the square-ish tests and 5000 x 100 at 19-20).
 Record when opened (issue #88): 197 ms.
 
 ## Design
@@ -103,8 +103,21 @@ mapping and exit, as in the floor.
     every shape with 3 <= rows <= 12 and on the large shapes with rows <= 16); 4 more mutations
     (row-by-row pairs shifted, no negation, one term short, the next group's windows from the
     current group) fail them.
-- Next: the square-ish shapes and 5000 x 100 (~20 ms, all at a 2^20 last step) need another
-  algorithm: the tensor layout (y transforms once per row, x transforms on columns; ~18% fewer
-  word-levels at 707 x 707 with a truncated y transform of 1536 points and a blocked last step
-  at X = 512, estimate). Row by row: F_t's windows [w a, a] stored once (each is used up to R - 1
-  times; fill_windows is ~15% of a leaf product, guess).
+  - Merged as #281. CI (21 rounds, 3 slowest cases each, ratio to #276): EPYC 7763 0.9971
+    (square_00, randomSquare_00, maxDeg_02) and 0.8529 (degY10, maxDeg_02, degX100), Xeon 6973P-C
+    0.9862. Submitted its `main.cpp`: [409569](https://judge.yosupo.jp/submission/409569) AC 26 ms
+    (spike: degX100_00 26, its twin degX10_00 of the same shape 16; clean 20);
+    [409570](https://judge.yosupo.jp/submission/409570) AC 21 ms, 19.0 MiB, no spike (max
+    randomSquare_01 21; square_00 20, degY100 20, degX10/100 16-17, maxDeg_02 15).
+  - Measured for the next round (`xprobe.cpp`, `lc-bench`): x transforms on a row-block layout
+    (the top log2 X levels of a lib transform, lib/ntt's radix-4 kernels, rows of B words) cost
+    0.057-0.061 ns per word-level (X 1024 B 2048: 1.28 ms; X 1024 B 1536: 0.96 ms), the same as
+    the 1-D forward of 2^20 (0.061). So the tensor estimate holds: for 707 x 707 with y truncated
+    to 1536 points (blocks y^1024 - 1, y^512 - c; CRT by the constant c^2 - 1) and a blocked last
+    step at X = 512 (6 x transforms, 3 leaf products), x 6.4 + y 3.6 (5 row transforms per row)
+    + leaf products 3.6 = ~13.6 ms against 15.1 for Kronecker (~10%, estimate). Without the
+    truncated y transform or the blocked step it is no better than Kronecker.
+- Next: the square-ish shapes and 5000 x 100 (~20 ms, all Newton with a 2^20 last step): the
+  tensor layout above (~10%, a large change). Row by row: F_t's windows [w a, a] stored once
+  (each is used up to R - 1 times; fill_windows ~15% of a leaf product, guess); only helps tests
+  below the max.

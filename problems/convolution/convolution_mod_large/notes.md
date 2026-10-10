@@ -3,8 +3,10 @@
 N, M <= 2^24 coefficients mod 998244353; print the N + M - 1 coefficients of the product. 10 s,
 1 GiB (the output file's tmpfs pages count). Inputs and outputs are ~331 MB at the maximum.
 
-Best judged: ours, [409343](https://judge.yosupo.jp/submission/409343), 430 ms (`main.cpp` of
-#127; no spike). Same version: [409265](https://judge.yosupo.jp/submission/409265), 439 ms (clean 429).
+Best judged: ours, [409616](https://judge.yosupo.jp/submission/409616), 427 ms (`main.cpp` of
+#247; no spike; fft_killer_01 427 and fft_killer_07 422, the other large cases 404-415).
+Before: [409343](https://judge.yosupo.jp/submission/409343), 430 ms (`main.cpp` of #127; no spike).
+Same version: [409265](https://judge.yosupo.jp/submission/409265), 439 ms (clean 429).
 Earlier: [409233](https://judge.yosupo.jp/submission/409233), 448 ms.
 Before: [408888](https://judge.yosupo.jp/submission/408888), 452 ms, the QPoly exploration-014
 program (`../SymPoly/work/ntt/yosupo_convolution_mod_large_opt.cpp`; the submitted source equals
@@ -133,3 +135,42 @@ transform (all large tests), else `ntt::Convolution`. `lib/io` input, output by
   `lc-bench`, medians of 7 runs (ms): fft_killer_01 401.9 -> 390.3, all_same_00 381.1 -> 351.8,
   all_same_01 403.3 -> 389.5; max_random_00/01 and max_ans_zero_00 unchanged (~402), so they set the
   score. Details in `lib/io/notes.md`.
+- 2026-10-10, claude (round 4). Scratch files: `lc-opt-explore/convolution_mod_large/`.
+  - Submitted `main.cpp` of #247 (lc-bench, 11 rounds: 0.962 against 409343's source):
+    [409616](https://judge.yosupo.jp/submission/409616) AC 427 ms (1/5).
+  - Judge proxy: `lc-k68`, a c2d-standard-4 with Linux 6.8.0-1070-gcp instead of 7.0 (Ubuntu
+    24.04, no Docker; static binaries built on `lc-amd`). Same binaries, medians of 5, ms
+    (lc-k68 / lc-amd / judged 409616): max_random_00 410.7 / 394.3 / 415, small_and_large_01
+    340.2 / 302.0 / 344, random_02 381.2 / 355.3 / 386. `lc-amd` misses 4-14% on the judge,
+    `lc-k68` 1.1-1.3%. Exception: fft_killer_01 and _07 399 on `lc-k68`, judged 427 and 422 (the
+    fft_killer cases are judged 404-427 while the 9-digit fixed path makes them 12 ms faster than
+    max_random on both VMs; not explained).
+  - Linux 6.8 against 7.0 (`lc-k68` / `lc-amd`): faulting 256 MiB of huge pages 19.2 / 14.0 ms;
+    `write()` of 335 MB to tmpfs 123 / 114 ms; on a generated max_random input, parse 61.5 / 57.1,
+    multiply 202 / 194, output 142 / 132, exit 12 / 15. A huge page that is read before it is
+    written maps the huge zero page; on 6.8 the first write then splits it into 4 KiB pages (7.0
+    allocates a huge page). The transform reads the factors' lower halves first, so the zero
+    tails of small_and_large and random_* end up in 4 KiB pages: small_and_large mul 235 ms on
+    6.8 against 195 on 7.0.
+  - Kept: `write_first`, one store per 2 MiB page between the input and the end of what the first
+    pass reads. lc-k68: small_and_large_01 340.2 -> 310.3, random_02 381.2 -> 369.6, max_random_00
+    410.7 -> 410.2, fft_killer_01 399.4 -> 398.2 (ms). Touching the upper halves too cost +5 ms on
+    full inputs (the zeroed pages leave the cache before the top pass writes them). lc-amd:
+    unchanged. lc-bench `judge.py bench` (full cases only, where the code path is the same): 406.0
+    vs 407.8 ms (1.0045, noise). 54/54 official tests, stress 200 rounds, ASan/UBSan 60 rounds and
+    6 official cases (file and pipe input).
+  - Floors on `lc-amd` (ms): mmap + one load per 64 bytes of max_random_00 31.3 (faults 16, DRAM
+    15.6 on a second pass), unmapping it 10.7; huge page faults 20 GB/s; `write()` of 335 MB 114 ms
+    (1.35 us per page) for blocks of 64 KiB to 1 MiB and any buffer alignment. `perf` on `lc-intel`:
+    50% of `write()` in `shmem_add_to_page_cache`, two thirds of that on the `lock add` after the
+    kernel zeroes the new page (init_on_alloc). Formatter alone 0.61-0.63 ns per value.
+  - Lost or neutral (`lc-amd`, then `lc-k68`): the inverse top level fused with formatting, each
+    quarter's text by `pwrite` at its offset: output 138-141 vs 137 ms (blocks of 512-4096
+    vectors). b in three quarters (input halves plus one scratch quarter for quarters 2 and 3): RSS
+    623 -> 590 MB, time +1 ms / +1.6. Dropping input pages behind the parser (`MADV_DONTNEED`
+    every 1M tokens, while their page structs are cached): max_random_00 -2.4 ms on `lc-amd`,
+    fft_killer_04 0, `lc-k68` -0.9 (noise). `MADV_SEQUENTIAL` on the input: exit -0.9 ms on
+    `lc-amd`. Output through a shared mapping of the output file: 218 vs 114 ms (`lc-k68` 231 vs
+    123); `fallocate` first 134.
+  - Next: find why fft_killer is judged 13 ms above `lc-k68` (median of 10) while the other
+    large cases sit 4-5 ms above. The judged score is the slowest of ~15 cases within 25 ms.

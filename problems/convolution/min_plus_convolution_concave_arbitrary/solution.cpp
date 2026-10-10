@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstdlib>
 
+#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "../min_plus_convolution_convex_arbitrary/columns.hpp"
 
@@ -145,8 +146,8 @@ void solve() {
     std::uint32_t* const c = allocate<std::uint32_t>((count + 15) / 16 * 16);  // tail stays 0
     char* const text = allocate<char>(columns::kTextBytes);
     Entry* const stack = allocate<Entry>(std::min(n, m));
-    in.read(a, n);
-    in.read(b, m);
+    io::read_bulk(in, a, n);
+    io::read_bulk(in, b, m);
     std::fill(c, c + count, ~0u);
 
     for (std::uint32_t j0 = 0; j0 < m; j0 += n) {

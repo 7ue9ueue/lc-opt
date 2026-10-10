@@ -70,6 +70,10 @@ Record when opened (issue #35): 45 ms.
   AC 12 ms, 15.8 MiB, no spike on the slowest case. Ties best judged (409289).
 - Next: the product (4.46 ms) is `lib/ntt`'s. Gather and scatter (0.78 + 0.66) resisted
   prefetch, fusion and partitioning. No idea left outside `lib/` worth a round (guess).
+- 2026-10-10, claude (lib/io #21, round 3): uint32 arrays read with `io::read_bulk`
+  (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
+  values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
+  12.04 → 11.93 ms (0.993). 40/40 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
 
 ## Sources
 

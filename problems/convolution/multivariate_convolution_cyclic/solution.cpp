@@ -11,6 +11,7 @@
 #include <array>
 #include <vector>
 
+#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "../convolution_mod/fields.hpp"
 #include "lib/multimod/transform.hpp"
@@ -615,8 +616,8 @@ void solve() {
                 (long_axes.empty() ? 0 : LongProduct::arena_bytes(long_axes)));
     auto* f = arena.take<std::uint32_t>(padded_total);
     auto* g = arena.take<std::uint32_t>(padded_total);
-    in.read(f, total);
-    in.read(g, total);
+    io::read_bulk(in, f, total);
+    io::read_bulk(in, g, total);
 
     const Field field(p);
     const std::uint32_t scale = field.inverse(std::uint32_t(short_total % p));

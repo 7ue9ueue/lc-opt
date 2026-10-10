@@ -10,6 +10,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "../fixed_width.hpp"
 
@@ -201,7 +202,7 @@ void solve() {
     std::uint32_t* const b = a + size;
     for (std::uint32_t* f : {a, b})
         for (std::size_t r = 0; r < rows; r += band_rows) {
-            in.read(f + row_offset(r, block), std::min(band_rows * block, total));
+            io::read_bulk(in, f + row_offset(r, block), std::min(band_rows * block, total));
             for (std::size_t k = r; k < r + band_rows; ++k) row_levels<false>(f + row_offset(k, block), block_log);
         }
     switch (rows_log) {

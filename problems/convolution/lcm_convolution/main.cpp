@@ -17,6 +17,17 @@
 #include <cstring>
 #include <iterator>
 
+// lib/io/bulk32.hpp
+// Bulk read of uint32 arrays with AVX2, on top of io::Reader:
+//
+//   io::Reader in;
+//   io::read_bulk(in, a.data(), n);  // same values as in.read(a.data(), n); faster on Zen 3
+//
+// On Zen 3 (the judge's CPU) it uses BulkParser32 below; elsewhere it is Reader::read, which is
+// faster there. -DIO_BULK32_TRANSPOSE=0 or 1 forces either. Kept apart from io.hpp so that the
+// code of the programs that do not need it stays unchanged. Design and measurements:
+// lib/io/notes.md.
+
 // lib/io/io.hpp
 // Fast integer and text I/O on file descriptors (stdin and stdout by default).
 // Linux, x86-64 with AVX2. Design and measurements: lib/io/notes.md.
@@ -773,6 +784,220 @@ private:
 };
 
 }  // namespace io
+
+#ifndef IO_BULK32_TRANSPOSE
+#ifdef __znver3__
+#define IO_BULK32_TRANSPOSE 1
+#else
+#define IO_BULK32_TRANSPOSE 0
+#endif
+#endif
+
+namespace io {
+namespace detail {
+
+// Parses uint32 tokens of at most 16 characters from the token at p into dst: at most count,
+// which must be the tokens that follow. Stops when fewer than kMinTokens tokens remain. Returns
+// where it stopped and the tokens parsed. As BulkParser in io.hpp, each chunk of input is cut into
+// four streams at token boundaries that advance in lockstep, two tokens per step. A step stores
+// its eight values as one vector, [a0 a1 a2 a3 b0 b1 b2 b3] for tokens a_k, b_k of stream k, and
+// a transpose then puts each stream's values in order. On Zen 3 this is 17% faster than four
+// 8-byte stores per step; on Intel (Emerald Rapids) 5% slower.
+class BulkParser32 {
+public:
+    static constexpr std::size_t kMinTokens = 1024;
+
+    struct Result {
+        const char* end;
+        std::size_t parsed;
+    };
+
+    static Result parse(const char* p, std::uint32_t* dst, std::size_t count) {
+        std::uint32_t* const first = dst;
+        while (count >= kMinTokens) {
+            // The count tokens span at least 2 * count - 1 bytes. A chunk spans at most chunk + 17
+            // bytes, so it holds at most chunk / 2 + 9 < count tokens, and loads stay below
+            // p + chunk + 33: all within those bytes.
+            const std::size_t chunk = std::min(kChunk, 2 * (count - 32)) & ~std::size_t(3);
+            const std::size_t stream = chunk / 4;
+            const char* s[4] = {p, after_separator(p + stream), after_separator(p + 2 * stream),
+                                after_separator(p + 3 * stream)};
+            const char* const end[4] = {s[1], s[2], s[3], after_separator(p + chunk)};
+            __m256i invalid = _mm256_setzero_si256();
+            const std::size_t steps = lockstep(s, end, invalid);
+            std::size_t tail[4];
+            bool overrun = false;
+            for (int k = 0; k < 4; ++k) {
+                tail[k] = 0;
+                while (s[k] < end[k] && tail[k] < kTail) tails_[k][tail[k]++] = one_token(s[k], invalid);
+                overrun |= s[k] != end[k];
+            }
+            if (overrun || (std::uint32_t(_mm256_movemask_epi8(invalid)) & 0x80008000)) [[unlikely]] {
+                // Irregular whitespace or tokens: this chunk one token at a time.
+                const std::size_t tokens = std::min(count_tokens(p, end[3]), count);
+                p = parse_slowly(p, dst, tokens);
+                dst += tokens;
+                count -= tokens;
+                continue;
+            }
+            std::uint32_t* out[4] = {dst};
+            for (int k = 0; k < 3; ++k) out[k + 1] = out[k] + 2 * steps + tail[k];
+            transpose(steps, out);
+            for (int k = 0; k < 4; ++k) std::memcpy(out[k] + 2 * steps, tails_[k], tail[k] * sizeof(std::uint32_t));
+            const auto parsed = std::size_t(out[3] + 2 * steps + tail[3] - dst);
+            dst += parsed;
+            count -= parsed;
+            p = skip_whitespace(end[3]);
+        }
+        return {p, std::size_t(dst - first)};
+    }
+
+    static const char* skip_whitespace(const char* p) {
+        while (static_cast<unsigned char>(*p) <= ' ') ++p;
+        return p;
+    }
+
+private:
+    static constexpr std::size_t kChunk = std::size_t(1) << 17;
+    // A step of valid tokens advances a stream by at least 4 bytes; lockstep stops at kSteps.
+    static constexpr std::size_t kSteps = kChunk / 16 + 16;
+    // A token takes at least 2 bytes of a stream.
+    static constexpr std::size_t kTail = kChunk / 8 + 32;
+    alignas(64) static inline std::uint32_t steps_[8 * kSteps];
+    alignas(64) static inline std::uint32_t tails_[4][kTail];
+
+    // Steps all streams while each has 33 bytes left; returns the steps. Step j stores its values
+    // at steps_ + 8j. Works on local copies of the stream state, which stay in registers.
+    static std::size_t lockstep(const char* (&streams)[4], const char* const (&end)[4], __m256i& flags) {
+        const char* s[4] = {streams[0], streams[1], streams[2], streams[3]};
+        __m256i invalid = flags;
+        std::size_t done = 0;
+        for (;;) {
+            std::ptrdiff_t left = end[0] - s[0];
+            for (int k = 1; k < 4; ++k) left = std::min(left, end[k] - s[k]);
+            const std::ptrdiff_t steps = std::min(left / 33, std::ptrdiff_t(kSteps - done));
+            if (steps <= 0) break;
+            for (std::uint32_t* v = steps_ + 8 * done; v != steps_ + 8 * (done + std::size_t(steps)); v += 8) {
+                const __m256i g0 = two_tokens(s[0], invalid), g1 = two_tokens(s[1], invalid);
+                const __m256i g2 = two_tokens(s[2], invalid), g3 = two_tokens(s[3], invalid);
+                const __m256i k = _mm256_set1_epi32(0x00012710);
+                // 8-digit halves: [s0 high, s0 low, s1 high, s1 low | second tokens likewise].
+                const __m256 h01 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g0, g1), k));
+                const __m256 h23 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g2, g3), k));
+                const __m256i high = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0x88));
+                const __m256i low = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0xDD));
+                _mm256_store_si256(reinterpret_cast<__m256i*>(v),
+                                   _mm256_add_epi32(_mm256_mullo_epi32(high, _mm256_set1_epi32(100000000)), low));
+            }
+            done += std::size_t(steps);
+        }
+        for (int k = 0; k < 4; ++k) streams[k] = s[k];
+        flags = invalid;
+        return done;
+    }
+
+    // The 2 * steps values of stream k from steps_ to out[k]: a 4x4 transpose of value pairs.
+    static void transpose(std::size_t steps, std::uint32_t* const (&out)[4]) {
+        const auto pairs = [](std::size_t j) {  // step j as [a0 b0 a1 b1 | a2 b2 a3 b3]
+            const __m256i v = _mm256_load_si256(reinterpret_cast<const __m256i*>(steps_ + 8 * j));
+            return _mm256_permutevar8x32_epi32(v, _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7));
+        };
+        std::size_t j = 0;
+        for (; j + 4 <= steps; j += 4) {
+            const __m256i p0 = pairs(j), p1 = pairs(j + 1), p2 = pairs(j + 2), p3 = pairs(j + 3);
+            const __m256i t0 = _mm256_unpacklo_epi64(p0, p1), t1 = _mm256_unpackhi_epi64(p0, p1);
+            const __m256i t2 = _mm256_unpacklo_epi64(p2, p3), t3 = _mm256_unpackhi_epi64(p2, p3);
+            const auto put = [j](std::uint32_t* to, __m256i v) {
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(to + 2 * j), v);
+            };
+            put(out[0], _mm256_permute2x128_si256(t0, t2, 0x20));
+            put(out[1], _mm256_permute2x128_si256(t1, t3, 0x20));
+            put(out[2], _mm256_permute2x128_si256(t0, t2, 0x31));
+            put(out[3], _mm256_permute2x128_si256(t1, t3, 0x31));
+        }
+        for (; j < steps; ++j)
+            for (int k = 0; k < 4; ++k) {
+                out[k][2 * j] = steps_[8 * j + k];
+                out[k][2 * j + 1] = steps_[8 * j + 4 + k];
+            }
+    }
+
+    // Two tokens at s, as 4-digit groups [first | second]. Lengths outside 1..16 (repeated
+    // whitespace, long tokens) set the sign bit of byte 15 or 31 of invalid.
+    [[gnu::always_inline]] static __m256i two_tokens(const char*& s, __m256i& invalid) {
+        const __m256i bytes = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(s));
+        const std::uint32_t sep = separators(bytes);
+        const auto first = std::size_t(std::countr_zero(sep));              // length of the first token
+        const auto second = std::size_t(std::countr_zero(sep & (sep - 1)));  // 32 if none
+        const __m256i windows =
+            _mm256_inserti128_si256(bytes, _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + first + 1)), 1);
+        const __m256i rows = _mm256_set_m128i(align_row(second - first), align_row(first + 1));
+        invalid = _mm256_or_si256(invalid, rows);
+        s += second + 1;
+        return digit_groups(_mm256_shuffle_epi8(_mm256_subs_epu8(windows, _mm256_set1_epi8('0')), rows));
+    }
+
+    static std::uint32_t one_token(const char*& s, __m256i& invalid) {
+        const __m128i window = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s));
+        const unsigned n = unsigned(std::countr_zero(separators(window) | 0x10000));
+        invalid = _mm256_or_si256(invalid, _mm256_castsi128_si256(align_row(n + 1)));
+        s += n + 1;
+        return std::uint32_t(parse16(window, n));
+    }
+
+    // The byte after the first separator at or after q.
+    static const char* after_separator(const char* q) {
+        for (;; q += 32)
+            if (const std::uint32_t sep = separators(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(q))))
+                return q + std::countr_zero(sep) + 1;
+    }
+
+    // Tokens in [p, end), where p starts a token.
+    static std::size_t count_tokens(const char* p, const char* end) {
+        std::size_t tokens = 1;
+        for (const char* q = p + 1; q < end; ++q)
+            tokens += static_cast<unsigned char>(*q) > ' ' && static_cast<unsigned char>(q[-1]) <= ' ';
+        return tokens;
+    }
+
+    static const char* parse_slowly(const char* p, std::uint32_t* dst, std::size_t count) {
+        for (std::size_t i = 0; i < count; ++i) {
+            p = skip_whitespace(p);
+            const __m128i window = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+            const unsigned n = unsigned(std::countr_zero(separators(window) | 0x10000));
+            dst[i] = std::uint32_t(parse16(window, n));
+            p += n + 1;
+        }
+        return p;
+    }
+};
+
+// count uint32 tokens into dst with BulkParser32, the rest one at a time.
+inline void read_transposed(Reader& in, std::uint32_t* dst, std::size_t count) {
+    std::size_t parsed = 0;
+    if (count >= BulkParser32::kMinTokens) {
+        const char* const start = BulkParser32::skip_whitespace(in.scan().cur);
+        const auto [stop, done] = BulkParser32::parse(start, dst, count);
+        // Continue the Reader at stop: its separator mask from there on.
+        const auto* block = reinterpret_cast<const char*>(reinterpret_cast<std::uintptr_t>(stop) & ~std::uintptr_t(63));
+        in.resume({stop, block, block_separators(block) & ~std::uint64_t(0) << (stop - block)});
+        parsed = done;
+    }
+    for (std::size_t i = parsed; i < count; ++i) dst[i] = in.read<std::uint32_t>();
+}
+
+}  // namespace detail
+
+// count uint32 tokens into dst: the same values as in.read(dst, count).
+inline void read_bulk(Reader& in, std::uint32_t* dst, std::size_t count) {
+#if IO_BULK32_TRANSPOSE
+    detail::read_transposed(in, dst, count);
+#else
+    in.read(dst, count);
+#endif
+}
+
+}  // namespace io
 // problems/convolution/convolution_mod/fields.hpp
 // Fixed-width output of residues < 10^9, byte for byte as ../fixed_width.hpp: each value
 // right-aligned in 9 characters, then a space; the last separator is a newline. Judge-specific:
@@ -1388,8 +1613,8 @@ void solve() {
     auto* const pairs = reinterpret_cast<std::uint64_t*>(region);
     std::uint32_t* const a = region + words;
     std::uint32_t* const b = region + 2 * words;
-    in.read(a + 1, n);
-    in.read(b + 1, n);
+    io::read_bulk(in, a + 1, n);
+    io::read_bulk(in, b + 1, n);
 
     interleave_zeta3(a, b, pairs, n);
     for (const std::uint32_t p : {5, 7, 11, 13}) zeta_pass(pairs, n, p);

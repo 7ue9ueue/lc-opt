@@ -91,3 +91,7 @@ Record when the issue opened: 117 ms.
 - Next: monotone_01/02 sweeps (~16 ms over the others). Idea, untried: for consecutive columns
   (d = 1) the crossing is a rank in a's sorted slopes, and for distance d it lies in a window of
   d rows below the rank of b's gap / d; a value-bucketed rank table could set tight brackets.
+- 2026-10-10, claude (lib/io #21, round 3): uint32 arrays read with `io::read_bulk`
+  (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
+  values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
+  28.20 → 28.03 ms (0.991). 41/41 official tests. ASan/UBSan on the 3 largest cases, file and pipe.

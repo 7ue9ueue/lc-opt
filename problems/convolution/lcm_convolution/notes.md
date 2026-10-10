@@ -93,6 +93,10 @@ Record when opened: 37 ms. Best judged: ours, [409237](https://judge.yosupo.jp/s
 - 2026-10-09, claude: submitted the PR #97 `main.cpp` (v2),
   [409237](https://judge.yosupo.jp/submission/409237): AC, 16 ms, 22.4 MiB (2/5 for the
   problem). Was 17 ms.
+- 2026-10-10, claude (lib/io #21, round 3): uint32 arrays read with `io::read_bulk`
+  (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
+  values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
+  16.37 → 16.05 ms (0.981). 29/29 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
 
 ## Next
 

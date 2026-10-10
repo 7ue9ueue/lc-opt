@@ -6,6 +6,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "columns.hpp"
 
@@ -136,9 +137,9 @@ void solve() {
     u32* const c = b + b_words;
     u32* const opt = c + c_words;
     std::fill_n(a, kAPad, kInf);
-    in.read(a + kAPad, n);
+    io::read_bulk(in, a + kAPad, n);
     std::fill_n(a + kAPad + n, kAPad, kInf);
-    in.read(b, m);
+    io::read_bulk(in, b, m);
 
     const Problem p{n, m, a + kAPad, b, opt, c};
     sample_levels(p, groups);

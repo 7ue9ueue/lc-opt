@@ -94,6 +94,10 @@ Record when opened (issue #30): 81 ms.
 - Next: the products are `vpmuludq`-bound (about 1.3 of the 2.0 ms): a Karatsuba short product
   over levels saves about 12% of them (guess). Gathers run at about 2.2 cycles per element on
   level 0 and 4 on level 1. Forward and inverse are the lib's kernels (3.2 ms).
+- 2026-10-10, claude (lib/io #21, round 3): uint32 arrays read with `io::read_bulk`
+  (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
+  values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
+  20.57 → 20.24 ms (0.986). 47/47 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
 
 ## Sources
 

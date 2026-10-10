@@ -11,6 +11,7 @@
 // Order: a's rows as it is parsed, a's columns, a / 2^N mod P kept as dwords; then b in the same
 // array: rows, columns, the products with a, the inverse columns; the inverse rows, printed in
 // chunks. Each int64 array is transformed while it is still in the cache.
+#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "../fixed_width.hpp"
 
@@ -444,7 +445,7 @@ void solve() {
     const auto forward_rows = [&] {
         for (std::size_t r = 0; r < rows; r += chunk_rows) {
             auto* const input = reinterpret_cast<std::uint32_t*>(x + (r + chunk_rows) * stride - chunk / 8);
-            in.read(input, chunk);
+            io::read_bulk(in, input, chunk);
             for (std::size_t i = 0; i < chunk_rows; ++i)
                 forward_row(input + i * row_values, x + (r + i) * stride, row_log);
         }

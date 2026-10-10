@@ -482,7 +482,8 @@ void test_exp(Fixture& fx) {
     }
     for (int lg = 7; lg <= kLgMax; ++lg) {
         const std::size_t n = std::size_t(1) << lg;
-        for (std::size_t m : {n - 1, n, n + 1, n / 2 + pick(n / 2) + 1}) {
+        // the last step with and without its upper parts: n - m = m/2 and m/2 + 1
+        for (std::size_t m : {n - 1, n, n + 1, 3 * n / 4, 3 * n / 4 + 1, n / 2 + pick(n / 2) + 1}) {
             if (m > (std::size_t(1) << kLgMax)) continue;
             auto f = random_poly(m, int(pick(3)));
             f[0] = 0;
@@ -602,6 +603,32 @@ void check_power(Fixture& fx, const std::vector<u32>& f, u32 e, u32 c, std::size
     for (int i = 0; i < 24; ++i) at.push_back(1 + pick(n - 1));
     for (std::size_t i : at)
         expect(power_coefficient(f, e, g, i) == mul(mul(f[0], u32(i)), g[i]), "f g' = e f' g at coefficient", n, i);
+}
+
+// exp and power with the smallest tables they allow (lg_max = exp_log(n), power_log(n)) against
+// the fixture's (lg_max = kLgMax).
+void test_minimal_tables(Fixture& fx) {
+    for (std::size_t n : {1, 2, 64, 65, 96, 97, 127, 128, 129, 1000, 4096, 4097, 6145, 70000, 1 << 18, (1 << 18) + 1}) {
+        auto f = random_poly(n);
+        f[0] = 0;
+        std::vector<u32> expected(n), got(n);
+        poly::exp(fx.t, f, expected, fx.exp_scratch);
+        {
+            poly::Arena arena(poly::Transform::words(poly::exp_log(n)) + poly::exp_scratch(n));
+            const poly::Transform t(arena, poly::exp_log(n));
+            poly::exp(t, f, got, arena.take(poly::exp_scratch(n)));
+        }
+        expect(got == expected, "exp with lg_max = exp_log(n)", n);
+        f[0] = 1 + u32(pick(P - 1));
+        const u32 e = u32(pick(P)), c = u32(pick(P));
+        poly::power(fx.t, f, e, c, expected, fx.power_scratch);
+        {
+            poly::Arena arena(poly::Transform::words(poly::power_log(n)) + poly::power_scratch(n));
+            const poly::Transform t(arena, poly::power_log(n));
+            poly::power(t, f, e, c, got, arena.take(poly::power_scratch(n)));
+        }
+        expect(got == expected, "power with lg_max = power_log(n)", n);
+    }
 }
 
 void test_power(Fixture& fx) {
@@ -1223,6 +1250,7 @@ int main() {
     test_exp(fx);
     test_log(fx);
     test_power(fx);
+    test_minimal_tables(fx);
     test_sqrt(fx);
     test_recurrence();
     test_holonomic();

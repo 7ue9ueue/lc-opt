@@ -3,7 +3,6 @@
 // With a primitive root g, i = g^x for i != 0, so the nonzero part is a cyclic convolution of
 // length n = P - 1 of A[x] = a[g^x] and B[x] = b[g^x]: one linear product (lib/ntt, length
 // 2^20 at the maximum) folded mod x^n - 1. c_0 = a_0 sum(b) + b_0 sum(a) - a_0 b_0.
-
 #include <memory>
 
 // lib/io/bulk32.hpp

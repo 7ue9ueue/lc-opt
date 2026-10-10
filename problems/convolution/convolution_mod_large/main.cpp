@@ -2,7 +2,6 @@
 // a * b mod 998244353: one cyclic NTT of length 2^lg >= N + M - 1, output in fixed-width fields
 // (../convolution_mod/fields.hpp). Factors of at most half the length (all large tests) use
 // ntt::Product (lib/ntt/product.hpp), other sizes ntt::Convolution.
-
 // lib/io/bulk32.hpp
 // Bulk read of uint32 arrays with AVX2, on top of io::Reader:
 //

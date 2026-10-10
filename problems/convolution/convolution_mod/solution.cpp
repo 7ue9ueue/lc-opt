@@ -2,7 +2,6 @@
 // (fields.hpp). Factors of at most half the length (all large tests) use ntt::Product
 // (lib/ntt/product.hpp), other sizes ntt::Convolution. Inputs of 9-digit or 1-digit tokens take a
 // fixed-width parser.
-
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/ntt/product.hpp"

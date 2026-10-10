@@ -3,7 +3,6 @@
 // opt is found at every kGroup-th row (sample rows), coarse rows first, each searched between the
 // opts of its neighbors; each group of kGroup rows then takes its minima over the columns between
 // its two sample opts, kGroup rows per column.
-
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/mem/huge.hpp"

@@ -4,7 +4,6 @@
 // point of the short axes' spectrum, the exact product over Z by Kronecker substitution (factor
 // r padded to 2 D_r - 1), modulo three NTT primes (lib/multimod), the CRT straight to residues
 // mod p, then folded back to cyclic.
-
 #include <algorithm>
 #include <array>
 #include <vector>

@@ -1,7 +1,6 @@
 // a * b mod 2^64: the product modulo five NTT primes (lib/multimod: lib/ntt's transform with the
 // modulus set at run time), the Chinese remainder theorem in 64-bit arithmetic, fixed-width output
 // (fields64.hpp).
-
 #include <array>
 
 #include "lib/io/bulk64.hpp"

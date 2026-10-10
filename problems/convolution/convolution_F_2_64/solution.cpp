@@ -7,7 +7,6 @@
 // (Taylor expansions in x^tau + x). The transform evaluates f = sum d_j X_j at omega_k =
 // sum_{bits of k} beta_b, k < 2^l; stage i uses the twiddle s_i(omega_c) = omega_{c >> i} for the
 // block at c.
-
 #include <array>
 #include <bit>
 #include <utility>

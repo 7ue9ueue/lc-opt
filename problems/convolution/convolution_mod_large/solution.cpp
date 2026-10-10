@@ -1,7 +1,6 @@
 // a * b mod 998244353: one cyclic NTT of length 2^lg >= N + M - 1, output in fixed-width fields
 // (../convolution_mod/fields.hpp). Factors of at most half the length (all large tests) use
 // ntt::Product (lib/ntt/product.hpp), other sizes ntt::Convolution.
-
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/ntt/product.hpp"

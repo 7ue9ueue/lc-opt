@@ -2,7 +2,6 @@
 // with the modulus set at run time), the Chinese remainder theorem straight to residues mod
 // 10^9 + 7 by one Montgomery reduction, fixed-width output: 10 bytes per value (fields10.hpp),
 // or 11 in the rare blocks with a value >= 10^9 (fields11.hpp).
-
 #include <array>
 
 #include "lib/io/bulk32.hpp"

@@ -6,7 +6,6 @@
 // starts from an argmin (i, k - i) of c[k], found by binary search: the slopes before it in a and
 // b are k smallest ones, and the rest are no smaller. It then merges slopes eight at a time with
 // a bitonic network (AVX2 min/max) and adds them up.
-
 #include <array>
 #include <bit>
 #include <climits>

@@ -11,7 +11,6 @@
 // Crossings are found lazily: each column keeps a bracket around the last row where it beats the
 // one below, narrowed by bisection only when an insertion needs it, and for free as the sweep
 // passes.
-
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>

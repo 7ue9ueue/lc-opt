@@ -18,8 +18,8 @@ Record when opened (issue #76): 34 ms.
 - Chirps: `lib/poly/chirp.hpp` (new): x_k = c s^k q^t(k), 32 per step, x_(k+32) = x_k g_k with
   g_(k+32) = g_k q^1024, one Montgomery and one Shoup product per vector.
   B_u = r^t(L-1) (r^-(L-2))^u r^t(u).
-- The convolution is convolution_mod's (`problems/convolution/convolution_mod`: `Subtrees`, its
-  `forward_radix8` and `bottom.hpp`; bottom.hpp is included, the rest copied) with two
+- The convolution is convolution_mod's (`ntt::detail::Subtrees` and `forward_radix8` from
+  `lib/ntt/product.hpp`, moved there from convolution_mod by issue #156) with two
   changes: B fills the whole length, so its first pass is a full radix-8 one (u = f_lo + f_hi,
   v = f_lo - f_hi, then the two radix-4 groups); and the last radix-2 level computes only the
   upper half, (u - w) [L/2 - 1 - i], times r^-t(i) and the transform's scale, reversed.
@@ -90,4 +90,4 @@ write M values with `fields.hpp`, nothing else (`floor.cpp`): 4.92-4.99 ms media
   i j = t(i + j) - t(i) - t(j) avoids square roots of r (standard; derived here).
 - Middle product: G. Hanrot, M. Quercia, P. Zimmermann, "The middle product algorithm I",
   AAECC 14 (2004) (the idea; no code read).
-- Transform: our `lib/ntt` and `problems/convolution/convolution_mod` (copied and adapted).
+- Transform: our `lib/ntt` (`product.hpp`, from `problems/convolution/convolution_mod`).

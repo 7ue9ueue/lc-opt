@@ -3,7 +3,7 @@
 //   f(a r^i) = r^-t(i) sum_j A_j r^t(i + j),  A_j = c_j a^j r^-t(j):
 // a middle product. One cyclic convolution of length L = 2^lg >= N + M - 1 of A with the reversed
 // chirp B_u = r^t(L - 1 - u) gives f(a r^i) = r^-t(i) (A B)[L - 1 - i].
-// The convolution is problems/convolution/convolution_mod's (lib/ntt kernels and bottom.hpp)
+// The convolution is ntt::Product's (lib/ntt/product.hpp: radix-8 top, Subtrees, bottom kernels)
 // with two changes: B fills the whole length, so its first pass is a full radix-8 one; and the
 // last inverse level computes only the outputs, times r^-t(i) and in reverse order. L >= 2
 // max(N, M), so A and the outputs each lie in one half.
@@ -17,9 +17,8 @@
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
-#include "lib/ntt/ntt.hpp"
+#include "lib/ntt/product.hpp"
 #include "lib/poly/chirp.hpp"
-#include "problems/convolution/convolution_mod/bottom.hpp"
 #include "problems/convolution/convolution_mod/fields.hpp"
 
 namespace {
@@ -56,31 +55,9 @@ std::uint32_t inverse(std::uint32_t x) { return power(x, kP - 2); }
 // r^e for r != 0 and any e >= 0.
 std::uint32_t power_of(std::uint32_t r, std::uint64_t e) { return power(r, std::uint32_t(e % (kP - 1))); }
 
-// First level of a factor f[0, 4q) whose upper half f[4q, 8q) is zero (convolution_mod's
-// forward_radix8). Modulo x^(n/2) - 1 and x^(n/2) + 1 the factor is unchanged, so one pass reads
-// it once and writes the first radix-4 group of each half: group 0 to f[0, 4q), group 1 to
-// f[4q, 8q). Inputs canonical; outputs < 4P.
-void forward_radix8_lower(Vec* f, std::size_t q, const std::uint32_t* roots) {
-    const Factor i(roots[1], roots[9]), y(roots[2], roots[10]), z(roots[3], roots[11]);
-    for (std::size_t j = 0; j < q; ++j) {
-        const Vec f0 = f[j], f1 = f[j + q], f2 = f[j + 2 * q], f3 = f[j + 3 * q];
-        // Group 0 (twiddles 1, 1, i): every term < 2P.
-        const Vec g0 = add(f0, f2), g1 = add(f1, f3);
-        const Vec h0 = diff_canonical(f0, f2), ih1 = times(diff_canonical(f1, f3), i);
-        f[j] = add(g0, g1), f[j + q] = diff(g0, g1);
-        f[j + 2 * q] = add(h0, ih1), f[j + 3 * q] = diff(h0, ih1);
-        // Group 1 (twiddles i, y, z).
-        const Vec if2 = times(f2, i), if3 = times(f3, i);
-        const Vec u0 = low(add(f0, if2)), v0 = low(diff(f0, if2));
-        const Vec yu1 = times(add(f1, if3), y), zv1 = times(diff(f1, if3), z);
-        f[j + 4 * q] = add(u0, yu1), f[j + 5 * q] = diff(u0, yu1);
-        f[j + 6 * q] = add(v0, zv1), f[j + 7 * q] = diff(v0, zv1);
-    }
-}
-
-// The same for a factor that fills f[0, 8q): the groups act on the halves u = f mod
-// (x^(n/2) - 1) and v = f mod (x^(n/2) + 1), u_t = f_t + f_(t+4) and v_t = f_t - f_(t+4) for
-// the blocks f_t = f[t q, (t + 1) q). Inputs canonical; outputs < 4P.
+// ntt::detail::forward_radix8 for a factor that fills f[0, 8q): the groups act on the halves
+// u = f mod (x^(n/2) - 1) and v = f mod (x^(n/2) + 1), u_t = f_t + f_(t+4) and
+// v_t = f_t - f_(t+4) for the blocks f_t = f[t q, (t + 1) q). Inputs canonical; outputs < 4P.
 void forward_radix8_full(Vec* f, std::size_t q, const std::uint32_t* roots) {
     const Factor i(roots[1], roots[9]), y(roots[2], roots[10]), z(roots[3], roots[11]);
     for (std::size_t j = 0; j < q; ++j) {
@@ -116,75 +93,6 @@ void output(const std::uint32_t* a, std::size_t half, std::uint32_t* y, std::siz
             store(y + i + 8 * v, reduce(montgomery(reverse(x), chirp[v]), kP));
         }
 }
-
-// convolution_mod's Subtrees: ntt::detail::Recursion with the bottom stage of bottom.hpp, two
-// groups per inlined kernel and no leaf weight array. Subtrees of at least 16 vectors, so tiles
-// start at even group indices.
-class Subtrees {
-public:
-    Subtrees(const std::uint32_t* roots, const std::uint32_t* inverse_roots) : r_(roots), ir_(inverse_roots) {}
-
-    // Forward transforms of a and b, leaf products into a, inverse transform; nv = 4^j >= 16.
-    void visit(Vec* a, Vec* b, std::size_t nv, std::size_t k) const {
-        switch (nv) {
-        case 16: return tile<16>(a, b, k);
-        case 64: return tile<64>(a, b, k);
-        case 256: return tile<256>(a, b, k);
-        }
-        const std::size_t h = nv / 4;
-        forward(a, b, h, k);
-        for (std::size_t t = 0; t < 4; ++t) visit(a + t * h, b + t * h, h, 4 * k + t);
-        inverse(a, h, k);
-    }
-
-private:
-    template <std::size_t NV>
-    [[gnu::noinline]] void tile(Vec* a, Vec* b, std::size_t k) const {
-        for (std::size_t h = NV / 4; h >= 4; h /= 4)
-            for (std::size_t j = 0, g = k * (NV / (4 * h)); j < NV; j += 4 * h, ++g) forward(a + j, b + j, h, g);
-        bottom(a, b, NV, k * (NV / 4));
-        for (std::size_t h = 4; h < NV; h *= 4)
-            for (std::size_t j = 0, g = k * (NV / (4 * h)); j < NV; j += 4 * h, ++g) inverse(a + j, h, g);
-    }
-
-    void forward(Vec* a, Vec* b, std::size_t h, std::size_t k) const {
-        if (k == 0) {
-            ntt::kernels::forward_identity(a, h, r_);
-            ntt::kernels::forward_identity(b, h, r_);
-            return;
-        }
-        const std::uint32_t *x = r_ + slot(k), *y = r_ + slot(2 * k);
-        if (h == 4) return ntt::kernels::forward_pair(a, b, h, x, y);
-        ntt::kernels::forward(a, h, x, y);
-        ntt::kernels::forward(b, h, x, y);
-    }
-
-    void inverse(Vec* a, std::size_t h, std::size_t k) const {
-        if (k == 0) return ntt::kernels::inverse_identity(a, h, ir_);
-        ntt::kernels::inverse(a, h, ir_ + slot(k), ir_ + slot(2 * k));
-    }
-
-    struct alignas(64) Leaves {
-        std::uint32_t window[4][16];  // [w A_t, A_t]: x^i A_t mod x^8 - w is a sliding window
-        std::uint32_t coefficients[4][8];
-    };
-
-    // Groups [first, first + nv / 4) with h = 1 and their leaves, two per kernel; first is even.
-    // The next two groups' forward half overlaps the current two's products and inverse.
-    void bottom(Vec* a, Vec* b, std::size_t nv, std::size_t first) const {
-        Leaves leaves[2][2];
-        bottom_kernels::first(a, b, leaves[0], r_ + slot(first), r_ + slot(2 * first));
-        for (std::size_t j = 0, k = first;; j += 8, k += 2) {
-            const std::size_t cur = j / 8 % 2, next = cur ^ 1;
-            const std::uint32_t *ix = ir_ + slot(k), *iy = ir_ + slot(2 * k);
-            if (j + 8 == nv) return bottom_kernels::last(a + j, leaves[cur], ix, iy);
-            bottom_kernels::both(a + j + 8, b + j + 8, leaves[next], r_ + slot(k + 2), r_ + slot(2 * k + 4), a + j,
-                                 leaves[cur], ix, iy);
-        }
-    }
-
-    const std::uint32_t *r_, *ir_;
-};
 
 // The evaluations f(a r^i), i < m, of f = c[0, n), for a, r != 0. L = 2^lg >= 2 max(n, m) with
 // lg even and >= 10 (L / 8 = 2 * 4^j vectors, subtrees of at least 16). One mapping in huge
@@ -234,7 +142,7 @@ public:
         const std::uint32_t scale = multiply_mod(multiply_mod(inverse(std::uint32_t(len / 8)), kR), kR);
         auto* av = reinterpret_cast<Vec*>(a_);
         auto* bv = reinterpret_cast<Vec*>(b_);
-        forward_radix8_lower(av, q, roots_);
+        forward_radix8(av, q, roots_);
         forward_radix8_full(bv, q, roots_);
         const Subtrees subtrees(roots_, inverse_roots_);
         for (std::size_t c = 0; c < 4; ++c) subtrees.visit(av + c * q, bv + c * q, q, c);

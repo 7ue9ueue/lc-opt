@@ -1,8 +1,9 @@
 # convolution_mod_2_64
 
 N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the product mod 2^64.
-10 s. Record when opened: 76 ms (another user). Best judged: ours, 43 ms:
-[409296](https://judge.yosupo.jp/submission/409296) (`main.cpp` of #124).
+10 s. Record when opened: 76 ms (another user). Best judged: ours, 41 ms:
+[409604](https://judge.yosupo.jp/submission/409604), [409605](https://judge.yosupo.jp/submission/409605)
+(`main.cpp` of #294). Before: 43 ms, [409296](https://judge.yosupo.jp/submission/409296) (#124).
 
 ## Design
 
@@ -131,10 +132,19 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
   - Checks: 44/44 official tests (`lc-amd`); stress 300 rounds (judge flags, lengths to 2^12 + 2:
     lg 9-14 through `product.hpp`, both top levels) and 60 with ASan/UBSan; `test_fields64.cpp`
     4.0M values, native and x86-64-v3; ASan/UBSan build on 9 official cases, file and pipe input.
-- Next: variable-width output (no padding before the top; 20.4 instead of 21 bytes per random
-  value) would cut `write()` by ~0.2 ms (a guess), formatter cost unknown. The CRT as a scheduled
-  asm loop (27 -> ~21 cycles per 8 values, a guess: 0.15 ms). The subtrees are at ~3 vector ops
-  per cycle in lib/ntt's kernels.
+  - Lost, after #294: variable-width output (a space, the top's digits without padding from a
+    table that also holds their count, then mid and low; 20.4 instead of 21 bytes per random
+    value; tokens checked on test_fields64's cases and block lengths 1-64). In the program:
+    `write()` 7.33 -> 7.23 ms, format 1.95 -> 2.60 (8 field positions per group from a scalar
+    chain, stores at computed addresses). Not kept.
+  - CI (#294, merged): convolution_mod_2_64 geomean 0.9501 (EPYC 9V45 0.9541, 7763 0.9460,
+    0.9501); convolution_F_2_64 0.9705.
+  - Submitted the merged `main.cpp` (#294): [409604](https://judge.yosupo.jp/submission/409604)
+    AC 41 ms, [409605](https://judge.yosupo.jp/submission/409605) AC 41 ms; `tools/spikes.py`:
+    clean 41 ms for both. Previous best 43.
+- Next: the CRT as a scheduled asm loop (23 -> ~21 cycles per 8 values, a guess: 0.1 ms). The
+  subtrees run lib/ntt's kernels at ~3 vector ops per cycle; `write()` (7.3 ms), start and exit
+  (2.5 ms) and parsing (3.3 ms, lib/io) are the rest of the 40 ms.
 
 ## Sources
 

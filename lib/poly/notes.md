@@ -1266,6 +1266,10 @@ and ASan/UBSan (`lc-intel`); both `stress.py` (400, 1000 rounds); all official t
 `lc-intel`). `judge.py bench` (21 rounds, against #260), `lc-amd` (`lc-intel`):
 compositional_inverse_of_formal_power_series_large 0.9493 (0.9165), 35.28 -> 33.49 ms;
 compositional_inverse_of_formal_power_series 0.9768 (0.9673).
+- Merged as #266. CI: compositional_inverse_of_formal_power_series 0.9586, 0.9805, 0.9770,
+  _large 0.9512, 0.9482, 0.9490; all 2 0.9607. Judged: [409549](https://judge.yosupo.jp/submission/409549)
+  AC 33 ms (was 47 with spikes, clean 37). composition.hpp's forward pass could take `Doubling`
+  for its levels too (its V is stored per level; the same y levels are skipped); not tried.
 
 ## Sources
 

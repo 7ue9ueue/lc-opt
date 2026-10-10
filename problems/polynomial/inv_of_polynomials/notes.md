@@ -6,7 +6,9 @@ random (N, M up to 50000 at random: f mod g, then a long first quotient when N <
 (degree ~1000, remainder sequences with quotients of degree up to 20), examples (M = 1: h = 0;
 a common factor: -1). The checker compares tokens.
 
-Best judged: none yet. Record when opened (issue #82): 104 ms.
+Best judged: ours, 15 ms: [409589](https://judge.yosupo.jp/submission/409589) (`main.cpp` of #288),
+clean score 15 ms (`tools/spikes.py`). Record when opened (issue #82): 104 ms, still the fastest
+other on 2026-10-10.
 
 ## Design
 
@@ -52,6 +54,16 @@ by the five max_random tests (all within 0.1 ms of each other).
   - Profile (`lc-intel`, before the power-of-two split): leaf products 43%, Euclid base 16%,
     transforms ~30%. Per node of 2k coefficients: ~16 leaf products and ~15 transforms of length
     k; each level costs 16-28 ns per degree.
+  - Merged as #288 (CI: all tests pass; new problem, no timing comparison).
+  - Submitted the merged `main.cpp` three times: [409586](https://judge.yosupo.jp/submission/409586)
+    AC 24 ms (max_random_03 24, its peers 15: a launch spike), [409587](https://judge.yosupo.jp/submission/409587)
+    AC 23 ms (max_random_04 23, peers 15), [409589](https://judge.yosupo.jp/submission/409589) AC 15 ms,
+    11.3 MiB, no spike (max_random 14-15, random_03 7, random_04 6, abnormal 1). Clean score 15 ms
+    in all three.
+  - Profile of the merged version (`lc-intel`, max_random_00 in process): leaf products 38%
+    (apply's fused inverse products 20%, combine's row products 17.6%), Euclid base 15.6%,
+    transforms ~33%, page zeroing 2.4%. kDirect on `lc-bench` with the power-of-two split
+    (in process, medians): 32: 15.9, 48: 14.5, 64: 14.1, 96: 14.1, 128: 14.7 ms.
   - Next: pointwise products (transforms to single points; leaf products are half the time);
     smaller scratch (12-13 MiB RSS against ~6 for small cases); a faster base (two steps per
     pass); the right spine's combines (only row 0, 4 products at twice the length).

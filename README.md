@@ -70,10 +70,12 @@ Open problems: [issues](https://github.com/7ue9ueue/lc-opt/issues).
 The human built the workbench and the agents use it:
 
 - **Rules.** [`AGENTS.md`](AGENTS.md) sets the standards: code style, how to measure, what counts as a win.
-- **Machines.** Three Google Cloud VMs. `lc-bench` and `lc-amd` have the judge's exact CPU (AMD EPYC 7B13,
-  Zen 3); `lc-bench` times, `lc-amd` builds and tests. `lc-intel` has hardware counters for `perf` profiling.
+- **Machines.** Four Google Cloud VMs. `lc-bench`, `lc-amd` and `lc-k68` have the judge's exact CPU (AMD EPYC 7B13,
+  Zen 3); `lc-bench` times, `lc-amd` builds and tests, `lc-k68` runs Linux 6.8, closer to the judge's kernel.
+  `lc-intel` has hardware counters for `perf` profiling.
 - **A copy of the judge.** [`tools/judge.py`](tools/judge.py) uses the judge's compiler image, flags,
-  official tests and checker. Its timings match the judge to within 1 ms.
+  official tests and checker. Its timings match the judge to within 1 ms on the problems checked. On Linux 7.0
+  (`lc-amd`, `lc-bench`), programs heavy in page faults run faster than on the judge: 4-14% on convolution_mod_large.
 - **CI.** Every pull request runs all official tests and times the new code against `main` on 3 GitHub
   machines. It merges by itself only if it is correct and not slower.
 - **Submission.** [`tools/submit.py`](tools/submit.py) submits to the judge, at most 5 times per version.

@@ -14,18 +14,20 @@
 //
 // A kernel set K has
 //   Input                                              the factors' type
+//   kBFirst                                            b's first level runs before a's, else after
 //   forward, forward_pair, inverse, forward_identity,  transform kernels with lib/multimod's
 //   inverse_identity                                   arguments (kernels.hpp)
 //   bottom_first, bottom_last, bottom_both,            kernels with ntt::Product's arguments
 //   inverse_top                                        (lib/ntt/product_kernels.hpp)
 //   select(m)                                          sets its constants for the prime
-//   first_radix4(a, b, h, a_in, b_in, roots, m)        first level of both factors; 2^lg / 8 = 4h = 4^j
-//   last_radix4(a, h, inverse_roots, s, p)             its last level with the scale s, canonical output
-//   first_radix8(a, b, q, a_in, b_in, roots, m, w)     first level of both factors; 2^lg / 8 = 8q = 2 * 4^j;
-//                                                      w: 12 vectors of scratch
+//   first_radix4(f, h, x, roots, m)                    first level of a factor; 2^lg / 8 = 4h = 4^j
+//   last_radix4(f, h, inverse_roots, s, p)             its last level with the scale s, canonical output
+//   radix8_constants(roots, m)                         words that first_radix8 takes broadcast in w
+//   first_radix8(f, q, x, w)                           first level of a factor; 2^lg / 8 = 8q = 2 * 4^j
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <bit>
 
 #include "transform.hpp"
@@ -137,7 +139,7 @@ public:
         auto* b = reinterpret_cast<Vec*>(work);
         if (std::countr_zero(nv) % 2 == 0) {  // nv = 4^j
             const std::size_t h = nv / 4;
-            K::first_radix4(a, b, h, a_in, b_in, roots_, m);
+            first_levels(a, b, a_in, b_in, [&](Vec* f, Input x) { K::first_radix4(f, h, x, roots_, m); });
             for (std::size_t t = 0; t < 4; ++t) subtrees.visit(a + t * h, b + t * h, h, t);
             return K::last_radix4(a, h, inverse_roots_, Factor(s, m), m.p);
         }
@@ -145,7 +147,9 @@ public:
         // radix-4 groups, the radix-2 level and the scale in one pass, s folded into the twiddles.
         const std::size_t q = nv / 8;
         alignas(32) Vec w[12];
-        K::first_radix8(a, b, q, a_in, b_in, roots_, m, w);
+        const auto first = K::radix8_constants(roots_, m);
+        for (std::size_t i = 0; i < first.size(); ++i) w[i] = broadcast(first[i]);
+        first_levels(a, b, a_in, b_in, [&](Vec* f, Input x) { K::first_radix8(f, q, x, w); });
         for (std::size_t c = 0; c < 8; ++c) subtrees.visit(a + c * q, b + c * q, q, c);
         const std::uint32_t z0 = inverse_roots_[1], x1 = inverse_roots_[slot(1)];
         const std::uint32_t* y1 = inverse_roots_ + slot(2);
@@ -156,6 +160,13 @@ public:
     }
 
 private:
+    // level(f, x) on both factors, in K's order.
+    template <class Level>
+    static void first_levels(Vec* a, Vec* b, Input a_in, Input b_in, Level level) {
+        if constexpr (K::kBFirst) level(b, b_in), level(a, a_in);
+        else level(a, a_in), level(b, b_in);
+    }
+
     int lg_;
     std::uint32_t *roots_, *inverse_roots_;
 };

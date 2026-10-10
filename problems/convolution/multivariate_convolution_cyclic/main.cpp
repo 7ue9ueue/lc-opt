@@ -5846,17 +5846,19 @@ inline void forward_radix8(Vec* f, std::size_t q, const std::uint32_t* x, const 
 //
 // A kernel set K has
 //   Input                                              the factors' type
+//   kBFirst                                            b's first level runs before a's, else after
 //   forward, forward_pair, inverse, forward_identity,  transform kernels with lib/multimod's
 //   inverse_identity                                   arguments (kernels.hpp)
 //   bottom_first, bottom_last, bottom_both,            kernels with ntt::Product's arguments
 //   inverse_top                                        (lib/ntt/product_kernels.hpp)
 //   select(m)                                          sets its constants for the prime
-//   first_radix4(a, b, h, a_in, b_in, roots, m)        first level of both factors; 2^lg / 8 = 4h = 4^j
-//   last_radix4(a, h, inverse_roots, s, p)             its last level with the scale s, canonical output
-//   first_radix8(a, b, q, a_in, b_in, roots, m, w)     first level of both factors; 2^lg / 8 = 8q = 2 * 4^j;
-//                                                      w: 12 vectors of scratch
+//   first_radix4(f, h, x, roots, m)                    first level of a factor; 2^lg / 8 = 4h = 4^j
+//   last_radix4(f, h, inverse_roots, s, p)             its last level with the scale s, canonical output
+//   radix8_constants(roots, m)                         words that first_radix8 takes broadcast in w
+//   first_radix8(f, q, x, w)                           first level of a factor; 2^lg / 8 = 8q = 2 * 4^j
 
 #include <algorithm>
+#include <array>
 #include <bit>
 
 // lib/multimod/transform.hpp
@@ -6406,7 +6408,7 @@ public:
         auto* b = reinterpret_cast<Vec*>(work);
         if (std::countr_zero(nv) % 2 == 0) {  // nv = 4^j
             const std::size_t h = nv / 4;
-            K::first_radix4(a, b, h, a_in, b_in, roots_, m);
+            first_levels(a, b, a_in, b_in, [&](Vec* f, Input x) { K::first_radix4(f, h, x, roots_, m); });
             for (std::size_t t = 0; t < 4; ++t) subtrees.visit(a + t * h, b + t * h, h, t);
             return K::last_radix4(a, h, inverse_roots_, Factor(s, m), m.p);
         }
@@ -6414,7 +6416,9 @@ public:
         // radix-4 groups, the radix-2 level and the scale in one pass, s folded into the twiddles.
         const std::size_t q = nv / 8;
         alignas(32) Vec w[12];
-        K::first_radix8(a, b, q, a_in, b_in, roots_, m, w);
+        const auto first = K::radix8_constants(roots_, m);
+        for (std::size_t i = 0; i < first.size(); ++i) w[i] = broadcast(first[i]);
+        first_levels(a, b, a_in, b_in, [&](Vec* f, Input x) { K::first_radix8(f, q, x, w); });
         for (std::size_t c = 0; c < 8; ++c) subtrees.visit(a + c * q, b + c * q, q, c);
         const std::uint32_t z0 = inverse_roots_[1], x1 = inverse_roots_[slot(1)];
         const std::uint32_t* y1 = inverse_roots_ + slot(2);
@@ -6425,6 +6429,13 @@ public:
     }
 
 private:
+    // level(f, x) on both factors, in K's order.
+    template <class Level>
+    static void first_levels(Vec* a, Vec* b, Input a_in, Input b_in, Level level) {
+        if constexpr (K::kBFirst) level(b, b_in), level(a, a_in);
+        else level(a, a_in), level(b, b_in);
+    }
+
     int lg_;
     std::uint32_t *roots_, *inverse_roots_;
 };
@@ -6435,6 +6446,7 @@ namespace multimod {
 
 struct LazyKernels {
     using Input = const std::uint32_t*;
+    static constexpr bool kBFirst = true;  // out may be a's storage with b in its upper half
 
     static constexpr auto& forward = lazy_kernels::forward;
     static constexpr auto& forward_pair = lazy_kernels::forward_pair;
@@ -6450,10 +6462,15 @@ struct LazyKernels {
         lazy_kernels::k4P = broadcast(4 * m.p), lazy_kernels::k8P = broadcast(8 * m.p);
     }
 
-    static void first_radix4(Vec* a, Vec* b, std::size_t h, Input a_in, Input b_in, const std::uint32_t* roots,
-                             const Modulus& m) {
-        forward_radix4(b, h, b_in, roots, m);
-        forward_radix4(a, h, a_in, roots, m);
+    // First level for nv = 4h vectors from x[0, 16h), words < 4p (the upper half is zero): group 0
+    // with twiddle z = r[1]. Outputs < 8p. f may be x's storage.
+    static void first_radix4(Vec* f, std::size_t h, Input x, const std::uint32_t* roots, const Modulus& m) {
+        const Factor z(roots[1], roots[9], m.p);
+        const Vec p2 = broadcast(2 * m.p), p4 = broadcast(4 * m.p);
+        for (std::size_t j = 0; j < h; ++j) {
+            const Vec a = load(x + 8 * j), b = load(x + 8 * (j + h)), zb = multiply(b, z);  // zb < 2p
+            f[j] = add(a, b), f[j + h] = diff(a, b, p4), f[j + 2 * h] = add(a, zb), f[j + 3 * h] = diff(a, zb, p2);
+        }
     }
 
     // Last level for nv = 4h vectors (group 0, z = r^-1[1]) and the scale s: inputs < 4p, canonical
@@ -6472,26 +6489,14 @@ struct LazyKernels {
         }
     }
 
-    static void first_radix8(Vec* a, Vec* b, std::size_t q, Input a_in, Input b_in, const std::uint32_t* roots,
-                             const Modulus&, Vec* w) {
-        const std::uint32_t first[6] = {roots[1], roots[9], roots[2], roots[10], roots[3], roots[11]};
-        for (int i = 0; i < 6; ++i) w[i] = broadcast(first[i]);
-        lazy_kernels::forward_radix8(b, q, b_in, w);
-        lazy_kernels::forward_radix8(a, q, a_in, w);
+    // The twiddles r[1], r[2], r[3], each followed by its Shoup quotient.
+    static std::array<std::uint32_t, 6> radix8_constants(const std::uint32_t* roots, const Modulus&) {
+        return {roots[1], roots[9], roots[2], roots[10], roots[3], roots[11]};
     }
+
+    static constexpr auto& first_radix8 = lazy_kernels::forward_radix8;
 
 private:
-    // First level for nv = 4h vectors from x[0, 16h), words < 4p (the upper half is zero): group 0
-    // with twiddle z = r[1]. Outputs < 8p. f may be x's storage.
-    static void forward_radix4(Vec* f, std::size_t h, Input x, const std::uint32_t* roots, const Modulus& m) {
-        const Factor z(roots[1], roots[9], m.p);
-        const Vec p2 = broadcast(2 * m.p), p4 = broadcast(4 * m.p);
-        for (std::size_t j = 0; j < h; ++j) {
-            const Vec a = load(x + 8 * j), b = load(x + 8 * (j + h)), zb = multiply(b, z);  // zb < 2p
-            f[j] = add(a, b), f[j + h] = diff(a, b, p4), f[j + 2 * h] = add(a, zb), f[j + 3 * h] = diff(a, zb, p2);
-        }
-    }
-
     static Vec load(const std::uint32_t* x) { return _mm256_loadu_si256(reinterpret_cast<const Vec*>(x)); }
 };
 

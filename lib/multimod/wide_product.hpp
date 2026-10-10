@@ -16,6 +16,7 @@ namespace multimod {
 
 struct WideKernels {
     using Input = Wide;
+    static constexpr bool kBFirst = false;  // work may be a's storage
 
     static constexpr auto& forward = kernels::forward;
     static constexpr auto& forward_pair = kernels::forward_pair;
@@ -29,21 +30,19 @@ struct WideKernels {
 
     static void select(const Modulus&) {}
 
-    static void first_radix4(Vec* a, Vec* b, std::size_t h, Input a_in, Input b_in, const std::uint32_t* roots,
-                             const Modulus& m) {
-        detail::forward_radix4(a, h, true, a_in, roots, m);
-        detail::forward_radix4(b, h, true, b_in, roots, m);
+    static void first_radix4(Vec* f, std::size_t h, Input x, const std::uint32_t* roots, const Modulus& m) {
+        detail::forward_radix4(f, h, true, x, roots, m);
     }
 
     static constexpr auto& last_radix4 = detail::inverse_radix4;
 
-    static void first_radix8(Vec* a, Vec* b, std::size_t q, Input a_in, Input b_in, const std::uint32_t* roots,
-                             const Modulus& m, Vec* w) {
-        const std::uint32_t first[9] = {4 * m.p,  m.r,       m.quotient(m.r), roots[1], roots[9],
-                                        roots[2], roots[10], roots[3],        roots[11]};
-        for (int i = 0; i < 9; ++i) w[i] = broadcast(first[i]);
-        wide_kernels::forward_radix8_wide(a, q, a_in.x, w);
-        wide_kernels::forward_radix8_wide(b, q, b_in.x, w);
+    // 4p, then 2^32 mod p and the twiddles r[1], r[2], r[3], each followed by its Shoup quotient.
+    static std::array<std::uint32_t, 9> radix8_constants(const std::uint32_t* roots, const Modulus& m) {
+        return {4 * m.p, m.r, m.quotient(m.r), roots[1], roots[9], roots[2], roots[10], roots[3], roots[11]};
+    }
+
+    static void first_radix8(Vec* f, std::size_t q, Input x, const Vec* w) {
+        wide_kernels::forward_radix8_wide(f, q, x.x, w);
     }
 };
 

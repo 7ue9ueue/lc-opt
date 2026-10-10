@@ -6,7 +6,8 @@ nonzero); print the D + 1 coefficients of their product. 10 s. Slowest tests: al
 a third constants). unbalanced_* (one factor of degree ~450000) and max_and_zero (one factor,
 the rest constants) are shallow.
 
-Best judged: none yet.
+Best judged: ours, 29 ms: [409448](https://judge.yosupo.jp/submission/409448) (`main.cpp` of #207),
+clean score 29 ms (`tools/spikes.py`: no launch spike).
 Record when opened (issue #74): 82 ms.
 
 ## Design
@@ -73,6 +74,9 @@ _03, random_01, unbalanced_00.
     (a cursor array indexed by a degree table, the counting sort only for degrees 5-255):
     placement 0.15 ms but the walk +0.5 ms; whole process 0.993 (11 rounds), not kept. With
     five cursors and selects in registers instead: walk +1.7 ms (spills).
+  - Merged as #207. CI: 0.9737 (EPYC 7763: 0.9717, 0.9746, 0.9749).
+  - Submitted the merged `main.cpp` (#207): [409448](https://judge.yosupo.jp/submission/409448)
+    AC 29 ms, 25.4 MiB; clean score 29 ms (13 cases within 9 ms of the max). Record 82 ms.
 - Next: the transforms are ~2 per tree level (19 levels for linear factors) and near the
   kernels' speed; remaining overheads: the base (~1000 cycles per node of bookkeeping), the top
   tree's 3 standard levels (leaf products; a 2- or 4-coefficient leaf layout would cost less)

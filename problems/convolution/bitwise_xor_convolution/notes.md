@@ -3,8 +3,8 @@
 N <= 20; a, b of 2^N values < 998244353; print c_k = sum over i xor j = k of a_i b_j mod P. 5 s.
 Input ~20.7 MB (2^21 tokens), output ~10.4 MB.
 
-Best judged: ours, [409210](https://judge.yosupo.jp/submission/409210), 14 ms (round 2).
-Round 1: 409198, 15 ms.
+Best judged: ours, [409428](https://judge.yosupo.jp/submission/409428), 13 ms (lib/io #21 round 5,
+PR #198). Round 2: 409210, 14 ms. Round 1: 409198, 15 ms.
 Record when opened: 25 ms.
 
 ## Design
@@ -137,6 +137,9 @@ faults), columns a 0.59, columns b 1.05, inverse rows 0.75, print 4.63, exit 0.9
   still page-aligned after the chunk (`../text_buffer.hpp`). `judge.py bench`, `lc-amd`, 31
   rounds, slowest 3 cases: 14.53 → 14.14 ms (0.973). Outputs byte-identical to main on all 13
   tests and 200 random inputs (N 0-13); ASan/UBSan on all 13 tests, file and pipe.
+  PR #198 merged; CI 0.9704 (EPYC 7763 0.969, 0.968, 0.975). Submitted
+  [409428](https://judge.yosupo.jp/submission/409428): AC 13 ms, 23.0 MiB, no spike
+  (`tools/spikes.py`). New best (was 14).
 
 ## Next
 

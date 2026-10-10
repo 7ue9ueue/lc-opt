@@ -158,6 +158,10 @@ same harness: 2.55, 2.1, 2.05, 6.0, 12.1, 4.3, 11.2.
   (0.976). Checks: `judge.py test` 51/51; 120 random inputs (runs of short and long values
   across block edges with a = 1, long outputs, tiny ones) token-identical to main, also with
   ASan/UBSan, file and pipe input.
+  PR #198 merged; CI 0.9922 (EPYC 7763 0.969; EPYC 9V45 0.998 and 1.011). Submitted
+  [409429](https://judge.yosupo.jp/submission/409429): AC 45 ms, 38.0 MiB. Spikes: all_ones_00
+  45 (36 in 409339 and 409345), random_01 44 (35, 34), gen_2_x_3_11_00 41 (33, 32); the rest at
+  most 38 (many_ones_00 38, gen_max 37). Clean 38, as before; best judged stays 42.
 - Next: the transform loops run at ~6.4 cycles per vector multiply against 5.7 with eight
   independent chains: a hand-scheduled asm loop with two columns in flight and no spills
   (~1.5 ms if it reaches 5.8). Fuse the pointwise product into the stage 1-0 group passes (shared

@@ -335,6 +335,11 @@ files on tmpfs.
   slowest cases (the variable-width ones unchanged): 39.62 → 39.23 (0.976). Details in its notes.
 - Floors with fields.hpp (`floor.py --fixed`, 11 rounds): the fixed column above, 0.2-0.8 ms
   below round 1's (convolution_mod_large 12.7).
+- PR #198 merged; CI geomean 0.9819: bitwise_and 0.9693, bitwise_xor 0.9704, convolution_F_2_64
+  0.9922 (EPYC 7763 0.969, EPYC 9V45 0.998 and 1.011), multivariate_convolution 0.9961.
+  Submitted 3: bitwise_xor 409428 13 ms (new best, was 14); bitwise_and 409430 12 ms
+  (unchanged); convolution_F_2_64 409429 45 ms with three launch spikes, clean 38 as before.
+  Details in their notes.
 
 ## Sources
 

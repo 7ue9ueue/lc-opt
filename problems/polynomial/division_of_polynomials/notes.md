@@ -6,7 +6,8 @@ coefficients and d = M - 1: the slowest tests have large k and d near k / 4 .. k
 (n_max_02: k 446665, d 53335; max_random_02 / v_random_02: k 362953, d 92221; n_max_04: k 222989,
 d 277011).
 
-Best judged: none yet.
+Best judged: ours, 12 ms: [409561](https://judge.yosupo.jp/submission/409561) (`main.cpp` of #271),
+clean score 12 ms (`tools/spikes.py`).
 Record when opened (issue #81): 30 ms.
 
 ## Design
@@ -50,6 +51,10 @@ largest floor is n_max_01's 4.31 (its time 8.86).
     (0.9988, noise).
   - `speed.py bench` (`lc-bench`, 7 rounds): score 11.83 (n_max_04), max_random_02 11.52,
     n_max_02 11.30; compute (total - floor) 7.9-8.1 on all three.
+  - Merged as #271 (CI: all tests pass; new problem, no timing comparison).
+  - Submitted the merged `main.cpp`: [409561](https://judge.yosupo.jp/submission/409561) AC 12 ms,
+    15.7 MiB; n_max_04 12, n_max_02 11, max_random_02 11, v_random_02 11, n_max_00 9;
+    `spikes.py`: clean 12 ms. Record when opened 30 ms.
   - Next: n_max_04's windows by log.hpp's 2 x 2 Toeplitz products (~5 of 21 leaf products,
     ~0.3 ms); its remainder's top part from the quotient's stored transforms (the residual of the
     block after the last, ~0.3 ms); non-power-of-two block counts waste up to 46% of the first

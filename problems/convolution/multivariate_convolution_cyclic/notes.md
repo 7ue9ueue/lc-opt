@@ -2,8 +2,9 @@
 
 Prime p <= 10^9, K <= 18 axes, n_i >= 2, n_i | p - 1, N = prod n_i <= 2^18. Print f g mod
 (x_i^n_i - 1) mod p. 10 s.
-Record when opened (issue #37): 117 ms. Best judged: ours, 11 ms, clean 11:
-[409664](https://judge.yosupo.jp/submission/409664) (`main.cpp` of #322). Earlier: 12 ms,
+Record when opened (issue #37): 117 ms. Best judged: ours, 10 ms, no spike:
+[409670](https://judge.yosupo.jp/submission/409670) (`main.cpp` of #327). Earlier: 11 ms,
+[409664](https://judge.yosupo.jp/submission/409664) (#322); 12 ms,
 [409321](https://judge.yosupo.jp/submission/409321) (#150); 15 ms,
 [409314](https://judge.yosupo.jp/submission/409314) (#146). `main.cpp` of #163: 15 ms,
 [409362](https://judge.yosupo.jp/submission/409362).
@@ -187,10 +188,17 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
     `judge.py bench`, 21 rounds, 8 cases, main (#322) against v8: `lc-k68` 11.13 -> 10.93
     (0.985); `lc-bench` 10.31 -> 10.15 (0.984). Checks as above (24/24, stress 400 + 40,
     ASan/UBSan stress 80 and 24 official cases, x86-64-v3 stress 150).
+  - CI (#327, merged): geomean 0.9779 (EPYC 9V45 0.9866, 7763 0.9742, 9V74 0.9729).
+  - Lost: prefetches in the transposes (`prefetchw` of A's lines 1, 2 or 4 column blocks ahead in
+    the gather; A's rows 1 or 2 row blocks ahead in the scatter): dim2_01 on `lc-k68`, 21 rounds,
+    10.14 -> 10.12 to 10.21 (noise).
+  - Submitted the merged `main.cpp` (#327): [409670](https://judge.yosupo.jp/submission/409670)
+    AC 10 ms, no spike. Per case: dim1 9 / 10 / 10, dim2_00 10, dim2_01 10, dim2_02 9 ms (dim1
+    judged 8 / 8 / 9 in 409664: about 1 ms of judge noise). Best judged 11 -> 10 ms.
 - Next: dim2_01 still pays ~0.4 ms over dim1 for the two gathers and the scatter (memory-bound:
-  one RFO per line of A); dim2_00 was judged 10 against dim1's 8-9 once, while `lc-k68` puts it
-  below dim1 (one sample). The products (6.0 ms hot for three primes at 2^19) are the rest:
-  faster subtree kernels, or fewer passes without the set conflicts above (a buffered radix-16).
+  one RFO per line of A). Every dim case now judges 9-10 ms; the products (6.0 ms hot for three
+  primes at 2^19) are most of it: faster subtree kernels, or fewer passes without the set
+  conflicts above (a buffered radix-16).
 
 ## Sources
 

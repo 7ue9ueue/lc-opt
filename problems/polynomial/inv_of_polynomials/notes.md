@@ -20,7 +20,7 @@ Best judged: none yet. Record when opened (issue #82): 104 ms.
 ## Floor
 
 `tools/speed.py bench` on `lc-bench` (floor: map the input, write an output of the expected
-size), 7 rounds, commit dd6b3ec: max_random 1.02-1.04 ms, the others 0.7-0.9 ms. The score is set
+size), 7 rounds, commit c08ddec: max_random 1.02-1.04 ms, the others 0.7-0.9 ms. The score is set
 by the five max_random tests (all within 0.1 ms of each other).
 
 ## Log
@@ -47,8 +47,8 @@ by the five max_random tests (all within 0.1 ms of each other).
   - Tried, no gain: the apply's products as separate passes sharing the windows of a, b, then
     inverses (16.6 against 16.5 ms for the fused `inverse_product_sum`); kDirect 96, 97, 98, 128
     (within 1% at n = 50000; 128 is 4% slower at 65535).
-  - `speed.py bench` (`lc-bench`, 7 rounds, dd6b3ec): max_random 16.04-16.10 ms (v1 with
-    kDirect 64, 2eb681e: 18.5); random_03 8.28, random_04 6.70, abnormal 1.5-1.8.
+  - `speed.py bench` (`lc-bench`, 7 rounds, c08ddec): max_random 16.04-16.10 ms (v1 with
+    kDirect 64, d024926: 18.5); random_03 8.28, random_04 6.70, abnormal 1.5-1.8.
   - Profile (`lc-intel`, before the power-of-two split): leaf products 43%, Euclid base 16%,
     transforms ~30%. Per node of 2k coefficients: ~16 leaf products and ~15 transforms of length
     k; each level costs 16-28 ns per degree.

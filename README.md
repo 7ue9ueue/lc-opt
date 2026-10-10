@@ -30,7 +30,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [multivariate_convolution_cyclic](problems/convolution/multivariate_convolution_cyclic) | [12 ms](https://judge.yosupo.jp/submission/409321) | 117 ms |
 | [inv_of_formal_power_series](problems/polynomial/inv_of_formal_power_series) | [11 ms](https://judge.yosupo.jp/submission/409370) | 25 ms |
 | [exp_of_formal_power_series](problems/polynomial/exp_of_formal_power_series) | [16 ms](https://judge.yosupo.jp/submission/409402) | 38 ms |
-| [log_of_formal_power_series](problems/polynomial/log_of_formal_power_series) | [14 ms](https://judge.yosupo.jp/submission/409363) | 32 ms |
+| [log_of_formal_power_series](problems/polynomial/log_of_formal_power_series) | [13 ms](https://judge.yosupo.jp/submission/409452) | 32 ms |
 | [pow_of_formal_power_series](problems/polynomial/pow_of_formal_power_series) | [26 ms](https://judge.yosupo.jp/submission/409358) | 52 ms |
 | [sqrt_of_formal_power_series](problems/polynomial/sqrt_of_formal_power_series) | [16 ms](https://judge.yosupo.jp/submission/409316) | 25 ms |
 | [composition_of_formal_power_series](problems/polynomial/composition_of_formal_power_series) | [3 ms](https://judge.yosupo.jp/submission/409336) | 9 ms |
@@ -40,6 +40,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [log_of_formal_power_series_sparse](problems/polynomial/log_of_formal_power_series_sparse) | [14 ms](https://judge.yosupo.jp/submission/409396) | 38 ms |
 | [pow_of_formal_power_series_sparse](problems/polynomial/pow_of_formal_power_series_sparse) | [13 ms](https://judge.yosupo.jp/submission/409426) | 43 ms |
 | [sqrt_of_formal_power_series_sparse](problems/polynomial/sqrt_of_formal_power_series_sparse) | [9 ms](https://judge.yosupo.jp/submission/409443) | 49 ms |
+| [product_of_polynomial_sequence](problems/polynomial/product_of_polynomial_sequence) | [29 ms](https://judge.yosupo.jp/submission/409448) | 82 ms |
 
 Times are the judge's, for the slowest test, checked against the judge's API on 2026-10-10.
 Each time links to its submission.

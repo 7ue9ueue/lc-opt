@@ -9,15 +9,23 @@ Record when opened: 29 ms (another user). Best judged: ours, 23 ms, spike-free:
 
 ## Design
 
-- Three NTT primes below 2^30 with 2^20 | p - 1: 998244353, 985661441, 976224257. Product
-  2^89.6 > 2^19 (10^9 + 6)^2 = 2^78.8. Inputs < 10^9 + 7 < 2p, so one conditional subtract
-  makes them canonical.
-- `lib/multimod` (run-time-modulus lib/ntt) with `Padded` 32-bit input (the radix-8 first level
-  reads the input and reduces it on the fly).
-  The last prime transforms b in place (b holds 2^lg words) and puts a's result in the scratch
-  array: one 4 MiB array fewer.
+- Three NTT primes below 2^28 with 2^17 | p - 1: 268042241, 265420801, 264634369. Product
+  2^83.96 > 2^19 (10^9 + 6)^2 = 2^78.8. 16P < 2^32, so values may grow to 16P between
+  reductions; inputs < 10^9 + 7 < 4P are used as they are.
+- `product.hpp` (`lazy::Product`): lib/multimod's tables and recursion with ntt::Product's
+  bottom stage (two groups per kernel, no leaf weight array) and fused inverse top level, as
+  convolution_mod_2_64's `product.hpp`. Its kernels (`kernels.hpp`, from `gen_kernels.py`, which
+  reuses lib/ntt's graphs, scheduler and allocator) drop most reductions: forward butterflies
+  take and return values < 8P (one min step on f0: 44 vector ops instead of 49), inverse ones
+  < 4P (48 instead of 52), leaves are products of values <= 2P (sums < 2^61, Montgomery result
+  < 3P, no final min), and the radix-8 first level reads the raw input (no narrowing). odd lg:
+  C++ radix-4 top levels with the same ranges. 4P and 8P are memory operands.
+- The transform length is 2^lg >= max(2^9, n + m - 1, 2 max(n, m)): both factors fill at most
+  half of it, so lazy::Product serves every size (no lib/multimod fallback).
+- a and b are the two halves of one array, which becomes the last prime's residues: its b
+  transform goes to the scratch array first, then a's runs in place. 4 arrays of 2^lg words.
 - CRT straight to mod 10^9 + 7: y_k = c / M_k mod p_k (factor folded into the transform's scale),
-  t = floor(sum y_k / p_k) from a float sum + 0.5 (the fraction is c / M < 2^-10), then
+  t = floor(sum y_k / p_k) from a float sum + 0.5 (the fraction is c / M < 2^-5), then
   s = sum y_k (M_k R mod q) + t (-M R mod q) < R q with R = 2^32, and one Montgomery reduction
   gives c mod q. 12 `vpmuludq` per 8 values.
 - Output per block of 25600 values: 10-byte fields (`fields10.hpp`, convolution_mod's
@@ -112,9 +120,49 @@ Record when opened: 29 ms (another user). Best judged: ours, 23 ms, spike-free:
 - 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
   `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
   before (judge flags, `lc-amd`).
+- 2026-10-10, claude (round 3). `lc-bench` (EPYC 7B13, core clock 3.49 GHz), judge flags.
+  Exploration files: `lc-opt-explore/convolution_mod_1000000007/r3`.
+  - convolution_mod_2_64's `product.hpp` structure (ntt::Product's bottom stage and fused
+    inverse top on lib/multimod) with `Padded` input. 3 transforms at lg 20, hot: lib/multimod
+    13.94 ms, Product 13.54. A list-scheduled asm first level (as 2_64's) was no faster than
+    lib/multimod's C++ one here (1.21 vs 1.13 ms for 6 calls; `judge.py bench` 0.9752 vs 0.9787).
+  - Primes below 2^28 and lazier reductions (see Design). Kernel microbenchmark (h = 1024, in
+    L2, cycles per butterfly): forward 14.8 -> 13.6, inverse 14.6 -> 13.9. Transforms hot:
+    12.59 ms (tables 0.11, first levels 1.19, subtrees 10.65, inverse top 0.62).
+  - Knob search (100 sets per kernel, timed on lc-bench): lib/ntt's knobs stay best for forward
+    and inverse (within 0.5%); bottom_both 122.9 -> 118.3 cycles per group with margin 1, load
+    latency 6, window 20 (lib/ntt's window 20 deadlocks the scheduler on these graphs).
+  - a and b in one array that becomes the last prime's residues: 2 MiB less memory, same time
+    (`judge.py bench`, 41 rounds: 1.0001).
+  - Phases on fft_killer_05 (ms, median of 21, `runner2` fork/reap stamps): start, parse,
+    transforms, CRT, format + `write()`, exit, wall: main 1.11 / 1.80 / 14.61 / 0.50 / 4.32 /
+    0.91 / 23.28; this 1.12 / 1.81 / 13.35 / 0.50 / 4.32 / 0.89 / 21.99.
+  - `judge.py bench`, slowest 3 cases, against main: 21 rounds 23.06 -> 21.73 ms (0.9458, lazy
+    kernels before the knob search and the layout); 21 rounds 23.53 -> 22.14 (0.9408, knobs),
+    22.44 (0.9476, knobs + layout; 1.0001 against knobs alone in 41 rounds).
+  - Lost: `prefetchw` of the first level's output lines 64-384 bytes ahead (1-3 of 34 cycles per
+    column, within noise), input `prefetcht0` (slower), non-temporal stores (147 cycles per
+    column instead of 36). The first level runs at 33-42 cycles per column at lg 20 against 21
+    in L1: it waits on memory.
+  - Not tried, estimated: two primes plus a double-precision FFT for the high part (a 2^20-point
+    complex FFT moves 16 MiB arrays; at best break-even with the third prime's 4.5 ms); primes
+    below 2^27 (32P headroom: about 2% of the transforms, guess).
+  - Checks: 48/48 official tests (`lc-amd`); `test_product.cpp` (every kernel against a scalar
+    model with inputs up to their bounds; products against lib/multimod at lg 9..20, three array
+    layouts, garbage past the halves) at -O2 native and x86-64-v3 and with ASan/UBSan; mutations
+    of the generator (one reduction dropped) fail it; `stress.py` 500 rounds, 200 with
+    `-DFORCE_WIDE`, 100 with x86-64-v3, 100 with ASan/UBSan; ASan/UBSan build on 9 official
+    cases, file and pipe input.
+- Next: the first level waits on memory (about 0.5 ms over its 6 calls; a fused radix-8 and
+  radix-4 first pass might hide it); primes below 2^27. `product.hpp` and convolution_mod_2_64's
+  differ only in the kernels' ranges and the input: one run-time-modulus Product in lib/multimod
+  could serve both (#156).
 
 ## Sources
 
-- lib/ntt (our QPoly-derived kernels), convolution_mod_2_64 (run-time modulus transform, float
-  estimate of the CRT multiple), convolution_mod (radix-8 first level, `fields.hpp`, preinit
-  start). Montgomery reduction (Montgomery 1985), written here from the formula.
+- lib/ntt (our QPoly-derived kernels, generator, ntt::Product), convolution_mod_2_64
+  (run-time modulus transform, `product.hpp` structure, float estimate of the CRT multiple),
+  convolution_mod (radix-8 first level, `fields.hpp`, preinit start). Montgomery reduction
+  (Montgomery 1985), written here from the formula. Lazy reduction with headroom below the word
+  size: D. Harvey, "Faster arithmetic for number-theoretic transforms", J. Symb. Comp. 60 (2014),
+  https://arxiv.org/abs/1205.2926 (idea only).

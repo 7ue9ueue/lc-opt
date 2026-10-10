@@ -2,7 +2,8 @@
 // products against schoolbook multiplication, the inverse (also bivariate), exp, log, power and sqrt
 // against their recurrences, composition against Horner's rule and identities, product trees against
 // naive products, chirps against their recurrence, multipoint evaluation and interpolation against
-// Horner's rule, division against long division, coefficient-wise operations against scalar code.
+// Horner's rule, division against long division, half-gcd jumps and inverses modulo a polynomial
+// against the extended Euclidean algorithm, coefficient-wise operations against scalar code.
 // Long results are checked at random coefficients (each an O(n) sum) or at random points.
 #include <algorithm>
 #include <array>
@@ -10,6 +11,7 @@
 #include <cstdio>
 #include <limits>
 #include <random>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -22,6 +24,7 @@
 #include "lib/poly/evaluation.hpp"
 #include "lib/poly/exp.hpp"
 #include "lib/poly/factorials.hpp"
+#include "lib/poly/gcd.hpp"
 #include "lib/poly/holonomic.hpp"
 #include "lib/poly/interpolation.hpp"
 #include "lib/poly/inverse.hpp"
@@ -2177,6 +2180,181 @@ void test_division() {
     }
 }
 
+using Poly = std::vector<u32>;
+
+void trim(Poly& a) {
+    while (!a.empty() && a.back() == 0) a.pop_back();
+}
+
+long degree(const Poly& a) { return long(a.size()) - 1; }
+
+Poly poly_product(const Poly& a, const Poly& b) {
+    if (a.empty() || b.empty()) return {};
+    Poly c(a.size() + b.size() - 1);
+    for (std::size_t i = 0; i < a.size(); ++i)
+        for (std::size_t j = 0; j < b.size(); ++j) c[i + j] = add(c[i + j], mul(a[i], b[j]));
+    trim(c);
+    return c;
+}
+
+// a + sign b, sign = 1 or P - 1.
+Poly poly_sum(Poly a, const Poly& b, u32 sign = 1) {
+    if (a.size() < b.size()) a.resize(b.size());
+    for (std::size_t i = 0; i < b.size(); ++i) a[i] = add(a[i], mul(sign, b[i]));
+    trim(a);
+    return a;
+}
+
+std::pair<Poly, Poly> poly_divmod(const Poly& a, const Poly& b) {
+    auto [q, r] = long_divide(a, b);
+    trim(q);
+    trim(r);
+    return {q, r};
+}
+
+// The extended Euclidean algorithm on (a, b) while deg r1 >= target: s0 a + t0 b = r0, s1 a + t1 b = r1.
+struct EuclidRows {
+    Poly s0, t0, r0, s1, t1, r1;
+};
+
+EuclidRows euclid_rows(const Poly& a, const Poly& b, long target) {
+    EuclidRows w{{1}, {}, a, {}, {1}, b};
+    while (!w.r1.empty() && degree(w.r1) >= target) {
+        const auto [q, r] = poly_divmod(w.r0, w.r1);
+        Poly s = poly_sum(w.s0, poly_product(q, w.s1), P - 1), t = poly_sum(w.t0, poly_product(q, w.t1), P - 1);
+        w.s0 = w.s1, w.t0 = w.t1, w.r0 = w.r1;
+        w.s1 = s, w.t1 = t, w.r1 = r;
+    }
+    return w;
+}
+
+// x = c y for a nonzero constant c (both trimmed).
+bool proportional(const Poly& x, const Poly& y) {
+    if (x.size() != y.size()) return false;
+    if (x.empty()) return true;
+    const u32 c = mul(x.back(), power(y.back(), P - 2));
+    for (std::size_t i = 0; i < x.size(); ++i)
+        if (x[i] != mul(c, y[i])) return false;
+    return true;
+}
+
+// (a, b) with deg a = d whose remainder sequence has quotients of degree 1 .. q_max, both times a
+// random common factor of degree common.
+std::pair<Poly, Poly> euclid_pair(long d, long q_max, long common) {
+    Poly a, b{1};
+    while (degree(b) < d) {
+        Poly next = poly_sum(a, poly_product(b, random_degree(1 + pick(std::size_t(q_max)), 0)));
+        a = b, b = next;
+    }
+    const Poly h = random_degree(std::size_t(common), 0);
+    return {poly_product(b, h), poly_product(a, h)};
+}
+
+// The jump of k on (a, b) against the Euclidean algorithm: rows and remainders proportional to
+// its rows, progress n - deg r_h. direct: Euclid's algorithm for jumps of at most that many degrees.
+void check_jump(const Poly& a, const Poly& b, long k, long direct) {
+    const long n = degree(a), m = degree(b);
+    poly::Arena arena(poly::detail::HalfGcd::words(std::size_t(n)));
+    poly::detail::HalfGcd gcd(arena, std::size_t(n), direct);
+    poly::detail::Matrix r = gcd.matrix(std::size_t(k), 0);
+    gcd.jump(a.data(), n, b.data(), m, k, r);
+    const EuclidRows w = euclid_rows(a, b, n - k);
+    Poly e[4];
+    for (int i = 0; i < 4; ++i) {
+        e[i].assign(r.entry[i], r.entry[i] + r.size[i]);
+        trim(e[i]);
+    }
+    bool ok = proportional(e[0], w.s0) && proportional(e[1], w.t0) && proportional(e[2], w.s1) && proportional(e[3], w.t1);
+    ok &= long(r.progress) == n - degree(w.r0);
+    ok &= proportional(poly_sum(poly_product(e[0], a), poly_product(e[1], b)), w.r0);
+    ok &= proportional(poly_sum(poly_product(e[2], a), poly_product(e[3], b)), w.r1);
+    for (int i = 0; i < 4; ++i) ok &= r.at0[i] == (e[i].empty() ? 0 : e[i][0]);
+    expect(ok, "gcd jump", u64(n) * 1000000 + u64(m), u64(k) * 1000 + u64(direct));
+}
+
+// inverse_mod against the extended Euclidean algorithm on (g, f mod g).
+void check_inverse_mod(const Poly& f, const Poly& g) {
+    poly::Arena arena(poly::inverse_mod_words(f.size(), g.size()));
+    Poly h(g.size(), 7);
+    const std::ptrdiff_t t = poly::inverse_mod(arena, f, g, h);
+    Poly want;
+    long want_t = 0;
+    if (degree(g) > 0) {
+        Poly reduced = f;
+        trim(reduced);
+        const EuclidRows w = euclid_rows(g, poly_divmod(reduced, g).second, 0);
+        if (degree(w.r0) != 0) {
+            want_t = -1;
+        } else {
+            const u32 c = power(w.r0[0], P - 2);
+            for (u32 x : w.t0) want.push_back(mul(x, c));
+            want_t = long(want.size());
+        }
+    }
+    const bool ok = t == want_t && (t <= 0 || Poly(h.begin(), h.begin() + t) == want);
+    expect(ok, "inverse_mod", f.size() * 1000000 + g.size(), u64(t + 1));
+}
+
+// inverse_mod of random f, g of n and m coefficients: (f h - 1) mod g = 0.
+void check_inverse_mod_large(std::size_t n, std::size_t m) {
+    const Poly f = random_degree(n - 1, 0), g = random_degree(m - 1, 0);
+    poly::Arena arena(poly::inverse_mod_words(n, m));
+    Poly h(m);
+    const std::ptrdiff_t t = poly::inverse_mod(arena, f, g, h);
+    if (t <= 0) return expect(false, "inverse_mod large", n, m);
+    ntt::Convolution product(n, std::size_t(t));
+    std::copy(f.begin(), f.end(), product.a());
+    std::copy_n(h.begin(), t, product.b());
+    const u32* fh = product.multiply();
+    Poly e(fh, fh + n + std::size_t(t) - 1);
+    e[0] = sub(e[0], 1);
+    Poly q(poly::quotient_size(e.size(), m)), r(poly::remainder_size(e.size(), m));
+    poly::Arena divide_arena(poly::divide_words(e.size(), m));
+    poly::divide(divide_arena, e, g, q, r);
+    expect(std::all_of(r.begin(), r.end(), [](u32 x) { return x == 0; }), "inverse_mod large", n, m);
+}
+
+void test_gcd() {
+    const long directs[] = {1, 2, 3, 8, 32, poly::detail::HalfGcd::kDirect, 100};
+    for (int trial = 0; trial < 150; ++trial) {
+        const long n = 1 + long(pick(300));
+        Poly a, b;
+        if (trial % 4 == 3) {
+            std::tie(a, b) = euclid_pair(n, 1 + long(pick(30)), long(pick(5)));
+        } else {
+            a = random_degree(std::size_t(n), trial % 4);
+            b = random_degree(trial % 3 ? pick(std::size_t(n)) : std::size_t(n - 1), trial % 4);
+        }
+        const long k = 1 + long(pick(std::size_t(degree(a))));
+        check_jump(a, b, k, directs[trial % 7]);
+        check_jump(a, b, degree(a), directs[(trial + 3) % 7]);
+    }
+    for (std::size_t n = 1; n <= 12; ++n)
+        for (std::size_t m = 1; m <= 12; ++m) check_inverse_mod(random_poly(n, int(n % 3)), random_degree(m - 1, int(m % 3)));
+    for (int trial = 0; trial < 120; ++trial) {
+        const std::size_t n = 1 + pick(500), m = 1 + pick(500);
+        if (trial % 5 == 4) {  // abnormal sequences, some with a common factor
+            const auto [g, f] = euclid_pair(long(std::max(n, m)), 1 + long(pick(30)), trial % 3 ? 0 : 1 + long(pick(4)));
+            check_inverse_mod(f, g);
+            continue;
+        }
+        Poly f = random_degree(n - 1, trial % 3), g = random_degree(m - 1, trial % 3);
+        if (trial % 5 == 3) {  // a common factor, or g dividing f
+            const Poly h = random_degree(pick(5), 0);
+            f = poly_product(f, h), g = poly_product(g, h);
+            if (trial % 2) f = poly_product(g, random_degree(pick(5), 0));
+        }
+        check_inverse_mod(f, g);
+    }
+    for (std::size_t d : {64, 65, 127, 128, 129, 1000, 1024, 1025}) {
+        check_inverse_mod(random_degree(d + pick(3), 0), random_degree(d, 0));
+        check_inverse_mod(random_degree(pick(d + 1), 0), random_degree(d, 0));
+        check_inverse_mod(Poly{5}, random_degree(d, 0));
+    }
+    const std::size_t large[][2] = {{50000, 50000}, {20000, 50000}, {50000, 3000}, {32769, 32769}, {1000, 40000}};
+    for (const auto& [n, m] : large) check_inverse_mod_large(n, m);
+}
+
 int main() {
     static Fixture fx;
     test_leaf_kernels(fx);
@@ -2204,6 +2382,7 @@ int main() {
     test_interpolation();
     test_factorials();
     test_division();
+    test_gcd();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

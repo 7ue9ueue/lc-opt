@@ -18,6 +18,7 @@
 #include "../text_buffer.hpp"
 
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -235,16 +236,6 @@ template <int K>
     for (int k = 0; k < K; ++k) x[k] = _mm256_sub_epi64(x[k], _mm256_mul_epu32(q[k], broadcast(kP)));
 }
 
-// x y mod P in doubles, for integers |x| < 2P and |y| < 2^20 P: h + l = x y exactly (l the
-// rounding error of h, |l| < 2^27), q = round(h / P) within 0.75 (|h / P| < 2^51), r = h - q P
-// exactly. Returns the double M + r + l, exact: |r + l| < 0.9 P.
-[[gnu::always_inline]] inline VecD product_mod(VecD x, VecD y) {
-    const VecD m = _mm256_set1_pd(kMagic), p = _mm256_set1_pd(double(kP));
-    const VecD h = _mm256_mul_pd(x, y), l = _mm256_fmsub_pd(x, y, h);
-    const VecD q = _mm256_sub_pd(_mm256_fmadd_pd(h, _mm256_set1_pd(kInverseP), m), m);
-    return _mm256_add_pd(_mm256_add_pd(_mm256_fnmadd_pd(q, p, h), m), l);
-}
-
 // |v| < 2^51 as an exact double.
 [[gnu::always_inline]] inline VecD to_double(Vec v) {
     return _mm256_sub_pd(_mm256_castsi256_pd(_mm256_add_epi64(v, broadcast(kMagicBits))), _mm256_set1_pd(kMagic));
@@ -265,22 +256,13 @@ template <int K>
     for (int k = 0; k < K; ++k) v[k] = _mm256_srl_epi64(t[k], shift);
 }
 
-// y = x y mod P for x as signed dwords (|x| < 2P) and transformed y: int64, |y| < 0.9 P.
-template <int K>
-[[gnu::always_inline]] inline void multiply(const __m128i (&x)[K], Vec (&y)[K]) {
-    VecD r[K];
-#pragma GCC unroll 8
-    for (int k = 0; k < K; ++k) r[k] = product_mod(_mm256_cvtepi32_pd(x[k]), to_double(y[k]));
-#pragma GCC unroll 8
-    for (int k = 0; k < K; ++k) y[k] = _mm256_sub_epi64(_mm256_castpd_si256(r[k]), broadcast(kMagicBits));
+// The low dwords of r0 and r1 as [r0 0 1, r1 0 1 | r0 2 3, r1 2 3].
+[[gnu::always_inline]] inline Vec low_dwords(Vec r0, Vec r1) {
+    return _mm256_castps_si256(_mm256_shuffle_ps(_mm256_castsi256_ps(r0), _mm256_castsi256_ps(r1), 0x88));
 }
 
 // The low dwords of r0 and r1, in order.
-[[gnu::always_inline]] inline Vec pack(Vec r0, Vec r1) {
-    const Vec low = _mm256_castps_si256(
-        _mm256_shuffle_ps(_mm256_castsi256_ps(r0), _mm256_castsi256_ps(r1), 0x88));  // r0 01 r1 01 | r0 23 r1 23
-    return _mm256_permute4x64_epi64(low, 0xD8);
-}
+[[gnu::always_inline]] inline Vec pack(Vec r0, Vec r1) { return _mm256_permute4x64_epi64(low_dwords(r0, r1), 0xD8); }
 
 // Dwords in (-P, P) -> their residues in [0, P).
 [[gnu::always_inline]] inline Vec canonical(Vec v) {
@@ -305,22 +287,58 @@ void forward_row(const std::uint32_t* src, Vec* row, int row_log) {
     transform(row, 2, row_log - 2, row_log - 2, 1, 1);
 }
 
-// Inverse of forward_row, then the residues in [0, P) of the 2^L values.
+// (x, y) -> (x + y, x - y).
+[[gnu::always_inline]] inline void butterfly(Vec& x, Vec& y) {
+    const Vec s = _mm256_add_epi64(x, y), d = _mm256_sub_epi64(x, y);
+    x = s, y = d;
+    asm("" : "+x"(x), "+x"(y));
+}
+
+// The inverse levels of value bits 0-3 for the four vectors at row, where vector t lane l holds
+// value 4l + t. The lane bits become vector bits one stage at a time, 64-bit lanes first, so that
+// x[k] lane l ends up holding value 8 (k & 1) + 4 (l >> 1) + 2 (k >> 1) + (l & 1): x[0], x[2]
+// and x[1], x[3] then pack into dwords in order without a cross-lane permute.
+[[gnu::always_inline]] inline void last_levels(const Vec* row, Vec (&x)[4]) {
+    Vec v[4];
+#pragma GCC unroll 4
+    for (int t = 0; t < 4; ++t) v[t] = _mm256_load_si256(row + t);
+    butterflies<2>(v);  // value bits 0, 1
+    Vec w[4] = {_mm256_unpacklo_epi64(v[0], v[1]), _mm256_unpackhi_epi64(v[0], v[1]),
+                _mm256_unpacklo_epi64(v[2], v[3]), _mm256_unpackhi_epi64(v[2], v[3])};
+    butterfly(w[0], w[1]);  // value bit 2
+    butterfly(w[2], w[3]);
+    x[0] = _mm256_inserti128_si256(w[0], _mm256_castsi256_si128(w[1]), 1);
+    x[1] = _mm256_permute2x128_si256(w[0], w[1], 0x31);
+    x[2] = _mm256_inserti128_si256(w[2], _mm256_castsi256_si128(w[3]), 1);
+    x[3] = _mm256_permute2x128_si256(w[2], w[3], 0x31);
+    butterfly(x[0], x[1]);  // value bit 3
+    butterfly(x[2], x[3]);
+}
+
+// The 16 values of last_levels, reduced, at dst.
+[[gnu::always_inline]] inline void store_values(Vec (&x)[4], std::uint32_t* dst) {
+    reduce(x);
+    auto* out = reinterpret_cast<Vec*>(dst);
+    _mm256_store_si256(out, canonical(low_dwords(x[0], x[2])));
+    _mm256_store_si256(out + 1, canonical(low_dwords(x[1], x[3])));
+}
+
+// Inverse of forward_row, then the residues in [0, P) of the 2^L values. The levels of each
+// group of four vectors are issued before the reduction of the previous group, so that their
+// dependency chains overlap.
 void inverse_row(Vec* row, std::uint32_t* dst, int row_log) {
     transform(row, 2, row_log - 2, row_log - 2, 1, 1);
     const std::size_t vectors = std::size_t(1) << (row_log - 2);
-    for (std::size_t i = 0; i < vectors; i += 4) {
-        Vec v[4];
+    Vec x[4];
+    last_levels(row, x);
+    for (std::size_t i = 4; i < vectors; i += 4) {
+        Vec next[4];
+        last_levels(row + i, next);
+        store_values(x, dst + 4 * (i - 4));
 #pragma GCC unroll 4
-        for (int t = 0; t < 4; ++t) v[t] = _mm256_load_si256(row + i + t);
-        butterflies<2>(v);
-        transpose(v);
-        butterflies<2>(v);
-        reduce(v);
-        auto* out = reinterpret_cast<Vec*>(dst + 4 * i);
-        _mm256_store_si256(out, canonical(pack(v[0], v[1])));
-        _mm256_store_si256(out + 1, canonical(pack(v[2], v[3])));
+        for (int t = 0; t < 4; ++t) x[t] = next[t];
     }
+    store_values(x, dst + 4 * (vectors - 4));
 }
 
 // The column pass works on strips of two vectors (one cache line) per row. a holds each strip as
@@ -358,28 +376,48 @@ void forward_columns(Vec* x, Vec* a, int rows_log, std::size_t row_vectors, std:
     }
 }
 
-// y = multiply(a, y) for one strip, Rows rows at a time. Prefetches the next strip.
-template <int Rows>
-void multiply_strip(Vec* y, const Vec* a, std::size_t rows, std::size_t stride, bool last) {
-    for (std::size_t r = 0; r < rows; r += Rows, y += Rows * stride, a += Rows) {
-        __m128i x[2 * Rows];
-        Vec v[2 * Rows];
-#pragma GCC unroll 4
-        for (int i = 0; i < Rows; ++i) {
-            const auto* dwords = reinterpret_cast<const __m128i*>(a + i);
-            x[2 * i] = _mm_load_si128(dwords);
-            x[2 * i + 1] = _mm_load_si128(dwords + 1);
-            v[2 * i] = y[i * stride];
-            v[2 * i + 1] = y[i * stride + 1];
-            if (!last) _mm_prefetch(reinterpret_cast<const char*>(y + i * stride + kStrip), _MM_HINT_T0);
-        }
-        multiply(x, v);
-#pragma GCC unroll 4
-        for (int i = 0; i < Rows; ++i) {
-            y[i * stride] = v[2 * i];
-            y[i * stride + 1] = v[2 * i + 1];
-        }
+// y = x y mod P in doubles for one row of a strip: x the row's eight signed dwords in a
+// (|x| < 2P), y two vectors with |y| < 2^20 P. h + l = x y exactly (l the rounding error of h,
+// |l| < 2^29); q = round(h / P) within 0.75 (|h / P| < 2^51); r = h - q P exactly. The result is
+// the double M + r + l, exact: |r + l| < 0.9 P. Split in two halves so that a loop can overlap
+// the second half of one row with the first half of the next.
+struct Product {
+    VecD h[2], lm[2];  // lm = M + l
+};
+
+[[gnu::always_inline]] inline Product begin_product(const Vec* y, const Vec* a) {
+    Product p;
+    const auto* x = reinterpret_cast<const __m128i*>(a);
+#pragma GCC unroll 2
+    for (int k = 0; k < 2; ++k) {
+        const VecD xd = _mm256_cvtepi32_pd(_mm_load_si128(x + k)), yd = to_double(y[k]);
+        p.h[k] = _mm256_mul_pd(xd, yd);
+        p.lm[k] = _mm256_add_pd(_mm256_fmsub_pd(xd, yd, p.h[k]), _mm256_set1_pd(kMagic));
     }
+    return p;
+}
+
+[[gnu::always_inline]] inline void end_product(const Product& p, Vec* y) {
+    const VecD m = _mm256_set1_pd(kMagic);
+#pragma GCC unroll 2
+    for (int k = 0; k < 2; ++k) {
+        const VecD q = _mm256_sub_pd(_mm256_fmadd_pd(p.h[k], _mm256_set1_pd(kInverseP), m), m);
+        const VecD r = _mm256_fnmadd_pd(q, _mm256_set1_pd(double(kP)), p.h[k]);
+        y[k] = _mm256_sub_epi64(_mm256_castpd_si256(_mm256_add_pd(r, p.lm[k])), broadcast(kMagicBits));
+    }
+}
+
+// The products of one strip, a row ahead. Prefetches the next strip.
+void multiply_strip(Vec* y, const Vec* a, std::size_t rows, std::size_t stride, bool last) {
+    Product p = begin_product(y, a);
+    for (std::size_t r = 1; r < rows; ++r) {
+        if (!last) _mm_prefetch(reinterpret_cast<const char*>(y + (r - 1) * stride + kStrip), _MM_HINT_T0);
+        const Product next = begin_product(y + r * stride, a + r);
+        end_product(p, y + (r - 1) * stride);
+        p = next;
+    }
+    if (!last) _mm_prefetch(reinterpret_cast<const char*>(y + (rows - 1) * stride + kStrip), _MM_HINT_T0);
+    end_product(p, y + (rows - 1) * stride);
 }
 
 // The high H bits of y's transform, the products with a, and the inverse transform of the high
@@ -389,8 +427,7 @@ void columns(Vec* y, const Vec* a, int rows_log, std::size_t row_vectors, std::s
     for (std::size_t c = 0; c < row_vectors; c += kStrip, a += rows) {
         transform(y + c, 0, rows_log, rows_log, stride, kStrip);
         const bool last = c + kStrip == row_vectors;
-        if (rows >= 2) multiply_strip<2>(y + c, a, rows, stride, last);
-        else multiply_strip<1>(y + c, a, rows, stride, last);
+        multiply_strip(y + c, a, rows, stride, last);
         transform(y + c, 0, rows_log, rows_log, stride, kStrip);
     }
 }
@@ -411,6 +448,15 @@ Vec* allocate(std::size_t count) {
     return reinterpret_cast<Vec*>(start - small);
 }
 
+// Marks a mapped input as read once, so the kernel skips marking each page accessed when it is
+// unmapped (0.04 ms per 20 MB). The mapping starts at the page of the first token.
+void advise_sequential(const io::Reader& in) {
+    struct stat st;
+    if (::fstat(0, &st) != 0 || !S_ISREG(st.st_mode) || std::size_t(st.st_size) <= io::detail::kMapAbove) return;
+    const auto start = reinterpret_cast<std::uintptr_t>(in.scan().cur) & ~std::uintptr_t(4095);
+    ::madvise(reinterpret_cast<void*>(start), std::size_t(st.st_size), MADV_SEQUENTIAL);
+}
+
 // N < 4: the definition.
 void solve_small(io::Reader& in, io::Writer& out, int n_log) {
     const std::size_t n = std::size_t(1) << n_log;
@@ -426,6 +472,7 @@ void solve() {
     io::Reader in;
     io::Writer out;
     const int n_log = int(in.read<std::uint32_t>());
+    advise_sequential(in);
     if (n_log < 4) {
         solve_small(in, out, n_log);
         out.flush();

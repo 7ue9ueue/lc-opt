@@ -91,7 +91,7 @@ Checked on the judge with `tools/isa_probe.cpp` (aplusb, [409083](https://judge.
 
 ## Tools
 
-They need Linux and Docker: run them on a VM or in CI, not on the Mac.
+They need Linux and Docker: run them on a VM (not `lc-k68`) or in CI, not on the Mac.
 
 - `python3 tools/judge.py test <problem> <file.cpp>`: the judge's compiler and command, every official test,
   the official checker.
@@ -106,7 +106,7 @@ They need Linux and Docker: run them on a VM or in CI, not on the Mac.
   and AMD/Intel times per problem; `bench/<problem>.md`, every test with an I/O floor. Read-only, no submissions.
 - `tools/isa_probe.cpp`: submit as aplusb to re-check the judge's instruction set. AC means every check holds;
   otherwise the answer is off by a bitmask of the failed checks, listed on stderr.
-- Every VM has the repo at `~/lc-opt`. Run `git fetch` there and check out your branch.
+- Every VM except `lc-k68` has the repo at `~/lc-opt`. Run `git fetch` there and check out your branch.
 - `main` is protected. Every change, docs included, goes through a pull request; enable
   `gh pr merge --auto --squash`. CI (`.github/workflows/verify.yml`) tests each changed `main.cpp` and times it
   against `main` on 3 machines. It merges only if correct and not slower: geomean over machines, then over problems.

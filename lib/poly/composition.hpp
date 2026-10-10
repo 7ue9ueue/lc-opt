@@ -1,5 +1,5 @@
 // Composition of power series modulo 998244353: h = f(g) mod x^n for g[0] = 0, by Kinoshita and
-// Li's algorithm (the transpose of power projection). Design: lib/poly/notes.md.
+// Li's algorithm (the transpose of power projection). x86-64 with AVX2. Design: lib/poly/notes.md.
 //
 //   const std::size_t n = ...;
 //   poly::Arena arena(poly::Transform::words(poly::compose_log(n)) + poly::compose_scratch(n) + ...);
@@ -7,10 +7,11 @@
 //   poly::compose(t, f, g, h, arena.take(poly::compose_scratch(n)));  // h.size() == n
 //
 // The levels (shared with power projection): m = 2^T >= n, Q_0(x, y) = 1 - y g(x), and
-// Q_(s+1)(x^2, y) = Q_s(x, y) Q_s(-x, y) mod x^(m / 2^s). Q_s has m / 2^s coefficients in x and degree
-// 2^s in y; Q_s(x, 0) = Q_s(0, y) = 1. A bivariate polynomial is stored by Kronecker substitution
-// x = z, y = z^stride, so that a product mod (z^len - 1) wraps y mod y^(len / stride) and
-// carries nothing from x into y while the x degree stays below stride.
+// Q_(s+1)(x^2, y) = Q_s(x, y) Q_s(-x, y) mod x^(m / 2^s). Q_s has L = m / 2^s coefficients in x
+// and degree Y = 2^s in y; Q_s(x, 0) = Q_s(0, y) = 1. Level s stores the transform of length 4m of
+// Q_s by Kronecker substitution x = z, y = z^(2L): x below L, rows 0 .. Y of 2Y. A product mod
+// (z^4m - 1) then carries nothing from x into y while the x degree stays below 2L, and wraps y
+// mod y^(2Y).
 #pragma once
 
 #include <immintrin.h>
@@ -22,6 +23,7 @@
 #include <cstdlib>
 #include <span>
 
+#include "lib/poly/calculus.hpp"
 #include "lib/poly/transform.hpp"
 
 namespace poly {
@@ -47,48 +49,246 @@ inline void compose_direct(std::span<const std::uint32_t> f, std::span<const std
     }
 }
 
-// x / 2 mod P in [0, P) for x < 2P.
-inline Vec halve(Vec x) {
-    const Vec odd = _mm256_sub_epi32(_mm256_setzero_si256(), _mm256_and_si256(x, broadcast(1)));
-    return reduce(_mm256_add_epi32(_mm256_srli_epi32(x, 1), _mm256_and_si256(odd, broadcast((kP + 1) / 2))), kP);
-}
-
 // -x mod P in [0, P) for x < P.
 inline Vec negate(Vec x) {
     return _mm256_min_epu32(_mm256_sub_epi32(broadcast(kP), x), _mm256_sub_epi32(_mm256_setzero_si256(), x));
 }
 
-// The parts of Q(z) = E(z^2) + z O(z^2) from its transform qh of length len: the transforms of
-// length len / 2 of E, -O and u O (u = z^2). Leaves 2p and 2p + 1 of qh are Q mod (z^8 - s) and
-// Q mod (z^8 + s) with s = r[p]; together Q mod (z^16 - s^2) = lo + z^8 hi, lo = (a + b) / 2,
-// hi = (a - b) / (2 s). Since s^2 = w_p, the even and odd coefficients of lo + z^8 hi are leaf p
-// of E and O. Tables: roots with len / 32 entries, inverse_roots with len / 16.
-inline void split_parts(const std::uint32_t* qh, std::size_t len, const std::uint32_t* roots,
-                        const std::uint32_t* inverse_roots, std::uint32_t* even, std::uint32_t* odd_negated,
-                        std::uint32_t* odd_shifted) {
-    const Vec deal = _mm256_setr_epi32(0, 2, 4, 6, 1, 3, 5, 7), rotate = _mm256_setr_epi32(7, 0, 1, 2, 3, 4, 5, 6);
-    for (std::size_t p = 0; p < len / 16; ++p) {
-        const Vec a = load(qh + 16 * p), b = load(qh + 16 * p + 8);
-        const Vec lo = _mm256_permutevar8x32_epi32(halve(add(a, b)), deal);
-        const Vec hi = _mm256_permutevar8x32_epi32(halve(times(diff(a, b), entry(inverse_roots, p))), deal);
-        const Vec e = _mm256_permute2x128_si256(lo, hi, 0x20), o = _mm256_permute2x128_si256(lo, hi, 0x31);
-        store(even + 8 * p, e);
-        store(odd_negated + 8 * p, negate(o));
-        const Vec r = _mm256_permutevar8x32_epi32(o, rotate);  // u o mod (u^8 - w_p): lane 0 is w_p o_7
-        store(odd_shifted + 8 * p, _mm256_blend_epi32(r, reduce(times(r, leaf_weight(roots, p)), kP), 1));
+// Lane j of r[i] <-> lane i of r[j].
+inline void transpose(Vec (&r)[8]) {
+    Vec t[8], u[8];
+#pragma GCC unroll 4
+    for (int i = 0; i < 8; i += 2) t[i] = _mm256_unpacklo_epi32(r[i], r[i + 1]), t[i + 1] = _mm256_unpackhi_epi32(r[i], r[i + 1]);
+#pragma GCC unroll 2
+    for (int i = 0; i < 8; i += 4)
+#pragma GCC unroll 2
+        for (int j = 0; j < 2; ++j)
+            u[i + 2 * j] = _mm256_unpacklo_epi64(t[i + j], t[i + j + 2]), u[i + 2 * j + 1] = _mm256_unpackhi_epi64(t[i + j], t[i + j + 2]);
+#pragma GCC unroll 4
+    for (int i = 0; i < 4; ++i)
+        r[i] = _mm256_permute2x128_si256(u[i], u[i + 4], 0x20), r[i + 4] = _mm256_permute2x128_si256(u[i], u[i + 4], 0x31);
+}
+
+// 64-bit lanes: the products of the even and of the odd 32-bit lanes.
+struct Wide {
+    Vec even, odd;
+};
+
+// A vector with its odd lanes also moved to the even ones, the form wide() multiplies.
+struct Lanes {
+    Vec even, odd;
+};
+
+inline Lanes lanes(Vec x) { return {x, _mm256_srli_epi64(x, 32)}; }
+inline Wide wide(Lanes x, Lanes y) { return {_mm256_mul_epu32(x.even, y.even), _mm256_mul_epu32(x.odd, y.odd)}; }
+inline Wide operator+(Wide x, Wide y) { return {_mm256_add_epi64(x.even, y.even), _mm256_add_epi64(x.odd, y.odd)}; }
+inline Wide operator-(Wide x, Wide y) { return {_mm256_sub_epi64(x.even, y.even), _mm256_sub_epi64(x.odd, y.odd)}; }
+
+// c P^2 in each 64-bit lane.
+inline Wide squares_of_p(std::uint64_t c) {
+    const Vec x = _mm256_set1_epi64x(static_cast<long long>(c * kP * kP));
+    return {x, x};
+}
+
+// x / 2^32 mod P in [0, x / 2^32 + P) for 64-bit lanes x < 14 P^2 (Montgomery).
+inline Vec reduce_wide(Wide x) {
+    const Vec ni = broadcast(ntt::kernels::kNI), p = broadcast(kP);
+    const Vec even = _mm256_add_epi64(x.even, _mm256_mul_epu32(_mm256_mul_epu32(x.even, ni), p));
+    const Vec odd = _mm256_add_epi64(x.odd, _mm256_mul_epu32(_mm256_mul_epu32(x.odd, ni), p));
+    return _mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA);
+}
+
+// One leaf a mod (z^8 - s) per lane, c[k] = its coefficient k (canonical), s_m = s 2^32 mod P:
+// out = a(z) a(-z) mod (z^8 - s) = e(u)^2 - u o(u)^2 mod (u^4 - s), u = z^2, a = e(u) + z o(u),
+// times 2^-32, in [0, 2P). Every sum stays below 8 P^2.
+inline void leaf_graeffe(const Vec (&c)[8], Vec s_m, Vec (&out)[4]) {
+    const Lanes e0 = lanes(c[0]), o0 = lanes(c[1]), e1 = lanes(c[2]), o1 = lanes(c[3]);
+    const Lanes e2 = lanes(c[4]), o2 = lanes(c[5]), e3 = lanes(c[6]), o3 = lanes(c[7]);
+    const Wide e01 = wide(e0, e1), e02 = wide(e0, e2), e03 = wide(e0, e3), e12 = wide(e1, e2), e13 = wide(e1, e3);
+    const Wide e23 = wide(e2, e3), o01 = wide(o0, o1), o02 = wide(o0, o2), o03 = wide(o0, o3), o12 = wide(o1, o2);
+    const Wide o13 = wide(o1, o3), o23 = wide(o2, o3);
+    // out_k = main_k + s wrapped_k
+    const Wide main[4] = {wide(e0, e0), e01 + e01 + squares_of_p(1) - wide(o0, o0),
+                          e02 + e02 + wide(e1, e1) + squares_of_p(2) - o01 - o01,
+                          e03 + e03 + e12 + e12 + squares_of_p(3) - o02 - o02 - wide(o1, o1)};
+    const Wide wrapped[4] = {e13 + e13 + wide(e2, e2) + squares_of_p(4) - o03 - o03 - o12 - o12,
+                             e23 + e23 + squares_of_p(3) - o13 - o13 - wide(o2, o2),
+                             wide(e3, e3) + squares_of_p(2) - o23 - o23, squares_of_p(1) - wide(o3, o3)};
+    const Lanes s = lanes(s_m);
+#pragma GCC unroll 4
+    for (int k = 0; k < 4; ++k) out[k] = low(reduce_wide(main[k] + wide(lanes(canonical(reduce_wide(wrapped[k]))), s)));
+}
+
+// Twiddle tables for transforms of length 4m and, per pair p of their leaves (leaves 2p, 2p + 1:
+// moduli z^8 -+ s, s = r[p]), s 2^32 and s^-1 2^63 mod P.
+struct Tables {
+    std::uint32_t *roots, *inverse_roots, *s_m, *hi_graeffe;
+
+    static std::size_t words(std::size_t m) {
+        const int lg = std::countr_zero(m) + 2;
+        return 2 * Arena::footprint(ntt::detail::table_words(lg)) + 2 * Arena::footprint(m / 4);
+    }
+
+    Tables(std::span<std::uint32_t> memory, std::size_t m) {
+        const std::size_t table = Arena::footprint(ntt::detail::table_words(std::countr_zero(m) + 2)), count = m / 4;
+        roots = memory.data(), inverse_roots = roots + table, s_m = inverse_roots + table;
+        hi_graeffe = s_m + Arena::footprint(count);
+        ntt::detail::build_table(roots, count, ntt::detail::kRoots[0]);
+        ntt::detail::build_table(inverse_roots, count, ntt::detail::kRoots[1]);
+        const auto power_of_two = [](int e) {  // 2^e mod P
+            std::uint64_t x = 1;
+            for (int i = 0; i < e; ++i) x = x * 2 % kP;
+            return std::uint32_t(x);
+        };
+        const Vec c64 = broadcast(power_of_two(64)), c95 = broadcast(power_of_two(95));  // montgomery() takes 2^-32
+        for (std::size_t p = 0; p < count; p += 8) {
+            store(s_m + p, reduce(montgomery(load(roots + slot(p)), c64), kP));
+            store(hi_graeffe + p, reduce(montgomery(load(inverse_roots + slot(p)), c95), kP));
+        }
+    }
+};
+
+// The bottom of the forward transform of Q_s (length 4m): forward butterflies (canonical leaves,
+// kept as the level), then, unless graeffe is null, the transform of length 2m of
+// V = Q_s(x) Q_s(-x) at stride L (2Y rows, wrapped). For leaves a = Q mod (z^8 - s),
+// b = Q mod (z^8 + s): V mod (u^4 -+ s) = A, B = a(z) a(-z), b(z) b(-z) (leaf_graeffe, u = z^2), and
+// leaf p of V's transform is V mod (u^8 - w_p) = (A + B) / 2 + u^4 (A - B) / (2s), since s^2 = w_p.
+// Pairs go 8 at a time (two groups); tiles hold at least 16 vectors (4m >= 256).
+struct LevelBottom {
+    static constexpr bool kForward = true, kInverse = false;
+    const Tables* tables;
+    std::uint32_t* graeffe;
+
+    void operator()(std::uint32_t* a, std::size_t count, std::size_t first) const {
+        ForwardBottom{tables->roots}(a, count, first);
+        if (graeffe)
+            for (std::size_t i = 0; i < count; i += 4) pairs(a + 32 * i, 2 * (first + i));
+    }
+
+    // 8 pairs from leaves at q, the first pair p.
+    void pairs(const std::uint32_t* q, std::size_t p) const {
+        Vec a[8], b[8];
+#pragma GCC unroll 8
+        for (int i = 0; i < 8; ++i) a[i] = load(q + 16 * i), b[i] = load(q + 16 * i + 8);
+        transpose(a), transpose(b);
+        const Vec s_m = load(tables->s_m + p);
+        Vec va[4], vb[4], v[8];
+        leaf_graeffe(a, s_m, va);
+        leaf_graeffe(b, negate(s_m), vb);
+        // va, vb carry 2^-32: (A + B) / 2 = (va + vb) 2^31, (A - B) / (2s) = (va - vb) 2^63 / (s 2^32).
+        const Vec half = broadcast(std::uint32_t((std::uint64_t(1) << 63) % kP)), hi = load(tables->hi_graeffe + p);
+#pragma GCC unroll 4
+        for (int k = 0; k < 4; ++k) {
+            v[k] = reduce(montgomery(add(va[k], vb[k]), half), kP);
+            v[k + 4] = reduce(montgomery(diff(va[k], vb[k]), hi), kP);
+        }
+        transpose(v);
+#pragma GCC unroll 8
+        for (int i = 0; i < 8; ++i) store(graeffe + 8 * (p + i), v[i]);
+    }
+};
+
+// The bottom of the inverse transform of R = P(z^2) Q_s(-z) (length 4m), from f, the transform of
+// length 2m of P, and q, that of Q_s. For leaves 2p, 2p + 1 (moduli z^8 - w, w = +-s), with
+// u = z^2: P(z^2) mod (z^8 -+ s) = lo +- s hi, where leaf p of f is P mod (u^8 - s^2) =
+// lo + u^4 hi; and with c = Q_s mod (z^8 - w) = ce(u) + z co(u), R mod (z^8 - w) =
+// p(u) ce(u) - z p(u) co(u) mod (u^4 - w). A pair works in one vector, a leaf per 128-bit lane.
+// Products times 2^-32 (undone by the scale), then inverse butterflies.
+struct CompositionBottom {
+    static constexpr bool kForward = false, kInverse = true;
+    const Tables* tables;
+    const std::uint32_t *f, *q;
+
+    // Leaves 2p and 2p + 1 of R, in [0, 2P).
+    [[gnu::always_inline]] void pair(std::size_t p, Vec& r0, Vec& r1) const {
+        const Vec x = load(f + 8 * p), lo = _mm256_permute2x128_si256(x, x, 0x00);
+        const Factor s = entry(tables->roots, p);
+        const Vec t = times(_mm256_permute2x128_si256(x, x, 0x11), s);
+        const Vec v = canonical(_mm256_blend_epi32(add(lo, t), diff(lo, t), 0xF0));  // p(u) per lane
+        const Vec sv = reduce(times(v, s), kP), wv = _mm256_blend_epi32(sv, negate(sv), 0xF0);
+        // u^i p mod (u^4 - w): words 4 - i .. 7 - i of [w p, p]
+        const Vec rot[4] = {v, _mm256_alignr_epi8(v, wv, 12), _mm256_alignr_epi8(v, wv, 8), _mm256_alignr_epi8(v, wv, 4)};
+        const Vec qa = load(q + 16 * p), qb = load(q + 16 * p + 8);
+        const Vec c03 = _mm256_permute2x128_si256(qa, qb, 0x20), c47 = _mm256_permute2x128_si256(qa, qb, 0x31);
+        const Vec ce[4] = {_mm256_shuffle_epi32(c03, 0x00), _mm256_shuffle_epi32(c03, 0xAA), _mm256_shuffle_epi32(c47, 0x00),
+                           _mm256_shuffle_epi32(c47, 0xAA)};
+        const Vec co[4] = {_mm256_shuffle_epi32(c03, 0x55), _mm256_shuffle_epi32(c03, 0xFF), _mm256_shuffle_epi32(c47, 0x55),
+                           _mm256_shuffle_epi32(c47, 0xFF)};
+        Wide even{}, odd{};
+#pragma GCC unroll 4
+        for (int i = 0; i < 4; ++i) {
+            const Lanes r = lanes(rot[i]);  // ce[i], co[i] are broadcasts: their odd lanes equal the even ones
+            even = even + wide(r, {ce[i], ce[i]});
+            odd = odd + wide(r, {co[i], co[i]});
+        }
+        const Vec e = reduce_wide(even);  // sums of 4 products: below 2P
+        const Vec o = reduce(_mm256_sub_epi32(broadcast(2 * kP), reduce_wide(odd)), 2 * kP);
+        const Vec l = _mm256_unpacklo_epi32(e, o), h = _mm256_unpackhi_epi32(e, o);
+        r0 = _mm256_permute2x128_si256(l, h, 0x20), r1 = _mm256_permute2x128_si256(l, h, 0x31);
+    }
+
+    void operator()(std::uint32_t* out, std::size_t count, std::size_t first) const {
+        for (std::size_t j = 0; j < count; ++j, out += 32) {
+            const std::size_t g = first + j;
+            Vec r[4];
+            pair(2 * g, r[0], r[1]);
+            pair(2 * g + 1, r[2], r[3]);
+            inverse_h1(r, Group(tables->inverse_roots, g));
+            for (int t = 0; t < 4; ++t) store(out + 8 * t, r[t]);
+        }
+    }
+};
+
+// Transforms of length a.size() with a bottom, as Transform's: forward in place (input a);
+// inverse with output half, times scale.
+template <class Bottom>
+void forward_with(std::span<std::uint32_t> a, const Tables& tables, const Bottom& bottom) {
+    const Recursion recursion(tables.roots, tables.inverse_roots, bottom);
+    const Source in(a.data(), a.size(), 0);
+    const std::size_t nv = a.size() / 8;
+    auto* v = reinterpret_cast<Vec*>(a.data());
+    if (std::countr_zero(nv) % 2 == 0) {
+        const std::size_t h = nv / 4;
+        forward_top4(in, v, h, tables.roots);
+        for (std::size_t t = 0; t < 4; ++t) recursion.visit(a.data() + 8 * t * h, h, t);
+    } else {
+        const std::size_t h = nv / 2;
+        forward_top2(in, v, h);
+        recursion.visit(a.data(), h, 0);
+        recursion.visit(a.data() + 8 * h, h, 1);
     }
 }
 
-// Bump allocation of 32-byte aligned spans from scratch, with Arena's gaps.
+template <class Bottom>
+void inverse_with(std::span<std::uint32_t> a, const Tables& tables, const Bottom& bottom, std::uint32_t scale, Half output) {
+    const Recursion recursion(tables.roots, tables.inverse_roots, bottom);
+    const std::size_t nv = a.size() / 8;
+    auto* v = reinterpret_cast<Vec*>(a.data());
+    if (std::countr_zero(nv) % 2 == 0) {
+        const std::size_t h = nv / 4;
+        for (std::size_t t = 0; t < 4; ++t) recursion.visit(a.data() + 8 * t * h, h, t);
+        inverse_top4(v, h, output, tables.inverse_roots, Factor(scale));
+    } else {
+        const std::size_t h = nv / 2;
+        recursion.visit(a.data(), h, 0);
+        recursion.visit(a.data() + 8 * h, h, 1);
+        inverse_top2(v, h, output, scale);
+    }
+}
+
+// Bump allocation of 64-byte aligned spans from scratch, with Arena's gaps: each take uses at
+// most words(n) words.
 class Carve {
 public:
     explicit Carve(std::span<std::uint32_t> scratch) : rest_(scratch) {}
 
+    static constexpr std::size_t words(std::size_t n) { return Arena::footprint(n) + 8; }
+
     std::span<std::uint32_t> take(std::size_t n) {
-        const std::size_t step = Arena::footprint(n);
-        if (step > rest_.size()) std::abort();
-        const std::span<std::uint32_t> s = rest_.first(n);
-        rest_ = rest_.subspan(step);
+        const std::size_t skip = (0 - reinterpret_cast<std::uintptr_t>(rest_.data()) / 4) % 16;  // to 64 bytes
+        if (skip + Arena::footprint(n) > rest_.size()) std::abort();
+        const std::span<std::uint32_t> s = rest_.subspan(skip, n);
+        rest_ = rest_.subspan(skip + Arena::footprint(n));
         return s;
     }
 
@@ -96,35 +296,26 @@ private:
     std::span<std::uint32_t> rest_;
 };
 
-// The levels of g: for s < T, the transforms of length 2m of E_s and -O_s, Q_s = E_s(x^2, y) +
-// x O_s(x^2, y), with Kronecker stride m / 2^s (2^(s+1) rows in y).
+// The levels of g (T of them, each the transform of length 4m of Q_s) and work spans.
 struct Levels {
-    std::size_t m;  // 2^T >= 32
-    int lg;         // log2(m)
-    std::span<std::uint32_t> roots, inverse_roots;  // leaf weights for transforms of length 4m
-    std::span<std::uint32_t> parts;                 // level s: E_s at [4ms, 4ms + 2m), -O_s after it
-    std::span<std::uint32_t> work[4];               // lengths 4m, 2m, 2m, 2m
+    std::size_t m;  // 2^T >= 64
+    int lg;         // T
+    Tables tables;
+    std::span<std::uint32_t> transforms;
+    std::span<std::uint32_t> work[2];  // length 4m each
 
-    std::span<std::uint32_t> even(int s) const { return parts.subspan(2 * std::size_t(s) * part(m), 2 * m); }
-    std::span<std::uint32_t> odd(int s) const { return parts.subspan((2 * std::size_t(s) + 1) * part(m), 2 * m); }
-
-    static std::size_t part(std::size_t m) { return Arena::footprint(2 * m); }
+    std::span<std::uint32_t> level(int s) const { return transforms.subspan(std::size_t(s) * Arena::footprint(4 * m), 4 * m); }
 
     static std::size_t scratch(std::size_t m) {
-        const int lg = std::countr_zero(m);
-        return Arena::footprint(ntt::detail::table_words(lg + 1)) + Arena::footprint(ntt::detail::table_words(lg + 2)) +
-               Arena::footprint(2 * std::size_t(lg) * part(m)) + Arena::footprint(4 * m) + 3 * part(m);
+        return Arena::footprint(Tables::words(m)) + Carve::words(std::size_t(std::countr_zero(m)) * Arena::footprint(4 * m)) +
+               2 * Carve::words(4 * m);
     }
 
-    Levels(std::size_t size, std::span<std::uint32_t> scratch) : m(size), lg(std::countr_zero(size)) {
-        Carve carve(scratch);
-        roots = carve.take(ntt::detail::table_words(lg + 1));
-        inverse_roots = carve.take(ntt::detail::table_words(lg + 2));
-        ntt::detail::build_table(roots.data(), m / 8, ntt::detail::kRoots[0]);
-        ntt::detail::build_table(inverse_roots.data(), m / 4, ntt::detail::kRoots[1]);
-        parts = carve.take(2 * std::size_t(lg) * part(m));
-        work[0] = carve.take(4 * m);
-        for (int i = 1; i < 4; ++i) work[i] = carve.take(2 * m);
+    Levels(std::size_t size, std::span<std::uint32_t> scratch)
+        : m(size), lg(std::countr_zero(size)), tables(scratch.first(Tables::words(size)), size) {
+        Carve carve(scratch.subspan(Arena::footprint(Tables::words(size))));
+        transforms = carve.take(std::size_t(lg) * Arena::footprint(4 * m));
+        for (auto& w : work) w = carve.take(4 * m);
     }
 };
 
@@ -135,8 +326,8 @@ inline void first_level(std::span<const std::uint32_t> g, std::size_t m, std::sp
     for (std::size_t j = 1; j < std::min(g.size(), m); ++j) a[2 * m + j] = g[j] ? kP - g[j] : 0;
 }
 
-// From v = Q_s(x) Q_s(-x) mod (z^(2m) - 1) at stride L (rows 2Y wrapped: row 0 holds 1 + the row
-// 2Y), Q_(s+1) at stride L (4Y rows of which 0 .. 2Y are used, x below L / 2) in a, length 4m.
+// From v = Q_s(x) Q_s(-x) mod (z^(2m) - 1) at stride L (2Y rows, wrapped: row 0 holds 1 + row 2Y) in
+// a[0, 2m), Q_(s+1) at stride L in a: x below L / 2, rows 0 .. 2Y of 4Y.
 inline void next_level(std::span<std::uint32_t> a, std::size_t stride, std::size_t rows) {
     const std::size_t half = stride / 2, top = rows * stride;
     std::copy(a.begin(), a.begin() + std::ptrdiff_t(half), a.begin() + std::ptrdiff_t(top));
@@ -148,20 +339,17 @@ inline void next_level(std::span<std::uint32_t> a, std::size_t stride, std::size
         std::fill(a.begin() + std::ptrdiff_t(i * stride + half), a.begin() + std::ptrdiff_t((i + 1) * stride), 0);
 }
 
-// The transforms of all levels of g into levels.parts. t: lg_max >= levels.lg + 2.
+// The transforms of all levels of g. t: lg_max >= levels.lg + 1.
 inline void build_levels(const Transform& t, std::span<const std::uint32_t> g, Levels& levels) {
     const std::size_t m = levels.m;
-    const std::span<std::uint32_t> a = levels.work[0], shifted = levels.work[1];
-    first_level(g, m, a);
+    const std::span<std::uint32_t> graeffe = levels.work[0].first(2 * m);
+    first_level(g, m, levels.level(0));
     for (int s = 0; s < levels.lg; ++s) {
-        t.forward(a);
-        split_parts(a.data(), 4 * m, levels.roots.data(), levels.inverse_roots.data(), levels.even(s).data(),
-                    levels.odd(s).data(), shifted.data());
-        if (s + 1 == levels.lg) break;
-        // Q_(s+1) = E_s^2 - u O_s^2 = E_s E_s + (u O_s)(-O_s) at stride m / 2^s, 2^(s+1) rows (wrapped).
-        const Transform::Pair pairs[2] = {{levels.even(s), levels.even(s)}, {shifted, levels.odd(s)}};
-        t.inverse_product_sum(pairs, a.first(2 * m));
-        next_level(a, m >> s, std::size_t(2) << s);
+        const bool last = s + 1 == levels.lg;
+        forward_with(levels.level(s), levels.tables, LevelBottom{&levels.tables, last ? nullptr : graeffe.data()});
+        if (last) break;
+        t.inverse(graeffe, levels.level(s + 1).first(2 * m));
+        next_level(levels.level(s + 1), m >> s, std::size_t(2) << s);
     }
 }
 
@@ -170,7 +358,7 @@ inline void build_levels(const Transform& t, std::span<const std::uint32_t> g, L
 // Transform length compose() uses for n coefficients: the Transform needs lg_max >= this.
 inline int compose_log(std::size_t n) {
     if (n <= detail::kComposeBase) return Transform::kMinLog;
-    return int(std::bit_width(n - 1)) + 2;
+    return int(std::bit_width(n - 1)) + 1;
 }
 
 // Scratch words for compose() of n coefficients.
@@ -183,12 +371,12 @@ inline std::size_t compose_scratch(std::size_t n) {
 // f.size() and g.size() are zero. scratch: compose_scratch(n) words, 32-byte aligned (from an
 // Arena). t: lg_max >= compose_log(n). f, g and h must not overlap.
 //
-// Transposed power projection: with m = 2^T >= n, h_rev = the transpose of w -> ([x^(m-1)] w g^i)_i
-// applied to f. Level s maps P_(s+1) (m / 2^(s+1) by 2^(s+1) coefficients) to P_s (m / 2^s by
-// 2^s): P_s[a][b] = sum P_(s+1)[(a + c) / 2][b + e] Q_s(-x)[c][e] over a + c odd. Split by the parity
-// of a, P_s[2a + 1] and P_s[2a] are middle products of P_(s+1) with E_s and -O_s; with P_(s+1)
-// reversed in x and y, they are cyclic products of length 2m read at reversed indices, and the
-// reversals cancel between levels. P_T = f (one row in x), h[k] = P_0[m - 1 - k][0].
+// Transposed power projection: with m = 2^T >= n, the transpose of w -> ([x^(m-1)] w g^i)_i maps f
+// to h reversed. Level s maps P_(s+1) (L / 2 by 2Y coefficients) to P_s (L by Y):
+// P_s[a][b] = sum P_(s+1)[(a + c - 1) / 2][b + e] Q_s(-x)[c][e] over odd a + c. With P_(s+1)
+// reversed in x and y (stored at stride L), this is R = P(z^2) Q_s(-z) mod (z^4m - 1): P_s[a][b] =
+// R[L - 1 - a][2Y - 1 - b], so rows Y .. 2Y - 1 of R, x below L, are P_s reversed in x and y, the
+// input of level s - 1. P_T = f (one row in x); h[k] = P_0[m - 1 - k][0] = R[k][1] at level 0.
 inline void compose(const Transform& t, std::span<const std::uint32_t> f, std::span<const std::uint32_t> g,
                     std::span<std::uint32_t> h, std::span<std::uint32_t> scratch) {
     const std::size_t n = h.size();
@@ -196,28 +384,22 @@ inline void compose(const Transform& t, std::span<const std::uint32_t> f, std::s
     detail::Levels levels(std::bit_ceil(n), scratch);
     detail::build_levels(t, g, levels);
     const std::size_t m = levels.m;
-    // Level T - 1 reads f reversed at stride 2: x below 1, 2^T rows.
-    std::span<std::uint32_t> in = levels.work[1], even = levels.work[2], next = levels.work[3];
-    std::fill(in.begin(), in.end(), 0);
-    for (std::size_t i = 0; i < m; ++i) in[2 * i] = m - 1 - i < f.size() ? f[m - 1 - i] : 0;
+    const std::uint32_t scale = ntt::detail::multiply_mod(ntt::detail::power(std::uint32_t(m / 2), kModulus - 2), ntt::detail::kR);
+    std::span<std::uint32_t> in = levels.work[0], out = levels.work[1];
+    // Level T - 1 reads f reversed at stride 2 (x below 1, m rows) from in[2m, 4m).
+    for (std::size_t i = 0; i < m; ++i) in[2 * m + 2 * i] = m - 1 - i < f.size() ? f[m - 1 - i] : 0, in[2 * m + 2 * i + 1] = 0;
     for (int s = levels.lg - 1; s >= 0; --s) {
-        const std::size_t stride = m >> s, rows = std::size_t(1) << s;  // outputs: rows [rows, 2 rows), x < stride / 2
-        t.forward(in);
-        t.inverse_product(in, levels.even(s), even, Half::kUpper);
-        t.inverse_product(in, levels.odd(s), in, Half::kUpper);  // odd outputs in place
-        if (s == 0) {
-            for (std::size_t k = 0; k < n; ++k) h[k] = (k % 2 ? in : even)[m + k / 2];
-            return;
-        }
-        // Next level: stride 2 stride, row i = even and odd outputs of row rows + i interleaved.
-        std::fill(next.begin(), next.end(), 0);
-        for (std::size_t i = 0; i < rows; ++i)
-            for (std::size_t j = 0; j < stride / 2; ++j) {
-                next[2 * stride * i + 2 * j] = even[stride * (rows + i) + j];
-                next[2 * stride * i + 2 * j + 1] = in[stride * (rows + i) + j];
-            }
-        std::swap(in, next);
+        const std::span<std::uint32_t> p = in.subspan(2 * m);
+        t.forward(p);
+        detail::inverse_with(out, levels.tables, detail::CompositionBottom{&levels.tables, p.data(), levels.level(s).data()},
+                             scale, Half::kUpper);
+        const std::size_t stride = 2 * (m >> s);  // rows of R; level s - 1 reads x below stride / 2
+        if (s > 0)
+            for (std::size_t i = 2 * m; i < 4 * m; i += stride)
+                std::fill(out.begin() + std::ptrdiff_t(i + stride / 2), out.begin() + std::ptrdiff_t(i + stride), 0);
+        std::swap(in, out);
     }
+    std::copy(in.begin() + std::ptrdiff_t(2 * m), in.begin() + std::ptrdiff_t(2 * m + n), h.begin());
 }
 
 }  // namespace poly

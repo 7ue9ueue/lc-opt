@@ -461,7 +461,9 @@ products 1.77 and 1.69).
   with garbage first. Nine mutations (wraps, signs, truncation, CRT factor, each special level)
   fail them.
 - Steps and measurements: problems/polynomial/composition_of_formal_power_series/notes.md.
-  Whole process at N = 8000: 3.44 ms (first version) -> 2.79 ms, floor 1.25 ms.
+  Whole process at N = 8000: 3.44 ms (first version) -> 2.79 ms, floor 1.25 ms. Merged as #164;
+  judged [409332](https://judge.yosupo.jp/submission/409332): AC 11 ms with a launch spike, clean
+  3 ms (record 9 ms).
 - Leaf-product findings: windows filled and read at once stall on store forwarding (86.5 against
   47.1 us for the same products with windows stored long before); GCC kept a 4-term loop rolled
   with its operands on the stack until `#pragma GCC unroll`; 8 pairs per step in transposed

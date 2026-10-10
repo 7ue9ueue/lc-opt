@@ -3,7 +3,8 @@
 // (../convolution_mod/fields.hpp). Factors of at most half the length (all large tests) use
 // ntt::Product (lib/ntt/product.hpp), other sizes ntt::Convolution. Input by io::read_fixed
 // (lib/io/fixed32.hpp): inputs of 9-digit or 1-digit tokens take a fixed-stride path. Pages
-// past the input are written before the transform reads them (write_first).
+// past the input are written before the transform reads them (lib/mem/write_first.hpp; on
+// lc-k68, Linux 6.8 as the judge, small_and_large_01 340 -> 310 ms).
 // lib/io/fixed32.hpp
 // Bulk read of uint32 arrays with a fast path for tokens of fixed width, on top of io::read_bulk:
 //
@@ -1089,6 +1090,90 @@ inline void read_fixed(Reader& in, std::uint32_t* dst, std::size_t count) {
 }
 
 }  // namespace io
+// lib/mem/write_first.hpp
+// Huge pages written before they are read. On Linux 6.8 a 2 MiB page that is read first maps the
+// shared huge zero page, and the first write then splits it into 4 KiB pages; a page written first
+// is a huge page. Linux 7.0 allocates a huge page either way. Measurements: lib/mem/notes.md.
+//
+//   auto* a = mem::huge<std::uint32_t>(len);   // huge.hpp
+//   in.read(a, n);
+//   mem::write_first(a, n, len);               // before a[n, len) is read
+//
+// write_first stores zero at each 2 MiB boundary in x[begin, end): once in every page of
+// x[begin, end) but the one that holds x[begin - 1], which the caller has written. x[begin, end)
+// must be zero.
+
+#include <cstddef>
+#include <cstdint>
+
+// lib/mem/huge.hpp
+// Zero-filled memory in transparent huge pages (2 MiB) where the kernel allows. Never freed: the
+// programs end with _exit. Linux or macOS. Measurements: lib/mem/notes.md.
+//
+//   auto* a = mem::huge<std::uint32_t>(n);   // n zeroed values, 2 MiB aligned
+//   mem::Arena arena(bytes);                 // one mapping for several arrays
+//   auto* b = arena.take<std::uint64_t>(m);  // m zeroed values, 64-byte aligned
+//
+// Pages fault in on first touch. An arena of B bytes holds takes whose sizes, each rounded up to
+// 64 bytes, sum to at most B; it does not check.
+
+#include <sys/mman.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+
+namespace mem {
+
+inline constexpr std::size_t kHugePage = std::size_t(1) << 21;
+
+// bytes rounded up to whole huge pages, 2 MiB aligned.
+inline void* map_huge(std::size_t bytes) {
+    bytes = (bytes + kHugePage - 1) / kHugePage * kHugePage;
+    void* region = ::mmap(nullptr, bytes + kHugePage, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (region == MAP_FAILED) std::abort();
+    const std::uintptr_t aligned = (reinterpret_cast<std::uintptr_t>(region) + kHugePage - 1) & ~(kHugePage - 1);
+#ifdef MADV_HUGEPAGE
+    ::madvise(reinterpret_cast<void*>(aligned), bytes, MADV_HUGEPAGE);
+#endif
+    return reinterpret_cast<void*>(aligned);
+}
+
+// count values of T.
+template <class T>
+T* huge(std::size_t count) {
+    return static_cast<T*>(map_huge(count * sizeof(T)));
+}
+
+// Bump allocation from one map_huge() mapping.
+class Arena {
+public:
+    explicit Arena(std::size_t bytes) : cur_(reinterpret_cast<std::uintptr_t>(map_huge(bytes))) {}
+
+    // count values of T; the next take starts at the next multiple of 64 bytes.
+    template <class T>
+    T* take(std::size_t count) {
+        T* p = reinterpret_cast<T*>(cur_);
+        cur_ += (count * sizeof(T) + 63) & ~std::size_t(63);
+        return p;
+    }
+
+private:
+    std::uintptr_t cur_;
+};
+
+}  // namespace mem
+
+namespace mem {
+
+template <class T>
+void write_first(T* x, std::size_t begin, std::size_t end) {
+    constexpr std::size_t kPage = kHugePage / sizeof(T);  // elements
+    const std::size_t offset = reinterpret_cast<std::uintptr_t>(x) / sizeof(T) % kPage;
+    for (std::size_t i = (begin + offset + kPage - 1) / kPage * kPage - offset; i < end; i += kPage) x[i] = 0;
+}
+
+}  // namespace mem
 // lib/ntt/product.hpp
 // Polynomial multiplication modulo P = 998244353 for factors that fill at most half of the
 // transform: ntt::Convolution's transform with a faster bottom stage and top levels.
@@ -5845,24 +5930,14 @@ char* text(ntt::Convolution&) {
     return buffer;
 }
 
-// One store per 2 MiB page of f[begin, end) that does not hold f[begin - 1]. On Linux 6.8 (lc-k68,
-// whose times match the judge's), a huge page first read maps the shared huge zero page, and the
-// first write then splits it into 4 KiB pages; a first write gets a huge page. Linux 7.0 allocates
-// a huge page either way. small_and_large_01 on lc-k68: 340 -> 310 ms.
-void write_first(std::uint32_t* f, std::size_t begin, std::size_t end) {
-    constexpr std::size_t kPage = (std::size_t(1) << 21) / sizeof(std::uint32_t);  // words
-    const std::size_t offset = reinterpret_cast<std::uintptr_t>(f) / sizeof(std::uint32_t) % kPage;
-    for (std::size_t i = (begin + offset + kPage - 1) / kPage * kPage - offset; i < end; i += kPage) f[i] = 0;
-}
-
 template <class Multiplier>
 void convolve(io::Reader& in, Multiplier& product, std::size_t n, std::size_t m) {
     io::read_fixed(in, product.a(), n);
     io::read_fixed(in, product.b(), m);
     // The first pass reads the lower half of a factor that fits it, else all of it.
     const std::size_t length = std::max<std::size_t>(64, std::bit_ceil(n + m - 1)), half = length / 2;
-    write_first(product.a(), n, n <= half ? half : length);
-    write_first(product.b(), m, m <= half ? half : length);
+    mem::write_first(product.a(), n, n <= half ? half : length);
+    mem::write_first(product.b(), m, m <= half ? half : length);
     const std::uint32_t* c = product.multiply();
     io::Writer out;
     fields::write(out, c, n + m - 1, text(product));

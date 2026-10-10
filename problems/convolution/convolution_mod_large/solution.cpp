@@ -2,9 +2,11 @@
 // (../convolution_mod/fields.hpp). Factors of at most half the length (all large tests) use
 // ntt::Product (lib/ntt/product.hpp), other sizes ntt::Convolution. Input by io::read_fixed
 // (lib/io/fixed32.hpp): inputs of 9-digit or 1-digit tokens take a fixed-stride path. Pages
-// past the input are written before the transform reads them (write_first).
+// past the input are written before the transform reads them (lib/mem/write_first.hpp; on
+// lc-k68, Linux 6.8 as the judge, small_and_large_01 340 -> 310 ms).
 #include "lib/io/fixed32.hpp"
 #include "lib/io/io.hpp"
+#include "lib/mem/write_first.hpp"
 #include "lib/ntt/product.hpp"
 #include "lib/run/early.hpp"
 #include "../convolution_mod/fields.hpp"
@@ -19,24 +21,14 @@ char* text(ntt::Convolution&) {
     return buffer;
 }
 
-// One store per 2 MiB page of f[begin, end) that does not hold f[begin - 1]. On Linux 6.8 (lc-k68,
-// whose times match the judge's), a huge page first read maps the shared huge zero page, and the
-// first write then splits it into 4 KiB pages; a first write gets a huge page. Linux 7.0 allocates
-// a huge page either way. small_and_large_01 on lc-k68: 340 -> 310 ms.
-void write_first(std::uint32_t* f, std::size_t begin, std::size_t end) {
-    constexpr std::size_t kPage = (std::size_t(1) << 21) / sizeof(std::uint32_t);  // words
-    const std::size_t offset = reinterpret_cast<std::uintptr_t>(f) / sizeof(std::uint32_t) % kPage;
-    for (std::size_t i = (begin + offset + kPage - 1) / kPage * kPage - offset; i < end; i += kPage) f[i] = 0;
-}
-
 template <class Multiplier>
 void convolve(io::Reader& in, Multiplier& product, std::size_t n, std::size_t m) {
     io::read_fixed(in, product.a(), n);
     io::read_fixed(in, product.b(), m);
     // The first pass reads the lower half of a factor that fits it, else all of it.
     const std::size_t length = std::max<std::size_t>(64, std::bit_ceil(n + m - 1)), half = length / 2;
-    write_first(product.a(), n, n <= half ? half : length);
-    write_first(product.b(), m, m <= half ? half : length);
+    mem::write_first(product.a(), n, n <= half ? half : length);
+    mem::write_first(product.b(), m, m <= half ? half : length);
     const std::uint32_t* c = product.multiply();
     io::Writer out;
     fields::write(out, c, n + m - 1, text(product));

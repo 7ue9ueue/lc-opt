@@ -13,7 +13,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 |---|---:|---:|
 | [many_aplusb](problems/sample/many_aplusb) | [18 ms](https://judge.yosupo.jp/submission/409103) | 23 ms |
 | [convolution_mod](problems/convolution/convolution_mod) | [12 ms](https://judge.yosupo.jp/submission/409465) | 23 ms |
-| [convolution_mod_large](problems/convolution/convolution_mod_large) | [430 ms](https://judge.yosupo.jp/submission/409343) | 737 ms |
+| [convolution_mod_large](problems/convolution/convolution_mod_large) | [427 ms](https://judge.yosupo.jp/submission/409616) | 737 ms |
 | [convolution_mod_1000000007](problems/convolution/convolution_mod_1000000007) | [23 ms](https://judge.yosupo.jp/submission/409353) | 29 ms |
 | [convolution_mod_2_64](problems/convolution/convolution_mod_2_64) | [41 ms](https://judge.yosupo.jp/submission/409605) | 76 ms |
 | [convolution_F_2_64](problems/convolution/convolution_F_2_64) | [42 ms](https://judge.yosupo.jp/submission/409339) | 409 ms |
@@ -54,6 +54,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [inv_of_polynomials](problems/polynomial/inv_of_polynomials) | [15 ms](https://judge.yosupo.jp/submission/409589) | 104 ms |
 | [prefix_sum_of_polynomial](problems/polynomial/prefix_sum_of_polynomial) | [13 ms](https://judge.yosupo.jp/submission/409571) | 143 ms |
 | [conversion_from_monomial_basis_to_newton_basis](problems/polynomial/conversion_from_monomial_basis_to_newton_basis) | [13 ms](https://judge.yosupo.jp/submission/409606) | 142 ms |
+| [polynomial_root_finding](problems/polynomial/polynomial_root_finding) | [9 ms](https://judge.yosupo.jp/submission/409630) | 151 ms |
 | [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |
 
 Times are the judge's, for the slowest test, checked against the judge's API on 2026-10-10.

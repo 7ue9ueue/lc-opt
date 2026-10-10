@@ -108,6 +108,9 @@ private:
 // calls put(j, s, terms...) for every lane s < 32, with one vector per chain: lane t holds the
 // term of step j + t (j + 7 - t for a reversed chain). The chains run 8 steps ahead of put (8
 // steps past the end), so a block's transposes and stores overlap the next block's products.
+// put should capture local copies by value: vector stores may alias anything, so members and
+// captured references are reloaded after each store (polynomial_taylor_shift's weights pass:
+// 0.41 ms with locals, 0.50 with members through [&]).
 template <class Put, class... Chains>
 [[gnu::always_inline]] inline void scan(std::size_t steps, Put put, Chains&... chains) {
     constexpr auto kAll = std::index_sequence_for<Chains...>{};

@@ -140,13 +140,16 @@ private:
                       lanes([this](int s) { return mont(std::uint32_t(start(s) + 1)); }), kR);
         Chain<> kernel(lanes([&](int s) { return multiply_mod(c_power[s], inverse_start_[s + 1]); }),
                        lanes([&](int s) { return multiply_mod(std::uint32_t(start(s + 1)), c_step); }), kP - c_step);
+        // Captures by value: the vector stores may alias anything, so values reached through
+        // memory (members, captured references) would be reloaded after each of them.
         const std::size_t stride = chunk_;
-        scan(stride, [&](std::size_t j, int s, Vec x, Vec e) {
+        std::uint32_t* const a = a_;
+        std::uint32_t* const e = b_ + length() / 2 - stride;  // lane s at e - s C: E_j at L/2 - j
+        scan(stride, [=](std::size_t j, int s, Vec x, Vec y) {
             const std::size_t at = s * stride;
-            std::uint32_t* const a = a_ + j + at;
-            const Vec f = load(a);
-            store(a, reduce(montgomery(f, odd_lanes(f), x, odd_lanes(x)), kP));
-            store(b_ + length() / 2 - stride + j - at, reduce(e, kP));  // E_j at L/2 - j
+            const Vec f = load(a + j + at);
+            store(a + j + at, reduce(montgomery(f, odd_lanes(f), x, odd_lanes(x)), kP));
+            store(e + j - at, reduce(y, kP));
         }, input, kernel);
     }
 
@@ -160,10 +163,12 @@ private:
         Chain<true> chain(lanes([&](int s) { return multiply_mod(multiply_mod(inverse_start_[s + 1], std::uint32_t(start(s + 1))), scale); }),
                           lanes([this](int s) { return mont(std::uint32_t(start(s + 1) - 1)); }), kP - kR);
         const std::size_t stride = chunk_, half = length() / 2;
-        scan(stride, [&](std::size_t j, int s, Vec z) {
+        const std::uint32_t* const u = a_;
+        std::uint32_t* const out = b_;
+        scan(stride, [=](std::size_t j, int s, Vec z) {  // by value, as in weights()
             const std::size_t at = s * stride + stride - 8 - j;  // lane s from the top down
-            const Vec g = low(diff(load(a_ + at), load(a_ + at + half)));
-            store(b_ + at, reduce(montgomery(g, odd_lanes(g), z, odd_lanes(z)), kP));
+            const Vec g = low(diff(load(u + at), load(u + at + half)));
+            store(out + at, reduce(montgomery(g, odd_lanes(g), z, odd_lanes(z)), kP));
         }, chain);
     }
 

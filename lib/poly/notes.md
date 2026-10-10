@@ -630,6 +630,11 @@ Lagrange interpolation on 0, 1, ..., N - 1.
   next block run interleaved with the puts of the current one. `Chain<true>` records each block
   reversed (backward scans in position order). `scan_chunk(n)`: C a multiple of 16 with C / 16
   odd, so the 32 streams fall into different cache sets.
+- `put` lambdas capture local copies by value. `__m256i` stores may alias anything, so a member
+  or a variable captured by reference is reloaded after every store: polynomial_taylor_shift's
+  weights pass took 0.50 ms with `[&]` and members against 0.41 for the old hand-written loop
+  and 0.42 by value (warm, 2^19, `lc-bench`); CI saw the first version 0.08% and 0.50% slower.
+  shift_of_sampling_points' four passes: 1.75 -> 1.59 ms by value.
 - Lane length (`lc-bench`, one chain with a store, or a load, a product and a store, per 2^20
   positions, warm): C = 32784 (32 long lanes): 0.289 / 0.472 ms; blocks of 32 lanes of 1040:
   0.243 / 0.427; of 264: 0.247 / 0.537; of 64: 0.302 / 0.466. Powers of two alias: C = 32768

@@ -80,17 +80,28 @@ median of the slowest case (15 rounds); 4.37 in the run next to v4 below.
     (huge page faults on `lc-bench`; not seen in the warm runs).
   - `timeit.py` 15 rounds, max_random_00..03 and type1_random_00/03: floor 4.37, v4 10.86 ms
     (slowest case per round; max_random cases 10.5 each).
+  - v5 (kept): the scans' lambdas capture local copies by value. `__m256i` stores may alias
+    anything, so members (`h()`, `lane_start()`, `y_`) and captured references were reloaded
+    after every store. Warm passes: weights 0.354 -> 0.339, prefix 0.44 -> 0.36, inverses 0.84
+    -> 0.77, output 0.124 -> 0.116 ms. Whole process (cold) unchanged: `judge.py bench` 21 rounds
+    0.9993; cold probes show the passes bound by first-touch faults there (prefix 0.42-0.46 ms,
+    with runs at 0.8-6 ms on huge page faults).
+  - Aligned h (delta rounded to 8, wrong output, timing only): prefix 0.43 -> 0.37 ms warm, the
+    other passes unchanged. In the max case delta = 1 is forced (g fills the lower half, the
+    outputs the upper half); g at an offset would need the full radix-8 pass for a.
+  - 8 or 16 lanes instead of 32 (`lanes_count_bench.cpp`, one chain over 2^20): forward 0.48 /
+    0.37 / 0.31 ms, backward 0.56 / 0.49 / 0.47: 32 kept.
   - Checks: 32/32 official tests (`judge.py test`, `lc-amd`); `stress.py` 400 rounds (`lc-amd`):
     N, M <= 1500 against `brute.cpp` (Newton differences), larger by Lagrange at 6 points; c at
     0, inside the samples, just past them, wrapping past P, ending at P - 1 +- 2, random;
     ASan/UBSan on all 32 official cases, file and pipe input.
 - Next:
   - The transform is 4.2 of the 6.5 ms above the floor (shared with #76, #79).
-  - inverses (0.81 ms): z costs two products per output; kappa is per lane pair because the
-    lanes of G are local. Reading G_(N+k) from b where its lane is behind would drop the Y copy
-    (0.08 ms) for part of the positions.
-  - 16 or 8 lanes for some passes (#79 saw 8 lanes faster for its weights pass): needs a lane
-    count parameter in `lib/poly/factorials.hpp`.
+  - inverses (0.77 ms warm): z costs two products per output; kappa is per lane pair because
+    the lanes of G are local. Reading G_(N+k) from b where its lane is behind would drop the Y
+    copy (0.08 ms) for part of the positions.
+  - Cold runs: first touches of b and y cost more than the compute gains above; fewer or
+    earlier-touched pages may matter more than products now.
 
 ## Sources
 

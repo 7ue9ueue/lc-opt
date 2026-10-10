@@ -184,18 +184,20 @@ private:
         poly::invert(start);
         for (auto& x : start) x = mont(x);
         Chain<true> chain(start, base, kP - kR);
-        scan(chunk, [&](std::size_t j, int s, Vec x) { store_unaligned(h(std::int64_t((s + 1) * chunk - 8 - j)), x); }, chain);
+        std::uint32_t* const scratch = h(0);
+        scan(chunk, [=](std::size_t j, int s, Vec x) { store_unaligned(scratch + (s + 1) * chunk - 8 - j, x); }, chain);
         const std::int64_t n = n_;
+        std::uint32_t* const a = a_;
         std::int64_t i = 0;
         for (; 2 * i + 16 <= n; i += 8) {
             const std::int64_t back = n - 8 - i;
-            const Vec w = times(load_unaligned(h(i)), reverse(load_unaligned(h(back))));
-            poly::detail::store(a_ + i, reduce(times(load(a_ + i), w), kP));
-            store_unaligned(a_ + back, reduce(times(load_unaligned(a_ + back), reverse(w)), kP));
+            const Vec w = times(load_unaligned(scratch + i), reverse(load_unaligned(scratch + back)));
+            poly::detail::store(a + i, reduce(times(load(a + i), w), kP));
+            store_unaligned(a + back, reduce(times(load_unaligned(a + back), reverse(w)), kP));
         }
         const std::uint32_t unscale = inverse(multiply_mod(kR, kR));  // 2^-64
         for (std::int64_t j = i; j < n - i; ++j)
-            a_[j] = multiply_mod(a_[j], multiply_mod(multiply_mod(*h(j) % kP, *h(n - 1 - j) % kP), unscale));
+            a[j] = multiply_mod(a[j], multiply_mod(multiply_mod(scratch[j] % kP, scratch[n - 1 - j] % kP), unscale));
     }
 
     // G_t = prod (-(d + u)) over u in [o + s C, t), t in lane s, into h(t), and G_(n + k) also
@@ -205,11 +207,14 @@ private:
         Lanes one, base;
         for (int s = 0; s < 32; ++s) one[s] = 1, base[s] = mont(negate(residue(d_ + lane_start(s))));
         Chain<> chain(one, base, kP - kR);
-        const std::int64_t n = n_, m = m_;
-        scan(chunk_, [&](std::size_t j, int s, Vec x) {
-            const std::int64_t t = lane_start(s) + std::int64_t(j);
-            store_unaligned(h(t), x);
-            store_clipped(y_, t - n, m, x);
+        // Captures by value, here and in inverses(): the vector stores may alias anything, so
+        // values reached through memory (members, captured references) would be reloaded.
+        const std::int64_t n = n_, m = m_, origin = origin_, chunk = chunk_;
+        std::uint32_t *const hb = h(0), *const y = y_;
+        scan(chunk_, [=](std::size_t j, int s, Vec x) {
+            const std::int64_t t = origin + s * chunk + std::int64_t(j);
+            store_unaligned(hb + t, x);
+            store_clipped(y, t - n, m, x);
         }, chain);
         if (origin_ + std::int64_t(32 * chunk_) == std::int64_t(terms_)) y_[m_ - 1] = 1;
         for (int s = 0; s < 32; ++s) {
@@ -270,16 +275,17 @@ private:
             base[s] = mont(residue(d_ + lane_start(s) + std::int64_t(chunk_) - 1));
         }
         Chain<true> chain(start, base, kP - kR);
-        const std::int64_t m = m_;
-        const Vec lanes = _mm256_setr_epi32(1, 2, 3, 4, 5, 6, 7, 8);
-        scan(chunk_, [&](std::size_t j, int s, Vec r) {
-            const std::int64_t p = lane_start(s) + std::int64_t(chunk_) - 8 - std::int64_t(j);
-            store_unaligned(h(p), reduce(times(load_unaligned(h(p)), r), kP));
+        const std::int64_t m = m_, top = origin_ + std::int64_t(chunk_) - 8, chunk = chunk_;
+        std::uint32_t *const hb = h(0), *const y = y_;
+        const Vec *const kappa_low = kappa_low_, *const kappa_high = kappa_high_, *const kappa_from = kappa_from_;
+        scan(chunk_, [=](std::size_t j, int s, Vec r) {
+            const std::int64_t p = top + s * chunk - std::int64_t(j);
+            store_unaligned(hb + p, reduce(times(load_unaligned(hb + p), r), kP));
             if (p + 8 > 0 && p + 1 < m) {
-                const Vec k = add(broadcast(std::uint32_t(p)), lanes);
-                const Vec high = _mm256_cmpgt_epi32(k, kappa_from_[s]);  // k >= kstar_s
-                const Vec kappa = _mm256_blendv_epi8(kappa_low_[s], kappa_high_[s], high);
-                store_clipped(y_, p + 1, m, times(times(r, load_unaligned(y_ + p + 1)), kappa));
+                const Vec k = add(broadcast(std::uint32_t(p)), _mm256_setr_epi32(1, 2, 3, 4, 5, 6, 7, 8));
+                const Vec high = _mm256_cmpgt_epi32(k, kappa_from[s]);  // k >= kstar_s
+                const Vec kappa = _mm256_blendv_epi8(kappa_low[s], kappa_high[s], high);
+                store_clipped(y, p + 1, m, times(times(r, load_unaligned(y + p + 1)), kappa));
             }
         }, chain);
         const std::size_t len = length();
@@ -295,9 +301,11 @@ private:
     void output() {
         const std::size_t half = length() / 2;
         const std::int64_t m = m_;
-        for (std::size_t k = 0; k < m_; k += 8) {
-            const Vec g = low(diff(load(a_ + k), load(a_ + half + k)));
-            store_clipped(y_, std::int64_t(k), m, reduce(times(g, load_unaligned(y_ + k)), kP));
+        const std::uint32_t* const a = a_;
+        std::uint32_t* const y = y_;
+        for (std::int64_t k = 0; k < m; k += 8) {
+            const Vec g = low(diff(load(a + k), load(a + half + k)));
+            store_clipped(y, k, m, reduce(times(g, load_unaligned(y + k)), kP));
         }
     }
 

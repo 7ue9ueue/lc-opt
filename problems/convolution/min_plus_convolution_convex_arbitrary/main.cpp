@@ -8,8 +8,9 @@
 //
 // opt is found at every kGroup-th row (sample rows), coarse rows first. Each node of the bisection
 // holds the candidates for the rows strictly between its two ends: a dense range of columns, or a
-// sorted list when the records are sparse. A node whose ends share their opt is settled. Each
-// group of kGroup rows then takes its minima over its node's candidates, kGroup rows per column.
+// sorted list when the middle row's records are sparse (scans give up on dense records). A node
+// whose ends share their opt is settled. Each group of kGroup rows then takes its minima over its
+// node's candidates, kGroup rows per column, one output block at a time.
 // Wide ranges skip blocks of kBlock columns by a lower bound: the least b in the block plus the
 // least a over the two aligned kBlock-windows of a that the block reads in the row.
 // lib/io/io.hpp
@@ -1472,10 +1473,10 @@ constexpr std::size_t kVecs = kGroup / 8;  // vectors per group
 constexpr u32 kInf = 3'000'000'000u;       // a outside [0, N), b past M; kInf + b <= 4e9 < 2^32
 constexpr u32 kNone = INT32_MAX;           // above every value of a valid column (<= 2e9)
 constexpr std::size_t kAPad = kGroup + 8;  // kInf words before a
-constexpr std::size_t kBlock = 64;         // columns per bounded block; a multiple of kGroup
+constexpr std::size_t kBlock = 64;         // columns per bounded block; a multiple of 8
 constexpr std::size_t kTail = kBlock;      // kInf words after a and after b
 constexpr std::size_t kWide = 1024;        // ranges this wide (>= 9 blocks) use the bounds
-constexpr std::size_t kNarrow = 64;        // dense ranges this narrow get dense children
+constexpr std::size_t kNarrow = 128;      // dense ranges this narrow get dense children
 constexpr std::size_t kListWords = std::size_t(1) << 16;  // capacity of a level's candidate lists
 
 struct Problem {
@@ -1936,9 +1937,19 @@ void block_minima(const u32* x, std::size_t blocks, u32* least) {
     }
 }
 
+// Marks a mapped input as read once, so the kernel skips marking each page accessed when the
+// Reader unmaps it (as ../bitwise_and_convolution). The mapping starts at the page of the first token.
+void advise_sequential(const io::Reader& in) {
+    struct stat st;
+    if (::fstat(0, &st) != 0 || !S_ISREG(st.st_mode) || std::size_t(st.st_size) <= io::detail::kMapAbove) return;
+    const auto start = reinterpret_cast<std::uintptr_t>(in.scan().cur) & ~std::uintptr_t(4095);
+    ::madvise(reinterpret_cast<void*>(start), std::size_t(st.st_size), MADV_SEQUENTIAL);
+}
+
 void solve() {
     io::Reader in;
     const std::size_t n = in.read<u32>(), m = in.read<u32>(), count = n + m - 1;
+    advise_sequential(in);
     const std::size_t groups = (count + kGroup - 1) / kGroup, nodes = std::bit_ceil(groups) + 1;
     const std::size_t a_blocks = (n + kBlock - 1) / kBlock, b_blocks = (m + kBlock - 1) / kBlock;
     mem::Arena arena(columns::kTextBytes + 4 * (kAPad + n + kTail + m + kTail + nodes + b_blocks + a_blocks + 1 +
@@ -1961,13 +1972,16 @@ void solve() {
     a_least[0] = a_least[1];
     for (std::size_t w = 1; w < a_blocks; ++w) a_least[w] = std::min(a_least[w], a_least[w + 1]);
 
+    // The list buffers last: their tails are rarely touched, so they seldom fault in another huge page.
     const Problem p{n, m, a + kAPad, b, b_least, a_least};
-    Sampler sampler{p, groups, arena.take<u32>(nodes), arena.take<Candidates>(nodes),
-                    {{arena.take<u32>(kListWords)}, {arena.take<u32>(kListWords)}}, arena.take<u32>(kListWords)};
+    u32* const opt = arena.take<u32>(nodes);
+    Candidates* const node = arena.take<Candidates>(nodes);
+    u32* const c = arena.take<u32>(columns::kBlock + kGroup);
+    Sampler sampler{p, groups, opt, node, {{arena.take<u32>(kListWords)}, {arena.take<u32>(kListWords)}},
+                    arena.take<u32>(kListWords)};
     sampler.run();
 
     // c by output blocks, each formatted and written while it is in cache.
-    u32* const c = arena.take<u32>(columns::kBlock + kGroup);
     io::Writer out;
     for (std::size_t k0 = 0; k0 < count; k0 += columns::kBlock) {
         const std::size_t size = std::min(columns::kBlock, count - k0), end = (size + kGroup - 1) / kGroup * kGroup;

@@ -5,6 +5,7 @@
 // checked at random coefficients (each an O(n) sum).
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdio>
 #include <random>
 #include <utility>
@@ -166,6 +167,62 @@ void test_leaf_kernels(Fixture& fx) {
                 expect(window[t].word[j] <= P && window[t].word[j] % P == mul(w, a[t][j]), "fill_windows: w a", g, j);
             }
         }
+    }
+}
+
+// times() with a factor per lane (Factors) against scalar products; the inverse scales.
+void test_factors(Fixture& fx) {
+    using poly::detail::Vec;
+    for (int trial = 0; trial < 2000; ++trial) {
+        alignas(32) u32 x[8], out[8], w[8];
+        for (u32& v : x) v = trial % 4 == 0 ? ~u32(rng() % 3) : u32(rng());
+        poly::detail::Factors f;
+        if (trial % 2) {  // table entries
+            const std::size_t k = 8 * pick(std::size_t(1) << (kLgMax - 7));
+            f = poly::detail::entries(fx.roots.data(), k);
+            for (int l = 0; l < 8; ++l) w[l] = fx.roots[ntt::detail::slot(k + l)];
+        } else {
+            for (u32& v : w) v = trial % 8 == 0 ? P - 1 : u32(rng() % P);
+            alignas(32) u32 q[8];
+            for (int l = 0; l < 8; ++l) q[l] = ntt::detail::quotient(w[l]);
+            f = {poly::detail::load(w), poly::detail::load(q)};
+        }
+        poly::detail::store(out, poly::detail::times(poly::detail::load(x), f));
+        for (int l = 0; l < 8; ++l) expect(out[l] < 2 * P && out[l] % P == mul(x[l] % P, w[l]), "times: per lane", trial, l);
+    }
+    for (int lg = 3; lg <= ntt::kMaxLog; ++lg) {
+        const u32 s = poly::detail::kInverseScales[0][lg], sr = poly::detail::kInverseScales[1][lg];
+        expect(mul(s, power(2, lg - 3)) == 1, "kInverseScales: (n / 8)^-1", lg);
+        expect(sr == mul(s, u32((u64(1) << 32) % P)), "kInverseScales: times 2^32", lg);
+    }
+}
+
+// The column kernels (pruned transforms) against forward_h1 and inverse_h1 on each column with
+// bit b clear; the other columns unchanged. Inputs < 4P (forward) and < 2P (inverse).
+void test_column_kernels(Fixture& fx) {
+    using poly::detail::Vec;
+    const std::span<u32> a = fx.buffer[0], want = fx.buffer[1];
+    for (int trial = 0; trial < 400; ++trial) {
+        const std::size_t h = std::size_t(4) << pick(7), b = pick(std::size_t(std::countr_zero(h)));
+        const std::size_t k = trial % 5 == 0 ? 0 : pick(std::size_t(1) << (kLgMax - 6));
+        const bool forward = trial % 2 == 0;
+        const u32 bound = forward ? 4 * P : 2 * P;
+        for (std::size_t i = 0; i < 32 * h; ++i) a[i] = trial % 7 == 0 ? bound - 1 - u32(rng() % 2) : u32(rng() % bound);
+        std::copy_n(a.begin(), 32 * h, want.begin());
+        const u32* table = forward ? fx.roots.data() : fx.t.inverse_roots();
+        const poly::detail::Group w(table, k);
+        for (std::size_t j = 0; j < h; ++j) {
+            if (j >> b & 1) continue;
+            u32* x = want.data() + 8 * j;
+            Vec f[4] = {poly::detail::load(x), poly::detail::load(x + 8 * h), poly::detail::load(x + 16 * h),
+                        poly::detail::load(x + 24 * h)};
+            if (forward) poly::detail::forward_h1(f, w);
+            else poly::detail::inverse_h1(f, w);
+            for (std::size_t t = 0; t < 4; ++t) poly::detail::store(x + 8 * t * h, f[t]);
+        }
+        if (forward) poly::detail::forward_columns(a.data(), h, b, table, k);
+        else poly::detail::inverse_columns(a.data(), h, b, table, k);
+        expect(std::equal(a.begin(), a.begin() + std::ptrdiff_t(32 * h), want.begin()), "column kernels", h, b);
     }
 }
 
@@ -1599,6 +1656,8 @@ void test_chirp() {
 int main() {
     static Fixture fx;
     test_leaf_kernels(fx);
+    test_factors(fx);
+    test_column_kernels(fx);
     test_transforms(fx);
     test_inverse(fx);
     test_derivative();

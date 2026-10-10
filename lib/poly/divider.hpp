@@ -28,7 +28,9 @@ namespace poly::sparse {
 // table is written below its end as blocks finish and read at half their indices, so a call is
 // cut into pieces [a, b) with b <= 2a, and at the table's end; each piece costs one scalar
 // inversion. Entry m lives from index m to index 2m, so the table is a ring of half its length:
-// pieces are also cut where the writes (at m) or the reads (at m / 2) wrap.
+// pieces are also cut where the writes (at m) or the reads (at m / 2) wrap. Each 16 entries are
+// stored as m + 0..3, 8..11, 4..7, 12..15, the order vpunpck{l,h}dq leave them in; a block reads
+// two of these runs of 4.
 //
 // A piece takes three passes: prefix products, the odd reciprocals (backward), then the blocks:
 // G times the reciprocals (Montgomery products), and the table's entries. Pieces that write the
@@ -44,7 +46,7 @@ public:
     Divider(std::size_t size, std::uint32_t* table)
         : table_end_(table_end(size)), ring_(ring_words(table_end_)), table_(table) {
         table_[0] = 0;  // g[0] = 0
-        for (std::uint32_t m = 1; m < kStep / 2; ++m) table_[m] = detail::montgomery_form(inverse(2 * m));
+        for (std::uint32_t m = 1; m < kStep / 2; ++m) table_[position(m)] = detail::montgomery_form(inverse(2 * m));
     }
 
     void divide(const std::uint32_t* G, std::uint32_t* g, std::size_t first, std::size_t count) {
@@ -71,6 +73,10 @@ private:
     // A write at m < end replaces entry m - ring, read at 2 (m - ring) < m: by an earlier block,
     // or by the same block before its writes.
     static constexpr std::size_t ring_words(std::size_t end) { return round_up(end / 2); }
+    // Where entry m < ring sits: runs of 4 in the order 0, 2, 1, 3 in each 16.
+    static constexpr std::size_t position(std::size_t m) {
+        return (m & ~std::size_t(15)) | (m & 4) << 1 | (m & 8) >> 1 | (m & 3);
+    }
 
     // Lane l of chain c: odd n = base + 16 c + 2 l + 1. odd: the odd lanes' n in the low dwords.
     static constexpr auto kOffsets = [] {
@@ -138,14 +144,17 @@ private:
 #pragma GCC unroll 4
         for (std::size_t c = 0; c < kChains; ++c) store(slot(0, c), q[c]);
 
-        // The table read at m = n / 2 and written at m = n, each m at m mod ring_.
+        // The table read at m = n / 2 and written at m = n, each m at m mod ring_. Block c reads
+        // the runs m + 0..3, 4..7 at m + 0, 8 if c is even, at m - 4, 4 if odd (first / 2 is a
+        // multiple of 32).
         const std::uint32_t* const even = table_ + first / 2 - (first / 2 >= ring_ ? ring_ : 0);
         std::uint32_t* const out = table_ + first - (first >= ring_ ? ring_ : 0);
         for (std::size_t j = 0; j < steps; ++j)
 #pragma GCC unroll 4
             for (std::size_t c = 0; c < kChains; ++c) {
                 const std::size_t offset = kStep * j + kBlock * c;
-                block<kWrite>(even + offset / 2, out + offset, G + offset, g + offset, slot(j, c));
+                const std::uint32_t* const m = even + offset / 2;
+                block<kWrite>(c % 2 ? m - 4 : m, c % 2 ? m + 4 : m + 8, out + offset, G + offset, g + offset, slot(j, c));
             }
     }
 
@@ -171,26 +180,25 @@ private:
     }
 
     // g[0, 16) = G[0, 16) / (n + t), from h[0, 8) = 2^32 s / (n + t) at odd t (below 2P) and
-    // even[0, 8) = 2^32 / (n + t) at even t (the table at n / 2). kWrite: s = 1/2, and the table's
-    // entries [n, n + 16) are written to out; else s = 1, and the products take their factors
-    // widened from memory.
+    // a[0, 4), b[0, 4) = 2^32 / (n + t) at t = 0, 2, 4, 6 and 8, ..., 14 (the table at n / 2).
+    // kWrite: s = 1/2, and the table's entries [n, n + 16) are written to out; else s = 1. The
+    // products take their factors widened from memory, the odd ones doubled if kWrite.
     template <bool kWrite>
-    static void block(const std::uint32_t* even, std::uint32_t* out, const std::uint32_t* G, std::uint32_t* g,
-                      const std::uint32_t* h) {
+    static void block(const std::uint32_t* a, const std::uint32_t* b, std::uint32_t* out, const std::uint32_t* G,
+                      std::uint32_t* g, const std::uint32_t* h) {
         using namespace detail;
-        if (!kWrite) {
-            store(g, subtract(product(load(G), load(G + 1), widen(even), widen(h))));
-            store(g + 8, subtract(product(load(G + 8), load(G + 9), widen(even + 4), widen(h + 4))));
-            return;
+        const Vec even_lo = widen(a), even_hi = widen(b);  // before the stores: out may overlap a, b
+        Vec odd_lo = widen(h), odd_hi = widen(h + 4);
+        if (kWrite) {
+            const Vec half = halve(_mm256_loadu2_m128i(reinterpret_cast<const __m128i*>(b), reinterpret_cast<const __m128i*>(a)));
+            const Vec odd = subtract(load(h));
+            store(out, _mm256_unpacklo_epi32(half, odd));  // entries n + 0..3, 8..11
+            store(out + 8, _mm256_unpackhi_epi32(half, odd));
+            odd_lo = _mm256_add_epi32(odd_lo, odd_lo);  // below 4P
+            odd_hi = _mm256_add_epi32(odd_hi, odd_hi);
         }
-        const Vec half = halve(load(even)), odd = subtract(load(h));
-        const Vec lo = _mm256_unpacklo_epi32(half, odd), hi = _mm256_unpackhi_epi32(half, odd);
-        const Vec t0 = _mm256_permute2x128_si256(lo, hi, 0x20), t1 = _mm256_permute2x128_si256(lo, hi, 0x31);
-        store(out, t0);
-        store(out + 8, t1);
-        const Vec y0 = _mm256_add_epi32(t0, t0), y1 = _mm256_add_epi32(t1, t1);  // below 2P
-        store(g, subtract(product(load(G), load(G + 1), y0, odd_lanes(y0))));
-        store(g + 8, subtract(product(load(G + 8), load(G + 9), y1, odd_lanes(y1))));
+        store(g, subtract(product(load(G), load(G + 1), even_lo, odd_lo)));
+        store(g + 8, subtract(product(load(G + 8), load(G + 9), even_hi, odd_hi)));
     }
 
     std::size_t table_end_;              // the table holds m < table_end_ once divide() passes m

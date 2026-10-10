@@ -1385,11 +1385,11 @@ constexpr std::uint32_t kStagePrimes[] = {17, 19, 23, 29, 31, 37, 41, 43, 47, 53
 constexpr std::uint32_t kStage2Min = 101;  // smallest stage-2 multiplier
 
 // Multipliers m <= kSplit[stage] go by m over a run of targets; larger ones by target
-// i <= n / (kSplit[stage] + 1) into 64-bit sums. Tiny m < kTinyBound take their sources by L1-sized
-// pieces of each segment.
-constexpr std::uint32_t kSplit[3] = {0, 16384, 2048}, kTinyBound = 256;
-// Stage-2 large m of targets i <= kPieceTargets also take their sources by those pieces, first, so
-// that the piece is in L1 for both (~70% of the large contributions are to i <= 32).
+// i <= n / (kSplit[stage] + 1) into 64-bit sums (stage 1 has few m above 2048, so it goes by m
+// further up). Tiny m < kTinyBound take their sources by L1-sized pieces of each segment.
+constexpr std::uint32_t kSplit[3] = {0, 16384, 2048}, kTinyBound = 256;  // [0]: unused
+// Stage-2 large m of targets i <= kPieceTargets (about half of the large contributions) also take
+// their sources by those pieces, before the tiny m, so that the piece is in L1 for both.
 constexpr std::uint32_t kPieceTargets = 8;
 constexpr std::uint32_t kMaxN = 1000000;
 constexpr std::uint32_t kMaxTargets = kMaxN / (kSplit[2] + 1) + 1;
@@ -1567,10 +1567,9 @@ struct ZetaSweep {
         }
     }
 
-    // Small m [k0, k1) with sources up to last_source: dst[i] += pairs[i m].
-    void by_multiplier(std::uint64_t* dst, const std::uint64_t* pairs, std::uint32_t k0, std::uint32_t k1,
-                       std::uint32_t last_source) {
-        for (std::uint32_t k = k0; k < k1; ++k) {
+    // Small m [0, k_end) with sources up to last_source: dst[i] += pairs[i m].
+    void by_multiplier(std::uint64_t* dst, const std::uint64_t* pairs, std::uint32_t k_end, std::uint32_t last_source) {
+        for (std::uint32_t k = 0; k < k_end; ++k) {
             const std::uint32_t m = s.small[k], last = divide(last_source, s.reciprocal[k]);
             std::uint32_t i = next_target[k];
             for (; i + 3 <= last; i += 4) store(dst + i, add(load(dst + i), gather_pairs(pairs + i * m, m)));
@@ -1616,19 +1615,19 @@ void zeta_rough(std::uint64_t* pairs, std::uint32_t n, std::uint64_t* t2) {
             const std::uint32_t last_source = std::min(n, start + kSegment - 1);
             for (std::uint32_t piece = start + kPiece; piece <= last_source; piece += kPiece) {
                 two.by_target(pairs, piece - 1, kPieceTargets);
-                one.by_multiplier(pairs, pairs, 0, one.s.tiny, piece - 1);
-                two.by_multiplier(t2, pairs, 0, two.s.tiny, piece - 1);
+                one.by_multiplier(pairs, pairs, one.s.tiny, piece - 1);
+                two.by_multiplier(t2, pairs, two.s.tiny, piece - 1);
             }
-            one.by_multiplier(pairs, pairs, 0, ZetaSweep<1>::M::kSmall, last_source);
-            two.by_multiplier(t2, pairs, 0, ZetaSweep<2>::M::kSmall, last_source);
+            one.by_multiplier(pairs, pairs, ZetaSweep<1>::M::kSmall, last_source);
+            two.by_multiplier(t2, pairs, ZetaSweep<2>::M::kSmall, last_source);
             one.by_target(pairs, last_source, kMaxTargets);
             two.by_target(pairs, last_source, kMaxTargets);
         }
         one.finish(pairs, n);
         two.finish(t2, n);
     }
-    auto widened2 = [&](std::uint32_t j) { return widen_pair(t2 + j); };
-    for (std::uint32_t i = 1; kStagePrimes[0] * i <= last2; ++i) add_sums(t2 + i, sum_multiples<1, Half>(i, last2, widened2));
+    auto from_t2 = [&](std::uint32_t j) { return widen_pair(t2 + j); };
+    for (std::uint32_t i = 1; kStagePrimes[0] * i <= last2; ++i) add_sums(t2 + i, sum_multiples<1, Half>(i, last2, from_t2));
     for (std::uint32_t i = 1; i <= last2; ++i) add_pair(pairs + i, t2 + i);
 }
 
@@ -1698,10 +1697,9 @@ struct MoebiusSweep {
         }
     }
 
-    // Small m [k0, k1) with sources from first_source on: dst[i] -= c[i m].
-    void by_multiplier(std::uint32_t* dst, const std::uint32_t* c, std::uint32_t k0, std::uint32_t k1,
-                       std::uint32_t first_source) {
-        for (std::uint32_t k = k0; k < k1; ++k) {
+    // Small m [0, k_end) with sources from first_source on: dst[i] -= c[i m].
+    void by_multiplier(std::uint32_t* dst, const std::uint32_t* c, std::uint32_t k_end, std::uint32_t first_source) {
+        for (std::uint32_t k = 0; k < k_end; ++k) {
             const std::uint32_t m = s.small[k], last = last_target[k];
             std::uint32_t i = divide(first_source - 1, s.reciprocal[k]) + 1;
             last_target[k] = i - 1;
@@ -1751,11 +1749,11 @@ void moebius_rough(std::uint32_t* c, std::uint32_t n, std::uint32_t* b2) {
             const std::uint32_t last_source = std::min(n, start + kSegment - 1);
             for (std::uint32_t piece = start + (last_source - start) / kPiece * kPiece; piece > start; piece -= kPiece) {
                 two.by_target(c, piece, last_source, kPieceTargets);
-                one.by_multiplier(c, c, 0, one.s.tiny, piece);
-                two.by_multiplier(b2, c, 0, two.s.tiny, piece);
+                one.by_multiplier(c, c, one.s.tiny, piece);
+                two.by_multiplier(b2, c, two.s.tiny, piece);
             }
-            one.by_multiplier(c, c, 0, MoebiusSweep<1>::M::kSmall, start);
-            two.by_multiplier(b2, c, 0, MoebiusSweep<2>::M::kSmall, start);
+            one.by_multiplier(c, c, MoebiusSweep<1>::M::kSmall, start);
+            two.by_multiplier(b2, c, MoebiusSweep<2>::M::kSmall, start);
             one.by_target(c, start, last_source, kMaxTargets);
             two.by_target(c, start, last_source, kMaxTargets);
         }

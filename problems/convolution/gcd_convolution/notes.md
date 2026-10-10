@@ -14,18 +14,29 @@ Record when opened: 37 ms (407011). Best judged: ours, [409380](https://judge.yo
 - a and b interleaved as 64-bit pairs [a, b R mod P]: one load fetches both. b is pre-scaled by
   R = 2^32 so one Montgomery reduction gives a b mod P.
 - Memory: one mapping in 2 MiB pages (12 MB): the pairs, with a parsed into their first half
-  (the interleave runs downwards, so it only overwrites a values already read), then b, later c.
+  (the interleave runs downwards, so it only overwrites a values already read), then b, later c,
+  then the stage-2 sums of the rough sweeps (in the last huge page, already touched by b).
 - Primes 2..13: one AVX2 pass each. Zeta 3 is fused with the interleave; zeta 2 with the product
   and Moebius 2 (c_i = A_i B_i - A_2i B_2i, the second product recomputed).
-- Primes >= 17 together: x_i += sum of x_im over m coprime to 30030 ("rough", m > 1), from a
-  wheel (5760 spokes, rank table; both constexpr). Zeta takes the sources segment by segment
-  upwards (each source is read before it changes), Moebius uses c_i = C_i - sum of final c_im with
-  segments downwards; segment 0 goes by target. Multipliers m <= 2048 go by m over a run of
-  targets; larger ones by target (i <= N / 2049) into 64-bit sums. No sieve is needed.
-- Rough multipliers m < 256 take their sources by L1-sized pieces (32 KiB) of each segment, so
-  one fetch of a source line from L2 serves all of them; larger m go over the whole segment.
+- Primes >= 17 together ("rough": coprime to 30030), in two stages (as `../lcm_convolution`):
+  stage 1 takes m > 1 made of primes 17..97, stage 2 m > 1 made of primes above 100. Composing
+  them covers every rough m: 1.77 N terms per transform instead of 2.14 N. Both lists are built
+  at compile time (sieve over the wheel's indices, 5760 spokes); stage 2 has 120759 m <= 10^6.
+  - Stage 2 changes only i <= N / 101, inside segment 0, so its terms go to separate sums (the
+    dual of lcm's prefix copy). Zeta = stage 1 after stage 2: sources are read segment by segment
+    upwards (each before it changes) for both stages; the stage-2 sums t2 then get stage 1 on
+    themselves and are added to the pairs. Moebius = stage 2 after stage 1: c_i = C_i - sum of
+    final c_im with segments downwards, stage-2 terms into b2; segment 0 goes last by target,
+    stage 1, then stage 2.
+  - Multipliers go by m over a run of targets up to 16384 (stage 1) and 2048 (stage 2); larger
+    ones by target (i <= N / 2049) into 64-bit sums.
+  - m < 256 take their sources by L1-sized pieces (32 KiB) of each segment, so one fetch of a
+    source line from L2 serves all of them. Stage-2 targets i <= 8 walk each piece first: their
+    walks bring the piece into L1, and the tiny m then find it there.
 - Output: `../convolution_mod/fields.hpp` (10-byte fields, 16 values per step); the text buffer
   is the first 250 KB of the pair array, dead by then.
+- The input mapping is advised `MADV_SEQUENTIAL` (as `../bitwise_and_convolution`): its `munmap`
+  skips marking pages accessed.
 - Runs from `.preinit_array` and ends with `_exit` (as `convolution_mod`).
 
 ## Log
@@ -98,8 +109,52 @@ Record when opened: 37 ms (407011). Best judged: ours, [409380](https://judge.yo
 - 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
   `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
   before (judge flags, `lc-amd`).
+- 2026-10-10, claude, round 3 (`agent/gcd_convolution-r3`). Judge image and flags; timing on
+  `lc-bench` (EPYC 7B13), builds and tests on `lc-amd`. Phases: in-process `CLOCK_MONOTONIC`
+  stamps on max_random_01, medians of 21 runs, ms; "wall" is fork to exit with the output unlinked
+  first. Sources, scripts, raw numbers: `lc-opt-explore/gcd_convolution/`.
+  - Main's phases: wall 13.54; parse 3.26, interleave + zeta 3 0.49, zeta 5..13 0.57, rough zeta
+    1.35, zeta 2 + product 0.48, Moebius 3..13 0.33, rough Moebius 1.27, output 3.89, input
+    unmap 0.66; start + exit 1.2.
+  - Terms per transform (`count3.py`): rough m > 2048 (by target) hold 1.106 N of 2.144 N. Two
+    stages cut at 100 leave 1.767 N: tiny 0.640, by m 0.428, by target 0.699.
+  - v1, two stages: rough zeta 1.38 -> 1.25, rough Moebius 1.28 -> 1.04; wall 0.973 of main.
+    Per part (rdtsc): zeta tiny 0.30, by m 0.28, stage-1 by target 0.09, stage-2 by target 0.52;
+    Moebius 0.25, 0.25, 0.05, 0.41. Stage-2 by target costs ~2.1 TSC cycles per term for i <= 32
+    (one L2 line each) and 2.9 for i > 32 (loop overhead per target and segment).
+  - Stage-1 split (by m up to) 2048 / 4096 / 8192 / 16384 / 32768: rough zeta 1.247 / 1.239 /
+    1.212 / 1.210 / 1.214, Moebius 1.037 / 1.022 / 1.016 / 1.018 / 1.011. Kept 16384.
+  - Stage-2 targets i <= T by L1 pieces: after the tiny m, zeta +0.02 to +0.22 (T = 8..64),
+    Moebius -0.03. Before the tiny m: zeta 1.228 -> 1.163, Moebius 1.018 -> 0.966 (T = 8);
+    T = 4..16 within 0.02; 2048-pair pieces worse. Kept T = 8, before.
+  - `MADV_SEQUENTIAL` on the input: unmap 0.651 -> 0.617. Never unmapping (the Reader in static
+    storage): the cost moves to exit, wall unchanged. Kept the advice.
+  - No gain: vector loops running past a piece's end (no scalar tail), within noise; tiny bound
+    192 / 384 / 512, +0.01 to +0.02; zeta segments 2^14 (+0.1) or 2^16 (same); Moebius 2^15 (same).
+  - Three stages (cuts 60 and 300, 1.667 N), written generically over the stage count with run-time
+    stage views: rough zeta 1.36 vs 1.25 for the same code with two stages (669 by-m multipliers
+    per segment instead of 533), and that generic two-stage code was itself 0.09 slower in zeta
+    than the templated one. Dropped. Four stages (40, 100, 1000): the constexpr tables did not
+    build (a guess: GCC's constexpr operation limit).
+  - Final: rough zeta 1.38 -> 1.16, rough Moebius 1.27 -> 0.97 (phases). `judge.py bench`,
+    slowest 3 cases: 31 rounds 14.81 -> 14.25 ms (0.955); an earlier run of 21 rounds 14.62 ->
+    14.24 (0.977).
+  - Checks: 29/29 official tests; `stress.py` 300 rounds, now with segment-edge sizes (32767 ..
+    131072) against the reference; ASan/UBSan (-O1, x86-64-v3) on all 29 tests, file and pipe
+    input, tokens equal. Compile ~6 s (constexpr lists); text 516 KB (was 97 KB).
 
 ## Next
 
-- The rest is I/O: parse 3.3 ms (`lib/io`, #21), `write()` ~3.4 ms. Compute left ~4.5 ms, of
-  which the rough sweeps ~2.6 ms.
+- The rest is I/O: parse 3.3 ms (`lib/io`), output 3.9 ms (`write()` ~3.3), input unmap 0.62,
+  start + exit 1.2. Compute ~3.9 ms: rough sweeps 2.1, small primes and product 1.8 (L3-bound
+  passes over 8 MB).
+- Rough sweeps run at ~2 cycles per term where each term is its own L2 line; more stages cut
+  terms (three: -0.1 N) but each stage adds by-m calls per segment, which cost more here.
+- `MADV_SEQUENTIAL` on the input is now in three problems (bitwise_and, bitwise_xor, gcd): a
+  candidate for `lib/io`.
+
+## Sources
+
+- Two stages and their compile-time lists: `../lcm_convolution` (its round 2; the `Stages` and
+  `Multipliers` construction is taken from there, the gcd direction worked out here).
+- `MADV_SEQUENTIAL` on the input: `../bitwise_and_convolution/solution.cpp`.

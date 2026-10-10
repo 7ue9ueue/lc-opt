@@ -6300,6 +6300,21 @@ inline Vec negate(Vec x) {
     return _mm256_min_epu32(_mm256_sub_epi32(broadcast(kP), x), _mm256_sub_epi32(_mm256_setzero_si256(), x));
 }
 
+// [x0 x2 x4 x6 y0 y2 y4 y6].
+inline Vec even_lanes(Vec x, Vec y) {
+    const Vec t = _mm256_castps_si256(_mm256_shuffle_ps(_mm256_castsi256_ps(x), _mm256_castsi256_ps(y), 0x88));
+    return _mm256_permute4x64_epi64(t, 0xD8);  // [x0 x2 y0 y2 | x4 x6 y4 y6] -> 64-bit chunks 0, 2, 1, 3
+}
+
+// The 8 lanes of x at the even lanes of two vectors, zeros at the odd ones.
+inline void spread(Vec x, Vec (&out)[2]) {
+    out[0] = _mm256_cvtepu32_epi64(_mm256_castsi256_si128(x));
+    out[1] = _mm256_cvtepu32_epi64(_mm256_extracti128_si256(x, 1));
+}
+
+// 2x mod P for canonical x.
+inline Vec twice_mod(Vec x) { return reduce(add(x, x), kP); }
+
 // Lane j of r[i] <-> lane i of r[j].
 inline void transpose(Vec (&r)[8]) {
     Vec t[8], u[8];
@@ -6905,14 +6920,20 @@ inline void first_level(const Transform& t, std::span<const std::uint32_t> g, Le
     const std::size_t m = levels.m, h = m / 2, quarter = m / 4;
     const Tables& tables = levels.tables;
     const std::span<const std::uint32_t> v = levels.level(3).first(h);
-    const auto sum = [](std::uint32_t x, std::uint32_t y) { return x + y >= kP ? x + y - kP : x + y; };
     const std::span<std::uint32_t> t1 = levels.first_transform(0), t2 = levels.first_transform(1);
     const std::size_t even = std::max<std::size_t>(std::min(h, (g.size() + 1) / 2), 1);  // q1[j] for 0 < j < even
+    std::size_t j = 0;
+    for (; j + 8 <= even && 2 * j + 16 <= g.size(); j += 8) {
+        const Vec x = even_lanes(_mm256_loadu_si256(reinterpret_cast<const Vec*>(g.data() + 2 * j)),
+                                 _mm256_loadu_si256(reinterpret_cast<const Vec*>(g.data() + 2 * j + 8)));
+        store(t1.data() + j, negate(twice_mod(x)));
+    }
+    for (; j < even; ++j) t1[j] = minus_twice(g[2 * j]);
     t1[0] = 0;
-    for (std::size_t j = 1; j < even; ++j) t1[j] = minus_twice(g[2 * j]);
     std::fill(t1.begin() + std::ptrdiff_t(even), t1.begin() + std::ptrdiff_t(h), 0);
     const std::span<std::uint32_t> q = levels.level(2);  // Q_2, x below m/4 (the rest is not read)
-    for (std::size_t i = 0; i < quarter; ++i) q[h + i] = sum(t1[2 * i], t1[2 * i]);
+    for (std::size_t i = 0; i < quarter; i += 8)
+        store(q.data() + h + i, twice_mod(even_lanes(load(t1.data() + 2 * i), load(t1.data() + 2 * i + 8))));
     t.forward(t1.first(h), 0, t1);
     t.forward(v, 0, t2);
     std::uint32_t* out[3];  // G(q1), G(q2), E(q1, q2)
@@ -6924,8 +6945,11 @@ inline void first_level(const Transform& t, std::span<const std::uint32_t> g, Le
                      Half::kLower);
     q[0] = 1;
     std::fill(q.begin() + 1, q.begin() + std::ptrdiff_t(quarter), 0);
-    for (std::size_t i = 0; i < quarter; ++i) q[2 * h + i] = sum(sum(v[2 * i], v[2 * i]), out[0][i]);
-    for (std::size_t i = 0; i < quarter; ++i) q[3 * h + i] = sum(out[2][i], out[2][i]);
+    for (std::size_t i = 0; i < quarter; i += 8) {
+        const Vec v2 = twice_mod(even_lanes(load(v.data() + 2 * i), load(v.data() + 2 * i + 8)));
+        store(q.data() + 2 * h + i, reduce(add(v2, load(out[0] + i)), kP));
+        store(q.data() + 3 * h + i, twice_mod(load(out[2] + i)));
+    }
     std::copy_n(out[1], quarter, q.begin() + std::ptrdiff_t(4 * h));
 }
 
@@ -6951,9 +6975,11 @@ inline void first_level_transposed(const Transform& t, const Levels& levels, std
         inverse_with(result, tables, CompositionSumBottom{{term(r - 1, q1), term(r - 2, q2)}}, kInverseScales[1][levels.lg],
                      Half::kLower);
         const std::span<const std::uint32_t> add_row = row(r);
-        for (std::size_t i = 0; i < quarter; ++i) {
-            const std::uint32_t x = result[2 * i] + add_row[i];
-            result[2 * i] = x >= kP ? x - kP : x;
+        for (std::size_t i = 0; i < quarter; i += 8) {  // result[2i] += add_row[i]
+            Vec x[2];
+            spread(load(add_row.data() + i), x);
+            store(result.data() + 2 * i, reduce(add(load(result.data() + 2 * i), x[0]), kP));
+            store(result.data() + 2 * i + 8, reduce(add(load(result.data() + 2 * i + 8), x[1]), kP));
         }
     }
 }
@@ -7090,14 +7116,15 @@ inline void build_levels(const Transform& t, std::span<const std::uint32_t> g, L
     third_last_level(t, levels, c);
     const std::span<std::uint32_t> q = levels.level(levels.lg - 1).first(m);  // -q_(T-1)
     std::fill(q.begin(), q.end(), 0);
-    for (std::size_t i = 1; i <= m / 4; ++i) q[i] = minus_twice(c[2][i]);
+    for (std::size_t i = 0; i < m / 4; i += 8) store(q.data() + i, negate(twice_mod(load(c[2].data() + i))));  // c[2][0] = 0
+    q[m / 4] = minus_twice(c[2][m / 4]);
     const std::span<std::uint32_t> square = levels.level(levels.lg - 1).subspan(Arena::footprint(m), m / 2);  // q1^2
     for (std::size_t k = 1; k < 4; ++k) t.forward(c[k]);
     t.inverse_product(c[1], c[1], square);
-    for (std::size_t i = 1; i <= m / 2; ++i) {
-        const std::uint32_t x = q[i] + square[i % (m / 2)];
-        q[i] = x >= kP ? x - kP : x;
-    }
+    for (std::size_t i = 0; i < m / 2; i += 8) store(q.data() + i, reduce(add(load(q.data() + i), load(square.data() + i)), kP));
+    const std::uint32_t top = q[m / 2] + q[0];  // square's y^(m/2) wrapped onto y^0, where q is zero
+    q[m / 2] = top >= kP ? top - kP : top;
+    q[0] = 0;
     t.forward(q);
 }
 
@@ -7145,7 +7172,18 @@ inline void compose(const Transform& t, std::span<const std::uint32_t> f, std::s
     // transform in its slot.
     const std::span<std::uint32_t> last = levels.level(lg - 1);
     const std::span<std::uint32_t> p = last.subspan(Arena::footprint(m), m), pq = last.subspan(2 * Arena::footprint(m), m);
-    for (std::size_t i = 0; i < m; ++i) p[i] = m - 1 - i < f.size() ? f[m - 1 - i] : 0;
+    {  // p[i] = f[m - 1 - i]
+        const std::size_t size = std::min(f.size(), m);
+        std::fill(p.begin(), p.end() - std::ptrdiff_t(size), 0);
+        std::uint32_t* const to = p.data() + (m - size);
+        const detail::Vec reverse = _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+        std::size_t j = 0;
+        for (; j + 8 <= size; j += 8) {
+            const detail::Vec x = _mm256_loadu_si256(reinterpret_cast<const detail::Vec*>(f.data() + size - 8 - j));
+            _mm256_storeu_si256(reinterpret_cast<detail::Vec*>(to + j), _mm256_permutevar8x32_epi32(x, reverse));
+        }
+        for (; j < size; ++j) to[j] = f[size - 1 - j];
+    }
     t.cyclic_product(p, 0, pq, last.first(m), Half::kUpper);
     // Level T - 2, length m/2: columns r0 = p0, r1 = -p0 q1, r2 = p1 + p0 q2, r3 = -p1 q1 - p0 q3 of
     // P_(T-2), rows [m/4, m/2): r1 and r2 in the lower halves of p and pq, the transforms t0, t1 of
@@ -7163,10 +7201,8 @@ inline void compose(const Transform& t, std::span<const std::uint32_t> f, std::s
         t.inverse_product(t0, column(2), r2, Half::kUpper);
         const Transform::Pair pairs[2] = {{t1, column(1)}, {t0, column(3)}};
         t.inverse_product_sum(pairs, r3, Half::kUpper);
-        for (std::size_t i = quarter; i < h; ++i) {
-            const std::uint32_t x = p1[i] + r2[i];
-            r2[i] = x >= kModulus ? x - kModulus : x;
-        }
+        for (std::size_t i = quarter; i < h; i += 8)
+            detail::store(r2.data() + i, detail::reduce(detail::add(detail::load(p1.data() + i), detail::load(r2.data() + i)), kModulus));
         const std::span<const std::uint32_t> columns[4] = {p0.subspan(quarter), r1.subspan(quarter), r2.subspan(quarter),
                                                            r3.subspan(quarter)};
         detail::third_last_level_transposed(t, levels, columns, levels.level(lg - 2), levels.level(lg - 3));
@@ -7190,7 +7226,14 @@ inline void compose(const Transform& t, std::span<const std::uint32_t> f, std::s
     t.forward(p0.first(m / 2), 0, p0);
     detail::inverse_with(r, levels.tables, detail::CompositionBottom{&levels.tables, p0.data(), levels.level(0).data()},
                          detail::kInverseScales[1][levels.lg + 1], Half::kLower);
-    for (std::size_t k = 0; k < n; ++k) {
+    std::size_t k = 0;
+    for (; k + 16 <= n; k += 16) {  // h[2i] = p1[i] - r[2i], h[2i + 1] = -r[2i + 1]
+        detail::Vec a[2];
+        detail::spread(detail::load(in.data() + 3 * m + k / 2), a);
+        for (std::size_t t = 0; t < 2; ++t)
+            _mm256_storeu_si256(reinterpret_cast<detail::Vec*>(h.data() + k + 8 * t), detail::difference(a[t], detail::load(r.data() + k + 8 * t)));
+    }
+    for (; k < n; ++k) {
         const std::uint32_t a = k % 2 ? 0 : in[3 * m + k / 2];
         h[k] = a >= r[k] ? a - r[k] : a + kModulus - r[k];
     }

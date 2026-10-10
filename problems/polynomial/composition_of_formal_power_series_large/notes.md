@@ -75,6 +75,11 @@ generic levels 2 .. 13 forward 9.09 (with the Graeffe bottom ~3.0) + 2.76, backw
   output: whole process 0.991-0.995 against #242 (`rawbench.py`, 21 rounds; the text after h or
   in f's span, equal within noise). Both together (`judge.py bench`, 21 rounds): `lc-amd` 0.9887
   (34.85 -> 34.43 ms), `lc-intel` 0.9846.
+- Merged as #248 (CI 0.9876 for this problem).
+- 2026-10-10, claude (round 1, third lib/poly change): composition's coefficient loops in AVX2
+  (GCC left them scalar at -O2; the final h loop took 125 µs alone). compose in process 29.86 ->
+  29.40 ms. `judge.py bench` (21 rounds, against #248): `lc-amd` 0.9879 (34.41 -> 34.03 ms),
+  `lc-intel` 0.9912.
 - Tried, not kept: level T - 4 one-dimensional too (column levels for 16 columns: 28 products
   forward, 64 backward, at m/8). In process at m = 2^17: forward 766 µs, backward 1249 µs against
   ~1030 each for the generic level; compose 29.8 ms either way. Its leaf products cost 15-18 µs

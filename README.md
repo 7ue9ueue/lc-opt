@@ -69,7 +69,7 @@ profile shows the compiler is the limit.
 ## Origin
 
 This continues [QPoly](https://github.com/7ue9ueue/SymPoly), a hand-written AVX2 NTT project.
-Its kernels were rewritten into [`lib/ntt`](lib/ntt) and now power the convolution problems.
+Its kernels were rewritten into [`lib/ntt`](lib/ntt) and now power the convolution and polynomial problems.
 
 ## Rules in brief
 
@@ -83,7 +83,7 @@ Its kernels were rewritten into [`lib/ntt`](lib/ntt) and now power the convoluti
 
 ```
 AGENTS.md                    rules for agents (and humans)
-lib/                         shared code: fast I/O, NTT
+lib/                         shared code: fast I/O, NTT, multimod, poly
 problems/<category>/<name>/
   solution.cpp               source, includes lib/
   main.cpp                   bundled single file, what we submit

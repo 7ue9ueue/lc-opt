@@ -2,8 +2,9 @@
 
 Prime p <= 10^9, K <= 18 axes, n_i >= 2, n_i | p - 1, N = prod n_i <= 2^18. Print f g mod
 (x_i^n_i - 1) mod p. 10 s.
-Record when opened (issue #37): 117 ms. Best judged: ours, 12 ms, no spike:
-[409321](https://judge.yosupo.jp/submission/409321) (`main.cpp` of #150). Earlier: 15 ms,
+Record when opened (issue #37): 117 ms. Best judged: ours, 11 ms, clean 11:
+[409664](https://judge.yosupo.jp/submission/409664) (`main.cpp` of #322). Earlier: 12 ms,
+[409321](https://judge.yosupo.jp/submission/409321) (#150); 15 ms,
 [409314](https://judge.yosupo.jp/submission/409314) (#146). `main.cpp` of #163: 15 ms,
 [409362](https://judge.yosupo.jp/submission/409362).
 I/O floor (`lib/io/notes.md`): 4.18 ms, 3.88 with fixed-width output.
@@ -40,8 +41,10 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   ((r + a c) mod n_x, c), a = 1 / n_y mod n_x (an isomorphism Z_D -> Z_nx x Z_ny). As a matrix,
   A[r][c] = F[c][(r + a c) mod n_x] with F the rows of f along x: a transpose of rotated rows,
   done in 8 x 8 AVX2 blocks (column blocks outer; the 8 rows of F stay in L1; rows that wrap use
-  masked loads and stores). The CRT is fused into the scatter. Scalar for the last n_y mod 8
-  columns, and for all when x has stride > 1 or a length < 8.
+  masked loads and stores). The CRT writes A in place into the pair, then the scatter. Scalar for
+  the last n_y mod 8 columns, and for all when x has stride > 1 or a length < 8. With no short
+  axes, f, g and the result are staged in the product's own arrays (f in the pair's upper half,
+  g and the result in the work array): no arrays in input order.
 - Split: axes above 48 are long (the shortest dropped while the transform would exceed 2^20);
   a shorter axis joins when a cost model says so (a product 10.5 ns per transform word below
   2^18 words, 12 from there, plus 0.6 ns per word once for page faults; gather and scatter 2 ns
@@ -155,10 +158,39 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   - Checks: 24/24 official tests (`lc-amd`); `stress.py` 400 rounds plus 40 large (cases with two
     coprime axes added); ASan/UBSan: stress 80 rounds and all 24 official cases, file and pipe;
     `-march=x86-64-v3`: stress 150 rounds.
-- Next: at 2^19 the products' top two levels stream 2 MiB arrays through L3 (2^17 products run
-  10% faster per word): a fused radix-16 top level, forward and inverse, would save one pass of
-  each. dim2_01 still pays ~0.45 ms over dim1 (gather 0.30 with the pair's page faults, scatter
-  0.23).
+  - CI (#322, merged): geomean 0.9295 (EPYC 7763 0.9269 and 0.9234, 9V74 0.9385).
+  - Submitted the merged `main.cpp` (#322): [409664](https://judge.yosupo.jp/submission/409664)
+    AC 11 ms, clean 11 (`tools/spikes.py`: spike on k0_01). Per case: dim1 8 / 8 / 9, dim2_00
+    10, dim2_01 11, dim2_02 7 ms; round 2's submissions had 10-11, 9-10, 11-12, 10-11. Best
+    judged 12 -> 11 ms.
+  - Phases on `lc-k68` (Linux 6.8; ms): dim1_00 read 1.00, products 6.61, CRT 0.21, write 1.22;
+    wall about 0.6 more (start, exit). Host runs there read 0.3-0.4 ms above `lc-bench`.
+  - Lost: fused radix-16 top levels at 2^19 (forward: sparse level 1 and level 2 in one pass;
+    inverse: level 2, level 1 and the scale), C++ intrinsics, results bit-equal to
+    `lazy::Product` for every length 2^9..2^20. Three primes, hot: 5.98 -> 7.16 ms (forward fused
+    alone 6.66, inverse alone 6.52). Each column touches 24 rows 128 KiB apart, which share L1 and
+    L2 sets. The base's top passes per prime: forward level 1 0.080 ms, level 2 0.124 (a and b),
+    inverse level 2 0.062, level 1 with the scale 0.098: 1.09 of 6.0 ms for three primes, near
+    60-75 GB/s already (`r16/tb16.cpp`).
+  - Lost: row blocks outer in the transposes (A rows written in 8 streams): gather 0.314 ->
+    0.323, CRT and scatter 0.448 -> 0.468 ms.
+  - v6: CRT in place into the pair, then the scatter from it, instead of fused: 0.442 -> 0.360 ms
+    on dim2_01 (the fused CRT read down the columns of A).
+  - Lost: f, g and the result streamed through a buffer, parsing and printing a batch of rows at
+    a time (fixed-width fields end each batch with a newline; the checker compares tokens).
+    dim2_01 on `lc-k68`: 4096 values per batch 10.59, 16384 10.14, 65536 9.99, all at once 9.95
+    against 10.14 unstreamed: each `read_bulk` call parses its last tokens below 1024 one at a
+    time. What helped was the smaller footprint, kept in v8.
+  - v8: with two long axes and no short ones, f, g and the result are staged in the product's
+    arrays (f in the pair's upper half, g and the result in the work array): 2 MiB less.
+    Per case on `lc-k68`, v4 / v6 / v8: dim2_01 10.21 / 10.18 / 9.99, dim1_00 9.59 / 9.60 / 9.61.
+    `judge.py bench`, 21 rounds, 8 cases, main (#322) against v8: `lc-k68` 11.13 -> 10.93
+    (0.985); `lc-bench` 10.31 -> 10.15 (0.984). Checks as above (24/24, stress 400 + 40,
+    ASan/UBSan stress 80 and 24 official cases, x86-64-v3 stress 150).
+- Next: dim2_01 still pays ~0.4 ms over dim1 for the two gathers and the scatter (memory-bound:
+  one RFO per line of A); dim2_00 was judged 10 against dim1's 8-9 once, while `lc-k68` puts it
+  below dim1 (one sample). The products (6.0 ms hot for three primes at 2^19) are the rest:
+  faster subtree kernels, or fewer passes without the set conflicts above (a buffered radix-16).
 
 ## Sources
 

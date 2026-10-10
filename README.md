@@ -85,6 +85,8 @@ Its kernels were rewritten into [`lib/ntt`](lib/ntt) and now power the convoluti
 
 ```
 AGENTS.md                    rules for agents (and humans)
+SPEED.md                     dashboard of judged and machine times (tools/speed.py)
+bench/                       per-test times and I/O floors (tools/speed.py)
 lib/                         shared code: fast I/O, NTT, multimod, poly
 problems/<category>/<name>/
   solution.cpp               source, includes lib/

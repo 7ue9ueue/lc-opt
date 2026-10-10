@@ -6563,6 +6563,45 @@ inline int exp_log(std::size_t n) { return std::countr_zero(detail::exp_length(n
 
 namespace detail {
 
+// A product as Transform's run() computes it (the forward top level of in if the bottom has one,
+// the subtrees, the inverse top level times scale), its output half written to `to` (at most n/2
+// words, any alignment) instead of out's: the caller needs no copy. out (n words) is the work span.
+template <class Bottom>
+void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& in, const Bottom& bottom,
+                std::uint32_t scale, Half output, std::span<std::uint32_t> to) {
+    const std::size_t nv = out.size() / 8;
+    auto* v = reinterpret_cast<Vec*>(out.data());
+    const Recursion recursion(t.roots(), t.inverse_roots(), bottom);
+    const Factor s(scale);
+    const auto put = [to, &s](std::size_t j, Vec x) {  // vector j of the half; lanes past to.size() dropped
+        const Vec y = reduce(times(x, s), kP);
+        if (8 * j + 8 <= to.size()) return store_unaligned(to.data() + 8 * j, y);
+        if (8 * j >= to.size()) return;
+        const Vec lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+        const Vec mask = _mm256_cmpgt_epi32(broadcast(std::uint32_t(to.size() - 8 * j)), lanes);
+        _mm256_maskstore_epi32(reinterpret_cast<int*>(to.data() + 8 * j), mask, y);
+    };
+    const bool lower = output == Half::kLower;
+    if (std::countr_zero(nv) % 2 == 0) {
+        const std::size_t h = nv / 4;
+        if constexpr (Bottom::kForward) forward_top4(in, v, h, t.roots());
+        for (std::size_t q = 0; q < 4; ++q) recursion.visit(out.data() + 8 * q * h, h, q);
+        const Factor z(t.inverse_roots()[1], t.inverse_roots()[9]);
+        for (std::size_t j = 0; j < h; ++j) {
+            const Vec ab = low(add(v[j], v[j + h])), cd = low(add(v[j + 2 * h], v[j + 3 * h]));
+            const Vec amb = low(diff(v[j], v[j + h])), cmd = times(diff(v[j + 2 * h], v[j + 3 * h]), z);
+            put(j, lower ? add(ab, cd) : diff(ab, cd));
+            put(j + h, lower ? add(amb, cmd) : diff(amb, cmd));
+        }
+    } else {
+        const std::size_t h = nv / 2;
+        if constexpr (Bottom::kForward) forward_top2(in, v, h);
+        recursion.visit(out.data(), h, 0);
+        recursion.visit(out.data() + 8 * h, h, 1);
+        for (std::size_t j = 0; j < h; ++j) put(j, lower ? add(v[j], v[j + h]) : diff(v[j], v[j + h]));
+    }
+}
+
 // The last Newton step of exp_newton() below, from g mod x^m to g mod x^n, m < n <= 2m, with
 // transforms of length m only, in blocks of B = m/2 coefficients: g_k = g[kB, kB + B), q_k
 // likewise (q = x f'). From the previous step: H = T_m(h0), h0 = 1 / g mod x^B, and G0 = T_m(g0)
@@ -6609,11 +6648,13 @@ namespace detail {
     });
     if (upper) t.forward(g.subspan(m, half), 0, lo);  // T_m(q_2): q mod x^m is no longer read
     t.forward(r.first(count), 0, work);
-    t.inverse_product(g0t, work, work, Half::kLower);
-    std::copy_n(work.begin(), count, g.begin() + std::ptrdiff_t(m));
+    const std::uint32_t scale = kInverseScales[1][std::countr_zero(m)];
+    const Source none(nullptr, 0, 0);
+    product_to(t, work, none, InverseProductBottom{{t.roots(), t.inverse_roots(), work.data()}, g0t.data()}, scale,
+               Half::kLower, g.subspan(m, count));
     if (!upper) return;
     // Block 3: (q G)[3B, 4B) at r[B, 2B), s at r[0, rest - B), then g_3.
-    t.forward(work.first(half), 0, work);
+    t.forward(g.subspan(m, half), 0, work);
     const Transform::Pair pairs[] = {{work, qt}, {lo, glt}};
     t.inverse_product_sum(pairs, work, Half::kUpper);
     Indices index(half);
@@ -6627,8 +6668,8 @@ namespace detail {
     detail::divide_by_index(m + half, r.first(rest - half),
                             [&](std::size_t i) { return add(load(qt.data() + i), q(m + half + i)); });
     t.forward(r.first(rest - half), 0, qt);
-    t.inverse_product(g0t, qt, qt, Half::kLower);
-    std::copy_n(qt.begin(), rest - half, g.begin() + std::ptrdiff_t(m + half));
+    product_to(t, qt, none, InverseProductBottom{{t.roots(), t.inverse_roots(), qt.data()}, g0t.data()}, scale,
+               Half::kLower, g.subspan(m + half, rest - half));
 }
 
 // The Newton steps of exp() below, from g mod x^kExpBase (given) to g mod x^n, n = g.size() >
@@ -6653,8 +6694,9 @@ namespace detail {
         t.forward(g.first(m), 0, g_low);
         // h[m/2, m) = -(h e mod x^(m/2)), e = (g h)[m/2, m)
         t.inverse_product(g_low, h_low, w_low, Half::kUpper);
-        t.cyclic_product(w_low.subspan(half), half, w_low, h_low, Half::kUpper, kP - 1);
-        std::copy_n(w.begin() + std::ptrdiff_t(half), half, h.begin() + std::ptrdiff_t(half));
+        const std::uint32_t negated = ntt::detail::multiply_mod(kInverseScales[1][std::countr_zero(m)], kP - 1);
+        product_to(t, w_low, Source(w_low.data() + half, half, half), ProductBottom{t.roots(), t.inverse_roots(), h_low.data()},
+                   negated, Half::kUpper, h.subspan(half, half));
         // T_m(r) = T_m(q mod x^m) G_lo at w[0, m), r at gt[m, 2m) until G's upper half goes there
         t.forward_product(lo.first(m), 0, w_low, g_low);
         t.inverse(w_low, gt.subspan(m, m));
@@ -6668,8 +6710,8 @@ namespace detail {
             return add(x, _mm256_sub_epi32(broadcast(kP), load(lo.data() + i)));
         });
         t.forward_upper(g.first(m), 0, gt.subspan(m, m));
-        t.cyclic_product(w.subspan(m, m), m, w.first(2 * m), gt.first(2 * m), Half::kUpper);
-        std::copy_n(w.begin() + std::ptrdiff_t(m), m, g.begin() + std::ptrdiff_t(m));
+        product_to(t, w.first(2 * m), Source(w.data() + m, m, m), ProductBottom{t.roots(), t.inverse_roots(), gt.data()},
+                   kInverseScales[1][std::countr_zero(2 * m)], Half::kUpper, g.subspan(m, m));
     }
     exp_last_step(t, lo, g, m, m == kExpBase, gt, ht, w, h);
 }

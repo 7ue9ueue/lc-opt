@@ -4,7 +4,7 @@ N <= 131072 coefficients of f (f[0] = 0, f[1] != 0) mod 998244353; print g with 
 10 s. Slowest tests: max_random (5), max_identity, random_00 (N = 131072 or near). mid: N <= 8000;
 small_degree: N <= 11.
 
-Best judged: ours, 47 ms (clean 37): [409541](https://judge.yosupo.jp/submission/409541), #258's `main.cpp`.
+Best judged: ours, 33 ms, no spike: [409549](https://judge.yosupo.jp/submission/409549) (#266's `main.cpp`).
 Record when opened (issue #87): 93 ms.
 
 ## Design
@@ -54,7 +54,23 @@ and 16 1.88; division by index 0.16; power at N - 1 4.56.
   each level's transforms of length 4m from the previous level's leaves, the first half without
   y levels. In process (alternating runs): 32.35 -> 30.50 ms (generic levels 23.17 -> 21.27).
   `judge.py bench` (21 rounds, against the previous change): `lc-amd` 0.9493 (35.28 -> 33.49 ms),
-  `lc-intel` 0.9165. 28/28 official tests; `stress.py` 400 rounds.
+  `lc-intel` 0.9165. 28/28 official tests; `stress.py` 400 rounds. Merged as #266 (CI 0.9512,
+  0.9482, 0.9490).
+- Submitted #266's `main.cpp`: [409548](https://judge.yosupo.jp/submission/409548) AC 42 ms:
+  max_random_02 42 ms against 31-33 for the other large cases, a launch spike (`tools/spikes.py`
+  compared it with 409541's slower run and did not flag it), clean 33 ms; the same file
+  [409549](https://judge.yosupo.jp/submission/409549) AC 33 ms, 10.0 MiB, no spike. New best
+  judged: 33 ms (was 47, 409541). 3 of the session's 5 submissions used.
+- Where the time goes now (`lc-amd`, in process 30.5 ms at N = 131072): levels 0, 1 1.78 ms;
+  level 2's forwards 1.61; doubling 19.2 (P 6.66, Q with ProjectionBottom 12.58); level 13's
+  inverses 0.42; levels 14 .. 16 2.71; division 0.16; power 4.56 (log_derivative 1.92, exp_newton
+  2.61). Profile (`lc-intel`, `perf`, x86-64-v3, 30 runs of max_random_00): forward kernels ~36%
+  (radix-4 levels 14%, bottoms 9%, h = 4 8%, columns 4%), inverse kernels ~18%,
+  ProjectionBottom 16.5%, the product bottoms of the last levels and power ~7%, page zeroing 1%.
+- Next (counted, not built): level T - 2's transforms of length m/2, first halves from the
+  product sums in the transform domain (~0.15 ms); level T - 3's column transforms, first halves
+  from level T - 4's leaves by inverse x levels and 8-point inverses (~0.2 ms); `power` (4.5 ms)
+  is exp/log (lib/poly owner lane).
 
 ## Sources
 

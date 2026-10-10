@@ -2,6 +2,7 @@
 #include "lib/io/io.hpp"
 #include "lib/io/bulk32.hpp"
 #include "lib/io/bulk64.hpp"
+#include "lib/io/fixed32.hpp"
 
 #include <sys/wait.h>
 
@@ -221,14 +222,53 @@ T bulk_value(int shape, std::size_t i, std::size_t count) {
     }
 }
 
-// Bulk reads: Reader::read, io::read_bulk, or the transposed uint32 parser whatever the CPU.
-enum class Bulk { reader, read_bulk, transposed };
+// Bulk reads: Reader::read, io::read_bulk, the transposed uint32 parser whatever the CPU, or
+// io::read_fixed (uint32).
+enum class Bulk { reader, read_bulk, transposed, fixed };
 
 template <Bulk M, class T>
 void read_array(io::Reader& in, T* dst, std::size_t count) {
     if constexpr (M == Bulk::read_bulk) io::read_bulk(in, dst, count);
     else if constexpr (M == Bulk::transposed) io::detail::read_transposed(in, dst, count);
+    else if constexpr (M == Bulk::fixed) io::read_fixed(in, dst, count);
     else in.read(dst, count);
+}
+
+// io::read_fixed on the inputs of its fixed-stride paths: all tokens of 9 digits or all of 1 digit,
+// single separators, with at most one defect at a random place (a token of another width, CRLF, two
+// spaces, a tab), followed by more input or ending it without a final separator; file and pipe.
+void test_fixed() {
+    const std::size_t counts[] = {1, 7, 8, 9, 16, 17, 1000, 70001};
+    for (const int digits : {9, 1})
+        for (const std::size_t count : counts)
+            for (int defect = 0; defect < 6; ++defect)
+                for (const bool at_end : {false, true}) {
+                    std::vector<std::uint32_t> v(count);
+                    for (auto& x : v) x = digits == 9 ? std::uint32_t(100000000 + rng() % 900000000) : rng() % 10;
+                    const std::size_t at = rng() % count;
+                    if (defect == 1) v[at] = std::uint32_t(rng() % 100000000);  // other widths, mostly 8
+                    if (defect == 2) v[at] = std::uint32_t(1000000000 + rng() % 3000000000u);  // 10 digits
+                    std::string text = "7 ";
+                    for (std::size_t i = 0; i < count; ++i) {
+                        text += text_of(v[i]);
+                        if (i + 1 == count && at_end) break;
+                        text += i != at ? " " : defect == 3 ? "\r\n" : defect == 4 ? "  " : defect == 5 ? "\t" : "\n";
+                    }
+                    if (!at_end) text += "-5\n";
+                    for (const bool pipe : {false, true}) {
+                        const int fd = pipe ? pipe_with(text) : file_with(text);
+                        io::Reader in(fd);
+                        CHECK(in.read<int>() == 7);
+                        std::vector<std::uint32_t> got(count + 1, 0xDEADBEEF);
+                        io::read_fixed(in, got.data(), count);
+                        CHECK(got.back() == 0xDEADBEEF);
+                        got.pop_back();
+                        CHECK(got == v);
+                        if (!at_end) CHECK(in.read<long long>() == -5);
+                        ::close(fd);
+                    }
+                }
+    reap();
 }
 
 // Bulk reads: sizes around the chunk threshold, uneven token lengths across a chunk (unbalanced
@@ -469,6 +509,10 @@ int main() {
     test_bulk_split<std::uint64_t, Bulk::read_bulk>();
     test_bulk_at_end<std::uint32_t, Bulk::transposed>();
     test_bulk_at_end<std::uint64_t, Bulk::read_bulk>();
+    test_bulk<std::uint32_t, Bulk::fixed>();
+    test_bulk_split<std::uint32_t, Bulk::fixed>();
+    test_bulk_at_end<std::uint32_t, Bulk::fixed>();
+    test_fixed();
     test_max_digits();
     test_writer();
     test_vector_arithmetic();

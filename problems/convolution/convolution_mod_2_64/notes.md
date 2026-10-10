@@ -2,7 +2,7 @@
 
 N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the product mod 2^64.
 10 s. Record when opened: 76 ms (another user). Best judged: ours, 43 ms:
-[409296](https://judge.yosupo.jp/submission/409296) (current `main.cpp`, #124).
+[409296](https://judge.yosupo.jp/submission/409296) (`main.cpp` of #124).
 
 ## Design
 

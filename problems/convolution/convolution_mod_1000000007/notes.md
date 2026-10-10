@@ -3,7 +3,7 @@
 N, M <= 2^19 coefficients mod 10^9 + 7; print the N + M - 1 coefficients of the product. 10 s.
 Record when opened: 29 ms (another user). Best judged: ours, 23 ms, spike-free:
 [409310](https://judge.yosupo.jp/submission/409310) (`main.cpp` of #129) and
-[409353](https://judge.yosupo.jp/submission/409353) (current `main.cpp`, #162). Earlier: 31 ms,
+[409353](https://judge.yosupo.jp/submission/409353) (`main.cpp` of #162). Earlier: 31 ms,
 [409262](https://judge.yosupo.jp/submission/409262) (#129; a judge spike, clean score 23 ms,
 `tools/spikes.md`).
 

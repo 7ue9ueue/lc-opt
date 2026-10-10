@@ -3,7 +3,7 @@
 N, M <= 2^19; a convex, 0 <= a_i, b_i <= 10^9; print c_k = min_{i+j=k} a_i + b_j (N + M - 1 values,
 each < 2^31). 5 s.
 
-Best judged: ours, 11 ms: [409229](https://judge.yosupo.jp/submission/409229) (current `main.cpp`).
+Best judged: ours, 11 ms: [409229](https://judge.yosupo.jp/submission/409229) (`main.cpp` of #92).
 Record when opened: 38 ms (issue #28).
 I/O floor (`../floor.py`, `lib/io/notes.md`): 11.36 ms on `lc-amd`.
 

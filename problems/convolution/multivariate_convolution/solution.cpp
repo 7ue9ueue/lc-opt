@@ -19,7 +19,8 @@
 
 #include "lib/io/io.hpp"
 #include "lib/ntt/ntt.hpp"
-#include "../fixed_width.hpp"
+#include "../convolution_mod/fields.hpp"
+#include "../text_buffer.hpp"
 #include "transform.hpp"
 
 #ifndef BLOCK_BYTES
@@ -956,7 +957,7 @@ void solve() {
     in.read(g, size);
     const u32* c = multiply(n, size, f, g);
     io::Writer out;
-    fixed_width::write(out, c, size, fixed_width::text_buffer(g, size * sizeof(u32)));  // g is dead
+    fields::write(out, c, size, text_buffer<fields::kTextBytes>(g, size * sizeof(u32)));  // g is dead
 }
 
 #ifdef __ELF__

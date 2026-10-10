@@ -13,7 +13,8 @@
 // chunks. Each int64 array is transformed while it is still in the cache.
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
-#include "../fixed_width.hpp"
+#include "../convolution_mod/fields.hpp"
+#include "../text_buffer.hpp"
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -457,10 +458,11 @@ void solve() {
 
     // Each chunk ends with a newline: the checker compares tokens. The text goes after the chunk,
     // in what is left of a.
-    char* const text = fixed_width::text_buffer(values + chunk, (rows * row_vectors / 2 - chunk / 8) * sizeof(Vec));
+    const std::size_t spare_bytes = (rows * row_vectors / 2 - chunk / 8) * sizeof(Vec);
+    char* const text = text_buffer<fields::kTextBytes>(values + chunk, spare_bytes);
     for (std::size_t r = 0; r < rows; r += chunk_rows) {
         for (std::size_t i = 0; i < chunk_rows; ++i) inverse_row(x + (r + i) * stride, values + i * row_values, row_log);
-        fixed_width::write(out, values, chunk, text);
+        fields::write(out, values, chunk, text);
     }
     out.flush();
 }

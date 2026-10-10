@@ -17,6 +17,7 @@
 #include "lib/io/bulk64.hpp"
 #include "lib/io/io.hpp"
 #include "fields.hpp"
+#include "../text_buffer.hpp"
 
 namespace {
 
@@ -905,13 +906,16 @@ void solve() {
     io::Reader in;
     const std::size_t n = in.read<std::uint32_t>(), m = in.read<std::uint32_t>();
     const int l = std::max(kMinLog, int(std::bit_width(n + m - 2)));
-    u64* a = allocate(std::size_t(2) << l);
-    u64* b = a + (std::size_t(1) << l);
+    // At least 2^15 words each: once the product is in a, b holds the output text.
+    static_assert(fields64::kTextBytes <= (std::size_t(1) << 15) * sizeof(u64));
+    const std::size_t words = std::size_t(1) << std::max(l, 15);
+    u64* a = allocate(2 * words);
+    u64* b = a + words;
     io::read_bulk(in, a, n);
     io::read_bulk(in, b, m);
     convolve(a, n, b, m, l);
     io::Writer out;
-    fields::write(out, a, n + m - 1);
+    fields::write(out, a, n + m - 1, text_buffer<fields64::kTextBytes>(b, words * sizeof(u64)));
 }
 
 #ifdef __ELF__

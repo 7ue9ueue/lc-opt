@@ -1,8 +1,9 @@
 // I/O floor of any problem: maps the input and touches every cache line of it, then writes an
-// output of the expected size, computing nothing. The runner gives no arguments, so the case comes
+// output of the expected size from a buffer in huge pages (as the solutions do), computing nothing. The runner gives no arguments, so the case comes
 // from stdin's path (/in/CASE.in) and the output size from the file sizes/CASE in the working
 // directory. Used by tools/speed.py.
 #define _GNU_SOURCE
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,8 +42,12 @@ int main(void) {
     }
 
     if (out_bytes > 0) {
-        char *out = mmap(NULL, out_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (out == MAP_FAILED) return 5;
+        const size_t huge = (size_t)1 << 21;
+        const size_t bytes = (out_bytes + huge - 1) / huge * huge + huge;
+        char *region = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (region == MAP_FAILED) return 5;
+        char *out = (char *)(((uintptr_t)region + huge - 1) & ~(huge - 1));
+        madvise(out, bytes - huge, MADV_HUGEPAGE);
         memset(out, '0' + (sum & 1), out_bytes);
         for (size_t done = 0; done < out_bytes;) {
             ssize_t put = write(1, out + done, out_bytes - done);

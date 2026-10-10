@@ -136,6 +136,9 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
   gain nothing, `lib/io/notes.md` round 5). `judge.py bench`, `lc-amd`, 31 rounds, slowest 3
   cases: 12.56 → 12.27 ms (0.973). Outputs byte-identical to main on all 13 tests and 200
   random inputs (N 0-13), also with `-DBLOCK_LOG=6`; ASan/UBSan on all 13 tests, file and pipe.
+  PR #198 merged; CI 0.9693 (EPYC 9V74 0.967, EPYC 9V45 0.984, Xeon 8573C 0.958). Submitted
+  [409430](https://judge.yosupo.jp/submission/409430): AC 12 ms, 18.8 MiB, no spike. Best judged
+  stays 12 ms (the gain is 0.3 ms).
 
 ## Sources
 

@@ -155,6 +155,8 @@ no sources read.
   still page-aligned in g (`../text_buffer.hpp`). `judge.py bench`, `lc-amd`, 31 rounds,
   slowest 3 cases: 13.69 → 13.60 ms (0.995; 2^18 output values). Outputs byte-identical to main
   on all 17 tests and 200 random inputs; ASan/UBSan on all 17 tests, file and pipe.
+  PR #198 merged; CI 0.9961 (EPYC 7763 1.000, EPYC 9V45 0.993, EPYC 9V74 0.996). Not submitted
+  (0.1 ms, under the judge's resolution).
 
 ## Next
 

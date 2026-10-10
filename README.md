@@ -51,7 +51,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [polynomial_taylor_shift](problems/polynomial/polynomial_taylor_shift) | [10 ms](https://judge.yosupo.jp/submission/409534) | 33 ms |
 | [shift_of_sampling_points_of_polynomial](problems/polynomial/shift_of_sampling_points_of_polynomial) | [11 ms](https://judge.yosupo.jp/submission/409556) | 41 ms |
 | [division_of_polynomials](problems/polynomial/division_of_polynomials) | [12 ms](https://judge.yosupo.jp/submission/409561) | 30 ms |
-| [inv_of_polynomials](problems/polynomial/inv_of_polynomials) | [24 ms](https://judge.yosupo.jp/submission/409586) | 104 ms |
+| [inv_of_polynomials](problems/polynomial/inv_of_polynomials) | [15 ms](https://judge.yosupo.jp/submission/409589) | 104 ms |
 | [prefix_sum_of_polynomial](problems/polynomial/prefix_sum_of_polynomial) | [13 ms](https://judge.yosupo.jp/submission/409571) | 143 ms |
 | [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |
 

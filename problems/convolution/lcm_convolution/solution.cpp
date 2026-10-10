@@ -522,7 +522,7 @@ void moebius_sweep(std::uint32_t* c, std::uint32_t n, std::uint32_t* prefix) {
     const std::uint32_t prefix_last = n / kStage2Min;
     std::memcpy(prefix, c, (prefix_last + 1) * sizeof(std::uint32_t));
     moebius_by_source(prefix, prefix, kStage2, prefix_last);
-    constexpr std::uint32_t kSegment = 1 << 16;  // 256 KiB
+    constexpr std::uint32_t kSegment = 1 << 15;  // 128 KiB: with its sources, within L2
     const std::uint32_t last0 = std::min(n, kSegment - 1);
     moebius_by_source(c, prefix, kStage2, last0);
     moebius_by_source(c, c, kStage1, last0);

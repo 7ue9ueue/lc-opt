@@ -17,8 +17,9 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
   projection, the same levels run forward (issue #68); `compositional_inverse.hpp` on top of it
   and `pow.hpp`.
 - `product_tree.hpp`: products of many polynomials (issue #74), for multipoint evaluation and
-  interpolation next; its own tables and transforms (`TreeTransform`) on the transform layer.
+  interpolation; its own tables and transforms (`TreeTransform`) on the transform layer.
   `evaluation.hpp`: multipoint evaluation by the transposed product tree (issue #75), on it.
+  `interpolation.hpp`: interpolation (issue #77) on evaluation.hpp's tree.
 - `chirp.hpp`: the sequences c s^k q^(k (k - 1) / 2) of the chirp z-transform (issue #76), for
   evaluation and interpolation on geometric sequences; uses `montgomery` from `calculus.hpp`.
 
@@ -499,8 +500,14 @@ for a = 0; top: the 8 lane products), each node's transform at its parent's leng
   coefficients are needed: X_lo = A - B, X_hi = A + B with A = inverse(P_lo, u / 2),
   B = inverse_upper(P_hi, -u / 2). Children shorter than L/2 (sizes not powers of two) and the
   top tree's leaves take coefficients, then a forward.
-- Top tree leaves to lanes: X_hi's top lane_length coefficients per lane, an 8 x 8 transpose per
-  8 coefficients, one lanes forward.
+- Top tree leaves to lanes (`lane_state`): above 32 slots the leaves halve like other nodes
+  (their parents have length 2 lane_length; all leaves get the same factor), and
+  `TreeTransform::standard_to_lanes` turns the 8 standard transforms of length lane_length into the
+  lane root's state: leaf p of a standard transform is the polynomial mod (x^8 - w_p), whose roots
+  are w_(8p) .. w_(8p+7), the lanes transform's positions 8p .. 8p + 7. Per 8 vectors an 8 x 8
+  transpose, a radix-2 step and the two radix-4 groups at h = 1 (forward_h1). It replaces the
+  leaves' coefficients, a transpose and the lanes forward of 8 lane_length words. Up to 32 slots:
+  coefficients, a transpose, the base.
 - Base (lane nodes of degree <= 32): the sub-nodes' products again by `multiply_lanes`
   (halves), then middle products by schoolbook (`middle_lanes`: 64-bit sums of up to 17
   products, one Montgomery step, as multiply_lanes) down to single slots, whose windows are the
@@ -514,6 +521,37 @@ for a = 0; top: the 8 lane products), each node's transform at its parent's leng
 - Memory at N = M = 2^17: 13 huge pages touched (stored transforms ~12.5 MB: ~1 MB per lane
   level, ~1 MB per top level). The division and the descent share one scratch; the values go
   straight into the caller's span when it is 32-byte aligned and m is a multiple of 8.
+
+## Interpolation
+
+`interpolation.hpp`: the f of degree < m through m distinct points (issue #77). With
+M = prod (x - a_i) and Q = prod (1 - a_i x) = x^m M(1/x), f = sum_i w_i M / (x - a_i) for the
+weights w_i = y_i / M'(a_i), and f's coefficients reversed are those of
+R = sum_i w_i Q / (1 - a_i x) (padding points get weight 0: R keeps degree < m).
+- M'(a_i): PointTree's descent for f = M' (Montgomery form from Q: M'[j] = (j + 1) Q[m - 1 - j]),
+  the root's window rev(M') / Q mod x^m8 by `divide` (in normal form, as M' carries 2^32; the
+  descent's c = 2^32 gives the values in Montgomery form for the inversion).
+- R: the transpose of the descent. Node v's sum R_v = sum over its points of
+  w_i Q_v / (1 - a_i x) is R_l Q_r + R_r Q_l, of degree < s_v <= L: exact in products of the
+  stored transforms (length L, Montgomery form, so R stays in normal form). Per node: one pass
+  for both products and their sum (`pointwise_product_sums`, `leaf_product_sums`: 64-bit sums
+  before one reduction in lanes), then the doubling of ProductTree (inverse, forward_upper of
+  length L) when the parent is longer. Per level 2 transforms of the level's total length, as
+  the tree and the descent: about 6 per level in all.
+- Lane tree: one depth-first pass (`InterpolationTree::lanes`) runs a node's descent to its
+  children, their subtrees, then its sum, while the node's stored transforms are still in cache.
+  Its base (`BaseInterpolation`, 32 slots): the descent as BaseDescent down to the slots' values
+  M'(a_i), the weights by Montgomery's batch inversion (4 chains over the slots, one
+  exponentiation per base for the product of the chains' products), then the sums level by
+  level from the same products: `cross_lanes` (both products of a node in 64-bit sums, folded
+  when there are more than 17 terms), unrolled for D <= 8, blocks of 2 outputs for D = 16, loops
+  for other counts. The products are not computed twice, as a separate descent and ascent would.
+- Top tree: the descent to the lane root's state (`lane_state`, shared with descend()); after the
+  lane pass, the lane sums back to coefficients, an 8 x 8 transpose, and the top tree's sums by
+  leaf products.
+- Memory at m = 2^17: RSS 31.4 MB (13 huge pages beyond the input). The first child's sum is
+  built in its parent's output; y holds M' before the values; the root's window buffer becomes
+  R; lane_state releases the top descent's scratch.
 
 ## Chirp
 
@@ -1134,6 +1172,32 @@ official tests. projection.hpp has loops of the same kind (for #87).
 - Merged as #253. CI: composition_of_formal_power_series 0.9863, _large 0.9929,
   compositional_inverse_of_formal_power_series 0.9939; all 3 0.9910.
 
+2026-10-10, claude (issue #77, polynomial_interpolation):
+- New `interpolation.hpp` (Interpolation above). `evaluation.hpp`: PointTree's members are
+  protected (InterpolationTree derives from it); the top descent moved into `lane_state`, which
+  takes its output buffer first and releases the rest (multipoint_evaluation 0.9970, 15 rounds),
+  then halves the top leaves and converts them in the transform domain (Multipoint evaluation
+  above; `transpose8` moved to product_tree.hpp). `product_tree.hpp`: `TreeTransform::
+  standard_to_lanes`, `leaf_product_sums`, `pointwise_product_sums`. multipoint_evaluation against
+  main: `judge.py bench` 0.9928 and 0.9960 (two runs of 21 rounds, `lc-amd`);
+  product_of_polynomial_sequence: `.text` and `.rodata` of the judge-flag executable
+  byte-identical (`lc-amd`).
+- Conversion costs (`lc-amd`, in process, 2^17 words, rdtsc): lanes to standard by
+  `inverse_small` 0.100 ms, by inverse_h1 groups 0.084 ms; columns 64 bytes apart (no cache-set
+  aliasing between the 8 streams) 0.081 ms: no change, not kept. The descent's conversion: top
+  descent 1.76 ms plus the lanes forward (~0.13, as the inverse of that length) -> 1.79 ms. The
+  ascent's (the leaves' lower halves from
+  the lane sums' transform, only forward_upper for the upper halves): top sums 1.30 -> 1.22 ms but
+  the conversion 0.081 ms, no net gain, not kept.
+- Tests: standard_to_lanes (8 .. 2^13 words per polynomial, columns adjacent or 16 words apart)
+  against the lanes forward; leaf_product_sums and pointwise_product_sums against the sums of the
+  products; cross_lanes (loops for every n, k <= 16; unrolled D = 1, 2, 4, 8; blocks D = 5 / B = 3
+  and D = 16 / B = 2) against scalar sums; interpolate against Horner at the points for m = 1 ..
+  80, 19 sizes 255 .. 4097, 65537, 100000, 2^17 - 1, 2^17 (four kinds of distinct points:
+  random, 0 .. m - 1, near P - 1, random with 0), 30 random m <= 20000. -O2 (native,
+  x86-64-v3) and ASan/UBSan (`lc-intel`).
+- Measurements: problems/polynomial/polynomial_interpolation/notes.md.
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -1181,3 +1245,8 @@ official tests. projection.hpp has loops of the same kind (for #87).
   into practice", ISSAC 2003 (from memory; not consulted in this round). The halving of a
   product's transform (P_lo and the transform of X mod (x^(L/2) + 1)), the right-aligned
   windows and the code derived and written here; no code read.
+- Interpolation by weights y_i / M'(a_i), M'(a_i) by multipoint evaluation of M', and the linear
+  combination up the product tree: the classical scheme (von zur Gathen and Gerhard, "Modern
+  Computer Algebra", chapter 10, from memory; not consulted in this round); the combination as
+  the transpose of the descent: Bostan, Lecerf and Schost above. The fused lane pass, the base
+  and the code derived and written here; no code read.

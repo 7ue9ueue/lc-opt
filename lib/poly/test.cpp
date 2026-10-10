@@ -486,8 +486,9 @@ u32 product_2d_coefficient(const std::vector<u32>& f, const std::vector<u32>& g,
 
 // Inverse2d on its own arena (sizes from the plan), scratch filled with garbage first; against the
 // recurrence up to 600 coefficients, else f g = 1 at the corners and random coefficients.
-void check_inverse_2d(const std::vector<u32>& f, std::size_t rows, std::size_t cols) {
-    const poly::Inverse2d plan(rows, cols);
+void check_inverse_2d(const std::vector<u32>& f, std::size_t rows, std::size_t cols,
+                      poly::Inverse2d::Method method = poly::Inverse2d::Method::kAuto) {
+    const poly::Inverse2d plan(rows, cols, method);
     using poly::Arena;
     Arena arena(poly::Transform::words(plan.lg()) + Arena::footprint(plan.f_words()) + Arena::footprint(plan.g_words()) +
                 Arena::footprint(plan.scratch_words()));
@@ -495,8 +496,7 @@ void check_inverse_2d(const std::vector<u32>& f, std::size_t rows, std::size_t c
     const auto fz = arena.take(plan.f_words()), gz = arena.take(plan.g_words()), scratch = arena.take(plan.scratch_words());
     std::fill(scratch.begin(), scratch.end(), 0xFFFFFFFF);
     const std::size_t stride = plan.stride(), split = plan.split(), offset = plan.offset();
-    expect(stride >= cols && (rows <= 2 || stride >= 2 * cols - 1), "inverse_2d stride", rows, cols);
-    expect(split >= (rows + 1) / 2 && split <= rows, "inverse_2d split", rows, cols);
+    expect(stride >= cols && split >= (rows + 1) / 2 && split <= rows, "inverse_2d layout", rows, cols);
     for (std::size_t i = 0; i < rows; ++i) std::copy_n(f.begin() + i * cols, cols, fz.begin() + offset + i * stride);
     plan.run(t, fz, gz, scratch);
     std::vector<u32> g(rows * cols);
@@ -512,17 +512,19 @@ void check_inverse_2d(const std::vector<u32>& f, std::size_t rows, std::size_t c
         expect(product_2d_coefficient(f, g, cols, i, j) == (i == 0 && j == 0), "inverse_2d f g = 1", rows * cols, i * cols + j);
 }
 
+// Both methods (row by row where it applies) on a random f.
 void check_inverse_2d(std::size_t rows, std::size_t cols, int kind) {
     auto f = random_poly(rows * cols, kind);
     if (!f[0]) f[0] = 1 + u32(pick(P - 1));
-    check_inverse_2d(f, rows, cols);
+    check_inverse_2d(f, rows, cols, poly::Inverse2d::Method::kNewton);
+    if (rows >= 3 && rows <= poly::Inverse2d::kMaxRowByRow) check_inverse_2d(f, rows, cols, poly::Inverse2d::Method::kRowByRow);
 }
 
 void test_inverse_2d() {
     for (std::size_t rows = 1; rows <= 12; ++rows)
         for (std::size_t cols = 1; cols <= 12; ++cols) check_inverse_2d(rows, cols, int((rows + cols) % 3));
-    for (auto [rows, cols] : {std::pair<std::size_t, std::size_t>{1, 1000}, {2, 3000}, {3, 999}, {5, 600}, {9, 333}, {33, 33},
-                              {64, 64}, {65, 63}, {100, 7}, {255, 4}, {1023, 2}, {3000, 3}, {1000, 1}, {600, 5}})
+    for (auto [rows, cols] : {std::pair<std::size_t, std::size_t>{1, 1000}, {2, 3000}, {3, 999}, {5, 600}, {9, 333}, {32, 40},
+                              {33, 33}, {64, 64}, {65, 63}, {100, 7}, {255, 4}, {1023, 2}, {3000, 3}, {1000, 1}, {600, 5}})
         for (int kind = 0; kind < 3; ++kind) {
             check_inverse_2d(rows, cols, kind);
             check_inverse_2d(cols, rows, kind);
@@ -536,10 +538,20 @@ void test_inverse_2d() {
         one[0] = 1;
         check_inverse_2d(one, rows, cols);
     }
-    // The shapes of the Library Checker tests (N M <= 500000), and longer rows.
+    // The shapes of the Library Checker tests (N M <= 500000), and longer rows; the method the plan
+    // picks, and both where row by row applies.
     for (auto [rows, cols] : {std::pair<std::size_t, std::size_t>{707, 707}, {1045, 478}, {478, 1045}, {10, 50000}, {53336, 9},
-                              {2, 250000}, {250000, 2}, {1, 1 << 19}, {1 << 19, 1}, {3, 166666}, {5000, 100}})
-        check_inverse_2d(rows, cols, int(pick(3)));
+                              {9, 53336}, {6, 53336}, {2, 250000}, {250000, 2}, {1, 1 << 19}, {1 << 19, 1}, {3, 166666},
+                              {32, 15625}, {5000, 100}}) {
+        const int kind = int(pick(3));
+        auto f = random_poly(rows * cols, kind);
+        if (!f[0]) f[0] = 1 + u32(pick(P - 1));
+        check_inverse_2d(f, rows, cols);
+        if (rows >= 3 && rows <= 16) {
+            check_inverse_2d(f, rows, cols, poly::Inverse2d::Method::kNewton);
+            check_inverse_2d(f, rows, cols, poly::Inverse2d::Method::kRowByRow);
+        }
+    }
 }
 
 void test_derivative() {

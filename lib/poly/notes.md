@@ -107,9 +107,19 @@ length n per step.
 - Memory: the last step (R > 2) works in f's buffer, where f starts at that step's shift (its
   first product reads f in place), and leaves its rows there (`offset()`, `split()`); g holds
   the rows below; the scratch holds the transform of g_k and the earlier steps' work.
+- Row by row (`Method::kRowByRow`, 3 <= R <= 32): transforms of length n >= 2C - 1 of every row
+  of f and g, computed once; g_i = -g_0 (sum over 0 < t <= i of f_t g_(i-t)) mod y^C as one
+  `inverse_with` of a sum of leaf products (`detail::LeafProductSum`: windows filled one product
+  ahead, a runtime count of terms), lower half, then `cyclic_product` with G_0. 5 (R - 1)
+  transforms and (R - 1)(R + 2) / 2 leaf products of length n: cheaper than Newton up to R ~ 16.
+  In process (`lc-bench`, ms, Newton against row by row): 10 x 50000 15.0 / 12.1, 9 x 53336
+  16.9 / 10.5, 6 x 53336 13.2 / 6.0, 3 x 166666 15.1 / 11.4, 16 x 31250 14.2 / 12.2, 20 x 25000
+  15.2 / 17.2, 32 x 15625 14.6 / 18.6 (the model underestimates long sums by ~8%).
 - `cost()`: word-levels of the transforms (0.064 ns each) and leaf products (0.7 ns per word),
-  so a caller can run Newton in y instead (f transposed). Lengths are symmetric in R and C for
-  the last step ((R - 1)(2C - 1) + C = 2RC - R - C + 1); short dimensions differ.
+  for both methods; the plan takes the cheaper (`Method::kAuto`), and a caller can run Newton in
+  y instead (f transposed). In process the estimates track the runs within ~5%. Lengths are
+  symmetric in R and C for the last step ((R - 1)(2C - 1) + C = 2RC - R - C + 1); short
+  dimensions differ.
 - At 707 x 707 (`lc-bench`, in process, warm): 15.13 ms; steps of 2^20 8.04 (forward of g_k
   1.30, product with f 3.36, product with e 3.28; clearing and copies 0.1), 2^19 3.76, 2^18
   1.82, the rest 1.5. Upper halves against both (478 x 1045): 15.24 against 15.48 ms.

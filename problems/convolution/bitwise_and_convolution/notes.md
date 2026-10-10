@@ -3,8 +3,8 @@
 N <= 20; 2^N values a_i, b_i < 998244353; print c_k = sum over i & j = k of a_i b_j, mod 998244353.
 5 s. Inputs are ~20.7 MB, outputs ~10.5 MB (fixed width) at N = 20.
 
-Best judged: ours, [409202](https://judge.yosupo.jp/submission/409202), 12 ms (first; round 2,
-all three max_random cases 12 ms). Round 1: 409186, 13 ms.
+Best judged: ours, [409492](https://judge.yosupo.jp/submission/409492), 11 ms (first; round 4,
+all three max_random cases 11 ms). Before: 409202 and 409430, 12 ms; round 1: 409186, 13 ms.
 Next other user: 26 ms (adamant, 400554).
 
 ## Design
@@ -223,7 +223,16 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
   - Final (`main.cpp` of this round) against round 3's: `judge.py bench`, 41 rounds, slowest 3
     cases: 11.90 → 11.83 ms (0.9902). Checks: 13/13 official tests; `stress.py` 120 rounds; tokens
     equal to round 3's output on the 13 official and 57 generated inputs (N = 0..20), file and
-    pipe, also with ASan/UBSan.
+    pipe, also with ASan/UBSan. Split tiles on `lc-intel` (Emerald Rapids, x86-64-v3, `xt.cpp`):
+    also faster, 137 vs 153 (forward) and 133 vs 154 (inverse), relative units.
+  - PR #233 merged; CI 0.9916 (EPYC 7763 0.9925, EPYC 9V45 0.9937, EPYC 9V74 0.9885).
+- 2026-10-10, claude: submitted the #233 `main.cpp`,
+  [409492](https://judge.yosupo.jp/submission/409492): AC 11 ms, 18.8 MiB (1/5 this round);
+  max_random_00, _01, _02 11 ms each, no spike (`tools/spikes.py`). New best (was 12 ms).
+- Next: the kernel still holds ~6.5 of ~10.7 ms (start, input faults and `munmap`, `write()`).
+  User side, in core cycles: column pass 76 per column against 57 (the product's 6 multiplies
+  and 5 shifts per vector), upper row sweeps 21.9 per 8 vectors against 15 (L2), split tiles
+  27.5 against ~24; the formatter (`fields.hpp`) 34 cycles per 16 values against ~26.
 
 ## Sources
 

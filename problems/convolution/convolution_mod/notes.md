@@ -2,8 +2,9 @@
 
 N, M <= 2^19 coefficients mod 998244353; print the N + M - 1 coefficients of the product. 5 s.
 
-Best judged: ours, 13 ms: [409226](https://judge.yosupo.jp/submission/409226) (#50's version);
-the current `main.cpp` (#197) ties it, [409431](https://judge.yosupo.jp/submission/409431)-[409433](https://judge.yosupo.jp/submission/409433). Earlier versions: 14 ms, [409184](https://judge.yosupo.jp/submission/409184) and [408716](https://judge.yosupo.jp/submission/408716) (the QPoly exploration-011
+Best judged: ours, 12 ms: [409465](https://judge.yosupo.jp/submission/409465) (#222's version).
+Earlier: 13 ms, [409226](https://judge.yosupo.jp/submission/409226) (#50) and 409431-409433 (#197);
+14 ms, [409184](https://judge.yosupo.jp/submission/409184) and [408716](https://judge.yosupo.jp/submission/408716) (the QPoly exploration-011
 program, `../SymPoly/work/ntt/yosupo_convolution_mod_large_io_probe.cpp`, a guess from the
 submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
 
@@ -254,6 +255,12 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
     inverse; twiddles broadcast in the statement): 122-128 cycles per group against 119 for lib's
     out-of-line `forward_pair`, 63.7-66 against 59.7 for `inverse` (9 knob sets each). Not kept:
     the call is not the cost.
+  - CI (#222): geomean 0.986 (EPYC 9V74 0.9892, EPYC 7763 1.0073 and 0.9623).
+  - Submitted the merged `main.cpp` once (1 of 5 this session):
+    [409465](https://judge.yosupo.jp/submission/409465) AC 12 ms, no spikes (`spikes.py`: clean
+    12). Large cases: 13 at 12 ms (max_random_00/01, max_ans_zero_00, fft_killer_00-07,
+    all_same_01/02), 5 at 11 (fft_killer_08/09, all_same_03, random_00/01); all_same_00 9 ms.
+    New best (was 13 ms).
 - Next: the mixed-length parse (max_random) costs 0.88 ms per array against 0.69 for the fixed
   path; `io::read_bulk` spends ~11 instructions per token and a 3-tokens-per-load or
   end-aligned variant does not count lower. Formatter at 34 cycles per 16 values; `forward` and

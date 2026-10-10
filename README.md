@@ -12,7 +12,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | Problem | Ours | Fastest before us |
 |---|---:|---:|
 | [many_aplusb](problems/sample/many_aplusb) | [18 ms](https://judge.yosupo.jp/submission/409103) | 23 ms |
-| [convolution_mod](problems/convolution/convolution_mod) | [13 ms](https://judge.yosupo.jp/submission/409226) | 23 ms |
+| [convolution_mod](problems/convolution/convolution_mod) | [12 ms](https://judge.yosupo.jp/submission/409465) | 23 ms |
 | [convolution_mod_large](problems/convolution/convolution_mod_large) | [430 ms](https://judge.yosupo.jp/submission/409343) | 737 ms |
 | [convolution_mod_1000000007](problems/convolution/convolution_mod_1000000007) | [23 ms](https://judge.yosupo.jp/submission/409353) | 29 ms |
 | [convolution_mod_2_64](problems/convolution/convolution_mod_2_64) | [43 ms](https://judge.yosupo.jp/submission/409346) | 76 ms |

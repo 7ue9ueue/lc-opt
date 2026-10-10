@@ -3,7 +3,8 @@
 c_k = sum over i j = k (mod P) of a_i b_j mod 998244353, P prime, 2 <= P <= 524288 (so at most
 524287 = 2^19 - 1). 5 s.
 
-Best judged: ours, 12 ms: [409289](https://judge.yosupo.jp/submission/409289) (`main.cpp` of #135).
+Best judged: ours, 11 ms: [409660](https://judge.yosupo.jp/submission/409660) (`main.cpp` of #311).
+Before: 12 ms, [409289](https://judge.yosupo.jp/submission/409289) (#135) and 409350.
 Record when opened (issue #35): 45 ms.
 
 ## Design
@@ -118,6 +119,15 @@ Record when opened (issue #35): 45 ms.
   - Checks: 40/40 official tests (`lc-amd`); `stress.py` 500 rounds and 24 known large cases,
     200 rounds built with `-march=x86-64-v3`; ASan/UBSan on all 40 official cases, file and pipe
     input.
+  - `lc-k68` (Linux 6.8, judge proxy), static builds, `tools/runner.c`, 31 rounds, slowest of
+    p_max_00, p_max_01, large_05: 11.30 -> 10.87 ms (0.962). Every huge page of the product's
+    mapping is written before it is read (parse, fold, tables, text), so 6.8's split of the huge
+    zero page (convolution_mod_large round 4) does not apply.
+  - CI (#311, merged): Xeon 6973P-C 0.9989, EPYC 9V45 0.9843, Xeon 8573C 0.9576 (geomean 0.980).
+  - Submitted the merged `main.cpp` (#311), 2 of 5 this session:
+    [409659](https://judge.yosupo.jp/submission/409659) AC 14 ms (spike on large_04; `spikes.py`:
+    clean 11), [409660](https://judge.yosupo.jp/submission/409660) AC 11 ms, 15.9 MiB. Best judged
+    12 -> 11 ms.
 - Next: left outside `lib/`: fold 0.25, gather 0.41, scatter 0.31 and unfold ~0.1 ms of ~9.0 in
   process. The product (4.3 ms), the parse (1.7) and `write()` (~1.7) belong to `lib/ntt`,
   `lib/io` and the kernel. Halving the random accesses again needs a dense index of the cosets of

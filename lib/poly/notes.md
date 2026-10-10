@@ -394,13 +394,18 @@ history is saved.
   root; backward, the odd reciprocals p_(j-1) q_j / 2^32 overwrite the prefixes; then the blocks
   in order: G times the reciprocals, final values in [0, P).
 - Pieces below N / 2 invert 2x instead of x: that is the table's entry for odd m, so only the
-  even half of a table block is halved; their products take the doubled entries. Above N / 2,
-  both factors come widened from memory (`vpmovzxdq`) into the qword lanes of the products, with
-  no interleave.
+  even half of a table block is halved; their odd factors are doubled. Both factors come widened
+  from memory (`vpmovzxdq`) into the qword lanes of the products.
+- Each 16 table entries are stored as m + 0..3, 8..11, 4..7, 12..15: the order in which
+  `vpunpck{l,h}dq` of the halved even and the odd entries leave them, so the writes need no
+  `vperm2i128` (which takes a multiply-pipe slot and a shuffle slot on Zen 3). A block reads two
+  runs of 4 (m + 0, 8 or m - 4, 4) and loads its even factors before the table's stores, which
+  may overwrite them when the ring is short. 0.457 -> 0.440 ms in memory (#71 round 2).
 - Costs: 30 `vpmuludq` per 16 values (prefix 6, backward 12, products 12). `lc-amd`, 10^6 values
   in chunks of 25600: 0.447 ms (forward ~0.09, backward ~0.13, blocks ~0.23); about 65% of the
-  two multiply pipes. `lc-bench`, TSC: 0.458 ms; forward 0.078, backward 0.141, blocks 0.151
-  below N / 2 (with the table's writes; 0.145 without its stores, so not memory) and 0.087 above.
+  two multiply pipes. `lc-bench`, TSC, before the reordered table: 0.458 ms; forward 0.078,
+  backward 0.141, blocks 0.151 below N / 2 (with the table's writes; 0.145 without its stores,
+  so not memory) and 0.087 above.
 - Not kept (#71 round 2): 8 chains of 4 qword lanes (no odd-lane shifts or blends) with qword
   odd reciprocals and the table interleaved by a blend: 0.50-0.53 ms. The products fused into
   the `Recurrence` kernel loop (reciprocals first, a sink per step): slower by 0.05 ms.

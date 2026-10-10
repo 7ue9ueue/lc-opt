@@ -6,7 +6,8 @@ mod 998244353. 10 s. Input is tiny; output up to 10 MB.
 Best judged: ours, 9 ms: [409639](https://judge.yosupo.jp/submission/409639) (`main.cpp` of
 #196 / #300, the same code as #182); small_N_03 took 9 ms against 1 for its peers (launch spike);
 clean score 6 ms (small_dense_00 and _04 6 ms, _01 and _02 5). Earlier 14 ms (409396, spike;
-clean 5). Record when opened (issue #71): 38 ms.
+clean 5). `main.cpp` of #317: 10 ms (409663, spike; clean 6). Record when opened (issue #71):
+38 ms.
 
 ## Tests
 
@@ -123,6 +124,18 @@ N / 2 (they write the table) and 0.087 above.
     pipes; `vperm2i128` 1 per cycle and blocks both groups; stores 1 per cycle; 256-bit loads 2.
     So Shoup products (2 `vpmuludq` + 2 `vpmulld` per 8 lanes) only pay with a free precomputed
     quotient, which the reciprocals lack.
+  - Merged as #317; CI: log 0.9830, inv 0.9921, all 5 problems 0.9950. Submitted its
+    `main.cpp`: [409663](https://judge.yosupo.jp/submission/409663) AC 10 ms, 12.3 MiB;
+    small_N_04 10 ms (launch spike, peers 1); small_dense_02 6, _00, _01, _04 5. Clean 6 ms.
+  - Then: the table's 16-entry groups stored as m + 0..3, 8..11, 4..7, 12..15, the order
+    `vpunpck{l,h}dq` leave them in, so writing them needs no `vperm2i128`; both factors of the
+    products widened from memory. Division in memory 0.457 -> 0.440 ms; `judge.py bench` (41
+    rounds) against #317: 0.9897. The first try loaded the even factors after the table's
+    stores: wrong where the ring is short (n around 156), caught by `lib/poly/test.cpp`, not by
+    the official tests or 10^6-value runs (there the same block never reads and writes one
+    slot). Mutants caught: runs not swapped, runs read at m + 0, 4, factors loaded after the
+    stores.
 - Next: 0.84 ms over the floor's 5.13 (recurrence 0.35 more than the floor's fill, division
-  0.49; both at about 3 vector ops per cycle). The division needs 2.5 Montgomery products per value; fewer
-  products (pairs of odd n by finite differences: 2.25) save at most 3%.
+  0.49 before the reordered table; both at about 3 vector ops per cycle). The division needs
+  2.5 Montgomery products per value; fewer products (pairs of odd n by finite differences:
+  2.25) save at most 3%.

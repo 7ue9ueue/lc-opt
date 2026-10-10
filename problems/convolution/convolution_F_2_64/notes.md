@@ -3,8 +3,9 @@
 N, M <= 2^19 elements of F_2[x] / (x^64 + x^4 + x^3 + x + 1) as uint64; print the N + M - 1
 coefficients of the product. 10 s.
 
-Best judged: ours, 44 ms: [409295](https://judge.yosupo.jp/submission/409295) (current `main.cpp`,
-#119). Earlier: 46 ms, [409244](https://judge.yosupo.jp/submission/409244) (#111). Record when the issue opened: 409 ms.
+Best judged: ours, 42 ms: [409339](https://judge.yosupo.jp/submission/409339) (current `main.cpp`,
+#167). Earlier: 44 ms, [409295](https://judge.yosupo.jp/submission/409295) (#119); 46 ms,
+[409244](https://judge.yosupo.jp/submission/409244) (#111). Record when the issue opened: 409 ms.
 
 ## Design
 
@@ -138,6 +139,12 @@ same harness: 2.55, 2.1, 2.05, 6.0, 12.1, 4.3, 11.2.
     ASan/UBSan, x86-64-v3 + PCLMUL, portable); 41 random cases at every length 2^4..2^20 against
     main's binary for the judge, PCLMUL and portable builds; ASan exact on gen_max, small_values,
     all_same, all_ones, many_ones.
+  - CI: ratio 0.8675 (EPYC 7763 x3: 0.873, 0.865, 0.864; medians 44.52 -> 38.88, 47.51 -> 41.66,
+    47.52 -> 41.39 ms). Merged as #167.
+- 2026-10-10, claude: submitted #167's `main.cpp` twice. [409339](https://judge.yosupo.jp/submission/409339)
+  AC 42 ms: gen_2_x_3_11_01 42 (32.6 on lc-amd, a spike), every other case at most 38.
+  [409345](https://judge.yosupo.jp/submission/409345) AC 46 ms: many_ones_00 46, every other case at
+  most 38. Large cases 34-38 ms against 43-44 for #119. Best judged 42 ms (2/5 for this version).
 - Next: the transform loops run at ~6.4 cycles per vector multiply against 5.7 with eight
   independent chains: a hand-scheduled asm loop with two columns in flight and no spills
   (~1.5 ms if it reaches 5.8). Fuse the pointwise product into the stage 1-0 group passes (shared

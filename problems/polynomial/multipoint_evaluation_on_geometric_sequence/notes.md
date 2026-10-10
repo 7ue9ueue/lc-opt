@@ -4,8 +4,9 @@ f of N coefficients, M, a, r mod 998244353, N, M <= 2^19; print f(a r^i) for i <
 Slowest tests: max_random_00..02 (N = M = 2^19, random a, r). The a0_r01 tests have a = 0 or
 r in {0, 1}: no product (2.5-4.7 ms). near_pow_of_2 has N, M near 2^18; nm_1 has N or M = 1.
 
-Best judged: ours, 10 ms: [409475](https://judge.yosupo.jp/submission/409475) (`main.cpp` of #227),
-clean (`tools/spikes.py`).
+Best judged: ours, 10 ms: [409678](https://judge.yosupo.jp/submission/409678) (`main.cpp` of #336),
+clean (`tools/spikes.py`), and [409475](https://judge.yosupo.jp/submission/409475) (#227). Best clean
+score 9 ms: [409677](https://judge.yosupo.jp/submission/409677) (#336, judged 15 by a launch spike).
 Record when opened (issue #76): 34 ms.
 
 ## Design
@@ -126,6 +127,18 @@ write M values with `fields.hpp`, nothing else (`floor.cpp`): 4.92-4.99 ms media
       Within noise; not worth the special cases.
   - Checks: 25/25 official tests (`judge.py test`, `lc-amd`); `stress.py` 400 rounds (`lc-amd`);
     ASan/UBSan on all 25 official cases, file and pipe input (`lc-amd`).
+  - Lost, v13: outputs in chunks of `fields::kBlock` values, each formatted while in L2 (y never
+    leaves it): whole process 9.06 -> 9.06 ms, ratio 1.0027 (21 rounds).
+  - Merged as #336. CI, 21 rounds, slowest 3 cases: EPYC 9V74 8.94 -> 8.49 ms (0.9490), Xeon
+    8573C 10.06 -> 9.32 (0.9211), EPYC 7763 10.36 -> 9.98 (0.9648).
+  - Submitted the merged `main.cpp` (with #334's unused lib/poly kernels bundled in) three times
+    (3 of 5 this session):
+    [409677](https://judge.yosupo.jp/submission/409677) AC 15 ms from a launch spike on
+    a0_r01_04 (peers 6); clean 9: max_random_00..02 and random_01 9;
+    [409678](https://judge.yosupo.jp/submission/409678) AC 10 ms, clean: max_random_00/01 10,
+    max_random_02 8, random_00 9; [409679](https://judge.yosupo.jp/submission/409679) AC 16 ms from
+    spikes on near_pow_of_2_02/04 and example_00; clean 10 (max_random_01). The max_random cases
+    sit at the 9/10 boundary.
 - Next: above the floor (4.7 ms) the visits take 3.69 ms, lib/ntt's kernels; the rest is
   near its bounds (chirps at ~9 cycles per vector with 16 multiplies). Left: 4 huge pages
   instead of 5 (with v7's buffer, B needs blocks 0-5 only: A 4 MiB + B 3 MiB + tables 1 MiB is

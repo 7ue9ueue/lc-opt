@@ -143,6 +143,11 @@ struct SideProductBottom {
     }
 };
 
+// A log_derivative callback for the blocks' transforms that ignores them.
+struct IgnoreTransforms {
+    void operator()(std::size_t, std::span<const std::uint32_t>) const {}
+};
+
 // Buffers of length 2k log_derivative uses: T(h), W_1 .. W_(B-1), q_0's, and one for the later
 // blocks; at least 3 (for B = 1: the inverse's scratch, 2 buffers, follows T(h)).
 inline std::size_t log_buffers(std::size_t n) { return std::max<std::size_t>(log_blocks(n) + 2, 3); }
@@ -158,10 +163,13 @@ inline std::size_t log_buffers(std::size_t n) { return std::max<std::size_t>(log
 // Blocks j >= 1 share one buffer: the residual (over T(q_(j-1)) for j >= 2), q_j, T(q_j).
 // sink(first, q) receives q[first, first + q.size()), block by block, as an aligned span
 // readable to the next multiple of 8. After it returns, f is read only at indices
-// > first + q.size(). scratch: log_derivative_scratch(n) words; t: lg_max >= log_derivative_log(n).
-template <class Sink>
+// > first + q.size(). transformed(j, T(q_j)) receives the transform of length 2k of each block
+// but the last, valid until the next block starts (T(q_0) until the end).
+// scratch: log_derivative_scratch(n) words; t: lg_max >= log_derivative_log(n).
+template <class Sink, class Transformed = IgnoreTransforms>
 [[gnu::always_inline]] inline void log_derivative(const Transform& t, std::span<const std::uint32_t> f, std::size_t n,
-                                                  std::span<std::uint32_t> scratch, const Sink& sink) {
+                                                  std::span<std::uint32_t> scratch, const Sink& sink,
+                                                  const Transformed& transformed = {}) {
     const std::size_t k = log_block(n), len = 2 * k, blocks = log_blocks(n);
     const auto buffer = [&scratch, len](std::size_t i) { return scratch.subspan(i * Arena::footprint(len), len); };
     const std::span<std::uint32_t> ht = buffer(0), q0 = buffer(blocks);
@@ -196,7 +204,10 @@ template <class Sink>
         }
         t.cyclic_product(work.first(count), 0, work, ht, Half::kLower);
         sink(first, std::span<const std::uint32_t>(work.first(count)));
-        if (j + 1 < blocks) t.forward(work.first(k), 0, work);
+        if (j + 1 < blocks) {
+            t.forward(work.first(k), 0, work);
+            transformed(j, std::span<const std::uint32_t>(work));
+        }
     }
 }
 

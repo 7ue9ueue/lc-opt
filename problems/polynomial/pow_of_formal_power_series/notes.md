@@ -19,9 +19,12 @@ Record when opened (issue #65): 52 ms.
 - `lib/poly/pow.hpp`: `power(t, f, e, c, g)` = c (f / f[0])^e: d = e f'/f by log's blocked
   division, then exp's Newton steps on g' = d g from g[0] = c (lib/poly/notes.md). Computed in
   place at b[k, k + N - kM), then moved to b[kM, N) if kM != k.
-- `lib/io` input; output in 10-byte fixed-width fields (`problems/convolution/convolution_mod/fields.hpp`,
-  judge-specific: the checker compares tokens). One `poly::Arena` (huge pages) for f, the text,
-  the tables and the scratch. The program runs from `.preinit_array` and ends with `_exit`.
+- `power` reuses the division's transforms of f'/f for two forwards of exp's last step
+  (lib/poly/notes.md, Power).
+- `io::read_bulk` input; output in 10-byte fixed-width fields
+  (`problems/convolution/convolution_mod/fields.hpp`, judge-specific: the checker compares
+  tokens). One `poly::Arena` (huge pages) for f, the text, the tables and the scratch.
+  `RUN_EARLY` (lib/run): the program runs from `.preinit_array` and ends with `_exit`.
 
 ## Floor
 
@@ -76,5 +79,20 @@ unreliable; same-run ratios (`judge.py bench`) still hold.
   01:58 UTC) was not logged before; who submitted it is not recorded. `main.cpp` of #166:
   AC 26 ms, 19.4 MiB; the large cases 25-26 ms, no spike on them. New best judged: 26 ms (was 29,
   409299).
-- Next: exp's T_m(x q) at the last two steps from the log's stored T(q_0), T(q_1) (~0.4 ms,
-  lib/poly/notes.md); the transform levels (lib/ntt's kernels) are the largest shared cost.
+- 2026-10-10, claude (round 2):
+  - Main had moved since 409358 (#166): `judge.py bench` (`lc-bench`, 11 rounds) #166's
+    `main.cpp` 26.21 ms, main (#334) 24.23 ms.
+  - `io::read_bulk` and `RUN_EARLY` (lib/run) instead of the own `.preinit_array` copy:
+    24.27 -> 24.11 ms (0.9933, 21 rounds, `lc-bench`).
+  - lib/poly: exp's last step takes T_m(q mod x^m) and T_m(q[m, m + k)) from the division's
+    transforms (lib/poly/notes.md, Power and Log): power() 19.81 -> 19.42 ms in process.
+  - Both: `judge.py bench` (21 rounds) 24.91 -> 24.40 ms (0.9820) on `lc-bench`, 26.55 -> 25.98
+    (0.9788) on `lc-intel`.
+  - Whole program on `lc-bench` (max_random_00, medians of 21, output to a file): read 0.66 ms,
+    power 19.67, write 2.02 (0.32 to /dev/null: the rest is the kernel's file write, as in the
+    floor).
+  - Checks: 37/37 official tests (`lc-amd`, slowest 24.5 ms); `stress.py` 300 rounds; ASan/UBSan
+    on all 37 cases, file and pipe input; exp, log, compositional_inverse (both) official tests,
+    stress and ASan as well.
+- Next: a cheaper division or exp step (the transform levels, lib/ntt's kernels, are the largest
+  cost); T_k(q mod x^k) for exp's full step at m = k from T(d_0) (~0.05 ms, lib/poly/notes.md).

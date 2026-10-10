@@ -157,6 +157,8 @@ measurements in `notes.md`.
 ## Working in parallel
 
 - One agent per problem at a time. Each agent uses its own git worktree and branch: `<agent>/<problem>`.
+- To change a file another agent may be working on, prefer a comment on that agent's issue over an edit.
+  Edit it yourself only when the change cannot cause a merge conflict.
 - Read `notes.md` first. Do not repeat a logged attempt without a new reason.
 - Keep every exploration file (variants, probes, scripts, results). Never put one in `/tmp`: VMs wipe it.
   On a VM, work in `~/explore/<problem>/`. On the Mac, the folder is

@@ -142,6 +142,13 @@ Record when opened: 37 ms (407011). Best judged: ours, [409380](https://judge.yo
   - Checks: 29/29 official tests; `stress.py` 300 rounds, now with segment-edge sizes (32767 ..
     131072) against the reference; ASan/UBSan (-O1, x86-64-v3) on all 29 tests, file and pipe
     input, tokens equal. Compile ~6 s (constexpr lists); text 516 KB (was 97 KB).
+  - PR #259 merged. CI ratios (EPYC 9V74): 0.958, 0.952, 0.948 (geomean 0.9525).
+- 2026-10-10, claude: submitted the #259 `main.cpp` twice (1/5, 2/5 of this version).
+  - [409546](https://judge.yosupo.jp/submission/409546): AC 22 ms; spikes on
+    near_prime_squared_00 (22) and small_06 (`tools/spikes.py`), clean 14 ms.
+  - [409547](https://judge.yosupo.jp/submission/409547): AC 18 ms; spike on random_02, clean 14 ms.
+  - Large cases: 409546 13-14 ms (6 of 8 at 13), 409547 13-14 (5 of 8 at 13); 409380 had 3 of 8
+    at 13. The gain (~0.5 ms) is below the judge's 1 ms step; best judged stays 14 ms.
 
 ## Next
 

@@ -90,6 +90,9 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
 - 2026-10-10, claude (lib, issue #156 round 2): the huge-page allocation comes from
   `lib/mem/huge.hpp` instead of a local copy. Same stripped executable as before (judge flags,
   `lc-amd`).
+- 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
+  `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
+  before (judge flags, `lc-amd`).
 
 ## Sources
 

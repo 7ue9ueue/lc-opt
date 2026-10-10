@@ -3,11 +3,10 @@
 // opt is found at every kGroup-th row (sample rows), coarse rows first, each searched between the
 // opts of its neighbors; each group of kGroup rows then takes its minima over the columns between
 // its two sample opts, kGroup rows per column.
-#include <unistd.h>
-
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/mem/huge.hpp"
+#include "lib/run/early.hpp"
 #include "columns.hpp"
 
 namespace {
@@ -137,17 +136,6 @@ void solve() {
     columns::write(out, c, count, text);
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here). _exit skips their teardown too.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

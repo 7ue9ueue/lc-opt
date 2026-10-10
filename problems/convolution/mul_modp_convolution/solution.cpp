@@ -2,13 +2,12 @@
 // With a primitive root g, i = g^x for i != 0, so the nonzero part is a cyclic convolution of
 // length n = P - 1 of A[x] = a[g^x] and B[x] = b[g^x]: one linear product (lib/ntt, length
 // 2^20 at the maximum) folded mod x^n - 1. c_0 = a_0 sum(b) + b_0 sum(a) - a_0 b_0.
-#include <unistd.h>
-
 #include <memory>
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/ntt/product.hpp"
+#include "lib/run/early.hpp"
 #include "../convolution_mod/fields.hpp"
 
 namespace {
@@ -278,17 +277,6 @@ void solve() {
     convolve<SmallProduct>(in, p);
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here). _exit skips their teardown too.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

@@ -112,6 +112,9 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   (`mem::Arena`) instead of a local copy. Same instructions, other stack slots in `solve()` and
   `transform_short`; `judge.py bench`, `lc-bench`, 21 rounds: 11.50 -> 11.44 ms (noise). Official
   tests pass; ASan/UBSan on 6 official cases.
+- 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
+  `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
+  before (judge flags, `lc-amd`).
 
 ## Sources
 

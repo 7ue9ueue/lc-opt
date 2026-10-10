@@ -2,15 +2,13 @@
 // (fields.hpp). Factors of at most half the length (all large tests) use ntt::Product
 // (lib/ntt/product.hpp), other sizes ntt::Convolution. Inputs of 9-digit or 1-digit tokens take a
 // fixed-width parser.
-#include <unistd.h>
-
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/ntt/product.hpp"
+#include "lib/run/early.hpp"
 #include "fields.hpp"
 
 namespace {
-
 
 // Input fast paths for inputs whose tokens all have 9 digits (13 of the 16 large tests) or 1 digit
 // (all_same_00), each followed by one separator: token i then starts at a fixed stride, so blocks
@@ -129,17 +127,6 @@ void solve() {
     convolve(in, convolution, n, m);
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here): 0.15 ms less per run. _exit skips their teardown too.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

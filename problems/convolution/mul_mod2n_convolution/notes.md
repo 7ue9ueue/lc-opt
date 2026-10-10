@@ -98,6 +98,9 @@ Record when opened (issue #30): 81 ms.
   (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
   values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
   20.57 → 20.24 ms (0.986). 47/47 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
+- 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
+  `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
+  before (judge flags, `lc-amd`).
 
 ## Sources
 

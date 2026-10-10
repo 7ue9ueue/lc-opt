@@ -2,8 +2,6 @@
 // with the modulus set at run time), the Chinese remainder theorem straight to residues mod
 // 10^9 + 7 by one Montgomery reduction, fixed-width output: 10 bytes per value (fields10.hpp),
 // or 11 in the rare blocks with a value >= 10^9 (fields11.hpp).
-#include <unistd.h>
-
 #include <array>
 
 #include "lib/io/bulk32.hpp"
@@ -12,6 +10,7 @@
 #include "fields10.hpp"
 #include "fields11.hpp"
 #include "lib/multimod/transform.hpp"
+#include "lib/run/early.hpp"
 
 namespace {
 
@@ -162,17 +161,6 @@ void solve() {
     }
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here). _exit skips their teardown too.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

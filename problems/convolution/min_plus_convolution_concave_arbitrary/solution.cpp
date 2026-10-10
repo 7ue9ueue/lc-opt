@@ -11,8 +11,6 @@
 // Crossings are found lazily: each column keeps a bracket around the last row where it beats the
 // one below, narrowed by bisection only when an insertion needs it, and for free as the sweep
 // passes.
-#include <unistd.h>
-
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +19,7 @@
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/mem/huge.hpp"
+#include "lib/run/early.hpp"
 #include "../min_plus_convolution_convex_arbitrary/columns.hpp"
 
 namespace {
@@ -146,16 +145,6 @@ void solve() {
     columns::write(out, c, count, text);
 }
 
-#ifdef __ELF__
-// Runs before the C++ runtime initializes iostreams and locales; _exit skips their teardown.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

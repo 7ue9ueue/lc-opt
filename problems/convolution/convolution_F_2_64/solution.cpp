@@ -7,8 +7,6 @@
 // (Taylor expansions in x^tau + x). The transform evaluates f = sum d_j X_j at omega_k =
 // sum_{bits of k} beta_b, k < 2^l; stage i uses the twiddle s_i(omega_c) = omega_{c >> i} for the
 // block at c.
-#include <unistd.h>
-
 #include <array>
 #include <bit>
 #include <utility>
@@ -16,6 +14,7 @@
 #include "lib/io/bulk64.hpp"
 #include "lib/io/io.hpp"
 #include "lib/mem/huge.hpp"
+#include "lib/run/early.hpp"
 #include "fields.hpp"
 #include "../text_buffer.hpp"
 
@@ -905,17 +904,6 @@ void solve() {
     fields::write(out, a, n + m - 1, text_buffer<fields64::kTextBytes>(b, words * sizeof(u64)));
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here). _exit skips their teardown too.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

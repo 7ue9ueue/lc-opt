@@ -4,8 +4,6 @@
 // point of the short axes' spectrum, the exact product over Z by Kronecker substitution (factor
 // r padded to 2 D_r - 1), modulo three NTT primes (lib/multimod), the CRT straight to residues
 // mod p, then folded back to cyclic.
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <vector>
@@ -15,6 +13,7 @@
 #include "lib/mem/huge.hpp"
 #include "../convolution_mod/fields.hpp"
 #include "lib/multimod/transform.hpp"
+#include "lib/run/early.hpp"
 
 namespace {
 
@@ -612,17 +611,6 @@ void solve() {
     fields::write(out, f, total, arena.take<char>(fields::kTextBytes));
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here). _exit skips their teardown too.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

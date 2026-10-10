@@ -5,14 +5,13 @@
 // starts from an argmin (i, k - i) of c[k], found by binary search: the slopes before it in a and
 // b are k smallest ones, and the rest are no smaller. It then merges slopes eight at a time with
 // a bitonic network (AVX2 min/max) and adds them up.
-#include <unistd.h>
-
 #include <array>
 #include <bit>
 #include <climits>
 
 #include "lib/io/io.hpp"
 #include "lib/mem/huge.hpp"
+#include "lib/run/early.hpp"
 #include "../min_plus_convolution_convex_arbitrary/columns.hpp"
 
 namespace {
@@ -221,17 +220,6 @@ void solve() {
     }
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here). _exit skips their teardown too.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

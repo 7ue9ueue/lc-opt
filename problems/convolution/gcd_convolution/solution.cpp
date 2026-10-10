@@ -6,7 +6,6 @@
 // for m < 256).
 // a and b are interleaved as pairs, so one load fetches both.
 #include <immintrin.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -18,6 +17,7 @@
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/mem/huge.hpp"
+#include "lib/run/early.hpp"
 #include "../convolution_mod/fields.hpp"
 
 namespace {
@@ -390,17 +390,6 @@ void solve() {
     fields::write(out, c + 1, n, reinterpret_cast<char*>(region));
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here), and _exit skips their teardown.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

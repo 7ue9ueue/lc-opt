@@ -67,7 +67,7 @@ Its kernels were rewritten into [`lib/ntt`](lib/ntt) and now power the convoluti
   cited in each `notes.md`.
 - We never look at other users' submissions. Leaderboard times only.
 - No speed claim without passing tests and a measurement.
-- At most 5 judge submissions per version.
+- At most 5 judge submissions per session.
 
 ## Layout
 

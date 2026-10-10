@@ -1083,7 +1083,8 @@ inline void read_fixed(Reader& in, std::uint32_t* dst, std::size_t count) {
         const auto* block = reinterpret_cast<const char*>(reinterpret_cast<std::uintptr_t>(stop) & ~std::uintptr_t(63));
         in.resume({stop, block, detail::block_separators(block) & ~std::uint64_t(0) << (stop - block)});
     }
-    read_bulk(in, dst + done, count - done);
+    // Not for zero tokens: Reader::read skips whitespace first, past the end of the input too.
+    if (done < count) read_bulk(in, dst + done, count - done);
 }
 
 }  // namespace io

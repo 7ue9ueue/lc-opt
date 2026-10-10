@@ -3,8 +3,9 @@
 N <= 500000 coefficients of f mod 998244353, f[0] = 0; print the first N coefficients of exp(f).
 10 s. Largest tests: max_* (N = 500000, transforms up to 2^19).
 
-Best judged: ours, 16 ms: [409402](https://judge.yosupo.jp/submission/409402) (`main.cpp` of #185).
-Earlier: 18 ms, [409327](https://judge.yosupo.jp/submission/409327) (#158) and
+Best judged: ours, 16 ms: [409402](https://judge.yosupo.jp/submission/409402) (`main.cpp` of #185)
+and [409661](https://judge.yosupo.jp/submission/409661) (#314; 2 of the 9 largest cases at 16 ms,
+7 at 15). Earlier: 18 ms, [409327](https://judge.yosupo.jp/submission/409327) (#158) and
 [409300](https://judge.yosupo.jp/submission/409300) (#131); 19 ms,
 [409248](https://judge.yosupo.jp/submission/409248) (#116).
 Record when opened (issue #63): 38 ms.
@@ -127,8 +128,21 @@ this round 16.62. In process (N = 500000, warm): exp 11.74 ms, of which the last
     official cases, file and pipe input; pow, compositional_inverse and its large version: all
     official tests, `stress.py` 100 rounds, ASan/UBSan on all official cases; lib/poly tests.
   - Counted, not built: fused top levels between consecutive products (inv's `step.hpp`; a
-    top pass costs ~0.01 ms at 2^18, as T(half-zero source) 0.288 against T(full) 0.299 ms);
-    direct writes of the halves into g instead of copies (all copies 0.08 ms).
+    top pass costs ~0.01 ms at 2^18, as T(half-zero source) 0.288 against T(full) 0.299 ms).
+  - Merged as #314. CI: exp 0.9770 (EPYC 7763 0.9725, 9V74 0.9790, 7763 0.9796), pow 0.9841,
+    compositional_inverse 0.9916, compositional_inverse_large 0.9970; all 4 0.9874.
+  - Submitted the merged `main.cpp`: [409661](https://judge.yosupo.jp/submission/409661) AC
+    16 ms, 15.6 MiB (1/5; `tools/spikes.py`: clean 16). max_random_03 and _04 16 ms; the other
+    max cases, random_01 and random_03 15 (409402: 5 of them at 16, 4 at 15). The large cases sit
+    at the 15/16 boundary; `speed.py` (`lc-bench`): max_random 15.97-16.10 ms, I/O floor
+    (`tools/floor.c`) 3.24-3.37.
+  - Second change (`lib/poly/exp.hpp` only): the steps' four copies into g and h replaced by
+    direct writes of the inverse's top level (`detail::product_to`). Bound, copies removed
+    (outputs wrong): 0.9907 in process. Kept version (`lc-bench`, A/B against #314, outputs
+    equal): exp 0.9947 warm, 0.9940 fresh, power 0.9958; `judge.py bench` (61 rounds) 16.05 ->
+    16.00 ms (0.9978); 21 rounds of the 4 problems: 0.9997 (31 rounds), pow 0.9995,
+    compositional_inverse 1.0008, compositional_inverse_large 1.0000 (an exp run of 21 rounds
+    during another agent's job on the same core read 22.7 ms on both sides; discarded).
 - Next: the remaining time is transforms (~15 T(N)) and leaf products (~7 LP(N)), both shared
   lib/poly kernels near their op-count bounds. The full steps (5.8 ms) are 16 transforms and 7
   leaf products of length m per step; block steps need fewer only without the h update.

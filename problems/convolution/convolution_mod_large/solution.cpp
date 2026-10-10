@@ -19,10 +19,10 @@ char* text(ntt::Convolution&) {
     return buffer;
 }
 
-// One store per 2 MiB page of f[begin, end) that does not hold f[begin - 1]. Before Linux 6.13
-// (lc-k68 runs 6.8, and its times match the judge's), a huge page first read maps the shared
-// huge zero page, and the first write then splits it into 4 KiB pages; a first write gets a huge
-// page. small_and_large on lc-k68: 345 -> 313 ms.
+// One store per 2 MiB page of f[begin, end) that does not hold f[begin - 1]. On Linux 6.8 (lc-k68,
+// whose times match the judge's), a huge page first read maps the shared huge zero page, and the
+// first write then splits it into 4 KiB pages; a first write gets a huge page. Linux 7.0 allocates
+// a huge page either way. small_and_large_01 on lc-k68: 340 -> 310 ms.
 void write_first(std::uint32_t* f, std::size_t begin, std::size_t end) {
     constexpr std::size_t kPage = (std::size_t(1) << 21) / sizeof(std::uint32_t);  // words
     const std::size_t offset = reinterpret_cast<std::uintptr_t>(f) / sizeof(std::uint32_t) % kPage;

@@ -632,15 +632,19 @@ Lagrange interpolation on 0, 1, ..., N - 1.
   odd, so the 32 streams fall into different cache sets.
 - `put` lambdas capture local copies by value. `__m256i` stores may alias anything, so a member
   or a variable captured by reference is reloaded after every store: polynomial_taylor_shift's
-  weights pass took 0.50 ms with `[&]` and members against 0.41 for the old hand-written loop
-  and 0.42 by value (warm, 2^19, `lc-bench`); CI saw the first version 0.08% and 0.50% slower.
-  shift_of_sampling_points' four passes: 1.75 -> 1.59 ms by value.
+  weights pass took 0.50 ms with `[&]` and members against 0.41 for its hand-written loop and
+  0.42 by value (warm, 2^19, `lc-bench`). shift_of_sampling_points' four passes: 1.75 -> 1.59 ms
+  by value.
+- polynomial_taylor_shift on this header (scan, or its loops written out with `Chain`): equal
+  passes in process and `judge.py bench` 1.0000-1.0008 (`lc-bench`), 0.9969 (`lc-intel`), but
+  CI 1.0008, 1.0050, 1.0038, 1.0046 over four versions. Not switched in #264; it keeps its own
+  copy (`problems/polynomial/polynomial_taylor_shift/factorials.hpp`) for now.
 - Lane length (`lc-bench`, one chain with a store, or a load, a product and a store, per 2^20
   positions, warm): C = 32784 (32 long lanes): 0.289 / 0.472 ms; blocks of 32 lanes of 1040:
   0.243 / 0.427; of 264: 0.247 / 0.537; of 64: 0.302 / 0.466. Powers of two alias: C = 32768
   took 1.41 / 1.45 ms, C = 4096 0.42 / 0.55.
-- Users: polynomial_taylor_shift (i!, c^j / j!, 1 / k!), shift_of_sampling_points_of_polynomial
-  (1 / i!, the prefix products of d + t and their inverses).
+- Users: shift_of_sampling_points_of_polynomial (1 / i!, the prefix products of d + t and their
+  inverses).
 - Tests: `factorial` and `factorials` against running products (table boundaries, the limit,
   random), `invert` (sizes 0..1000, values 1 and P - 1), chains through `scan` against scalar
   products (forward and reversed, steps 8..512, bases and steps near 0 and P), `scan_chunk`'s

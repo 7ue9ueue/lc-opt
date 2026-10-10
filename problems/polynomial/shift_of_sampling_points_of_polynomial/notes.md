@@ -51,7 +51,9 @@ median of the slowest case (15 rounds); 4.37 in the run next to v4 below.
 - 2026-10-10, claude (round 1): first solution. Timing on `lc-bench` (EPYC 7B13, judge flags).
   Scratch files: `lc-opt-explore/shift_of_sampling_points_of_polynomial/`.
   - First promoted #79's factorial machinery to `lib/poly/factorials.hpp` (see
-    `lib/poly/notes.md`, Factorials); polynomial_taylor_shift uses it (bench 1.0002, noise).
+    `lib/poly/notes.md`, Factorials). polynomial_taylor_shift on it: 1.0000-1.0008 on
+    `lc-bench`, 0.9969 on `lc-intel`, but CI 1.0008-1.0050 over four versions, so it is not
+    switched in this round (files of that attempt: scratch `taylor_switch/`).
   - v1: the design above with weights in two passes (chain with f / i! in place and s stored;
     then f s_(N-1-i)). Bugs found by the official tests: the type3 range ending at P - 1 put
     d + t = 0 in the padding (fixed by front padding) and needed G_T past the last lane (virtual

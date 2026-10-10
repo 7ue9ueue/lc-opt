@@ -6,8 +6,10 @@
 // ends, so equal columns of the rows of a and b spread over 4 groups of cache sets (without a skew,
 // the column pass takes 12 times as long). Each band's rows are transformed over their own bits
 // right after it is parsed; one pass over columns then does the row-bit levels of a and b, the
-// product and the inverse row-bit levels; each row then gets its inverse low levels and is printed.
+// product and the inverse row-bit levels; each row then gets its inverse low levels, and the
+// band's values are printed as they become ready.
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "lib/io/bulk32.hpp"
@@ -191,13 +193,37 @@ std::uint32_t* allocate(std::size_t words) {
     return reinterpret_cast<std::uint32_t*>(start - small);
 }
 
+// Marks a mapped input as read once, so the kernel skips marking each page accessed when the
+// Reader unmaps it (0.04 ms per 20 MB). The mapping starts at the page of the first token.
+void advise_sequential(const io::Reader& in) {
+    struct stat st;
+    if (::fstat(0, &st) != 0 || !S_ISREG(st.st_mode) || std::size_t(st.st_size) <= io::detail::kMapAbove) return;
+    const auto start = reinterpret_cast<std::uintptr_t>(in.scan().cur) & ~std::uintptr_t(4095);
+    ::madvise(reinterpret_cast<void*>(start), std::size_t(st.st_size), MADV_SEQUENTIAL);
+}
+
+// The inverse low levels of each row of a band, then its values as fixed-width text: whole blocks
+// as rows finish, the rest at the band's end, so every write(2) goes straight from text.
+void print_band(io::Writer& out, std::uint32_t* band, std::size_t rows, std::size_t block, std::size_t count,
+                int block_log, char* text) {
+    std::size_t printed = 0;
+    for (std::size_t r = 0; r < rows; ++r) {
+        row_levels<true>(band + r * block, block_log);
+        const std::size_t ready = std::min((r + 1) * block, count);
+        const std::size_t now = r + 1 < rows ? (ready - printed) / fields::kBlock * fields::kBlock : ready - printed;
+        if (now) fields::write(out, band + printed, now, text);
+        printed += now;
+    }
+}
+
 void solve() {
     io::Reader in;
     const int n = int(in.read<std::uint32_t>());
+    advise_sequential(in);
     const std::size_t total = std::size_t(1) << n;
     const int lg = std::max(n, kMinLog), block_log = std::min(lg, kBlockLog), rows_log = lg - block_log;
     const std::size_t block = std::size_t(1) << block_log, rows = std::size_t(1) << rows_log;
-    const std::size_t band_rows = std::min(rows, std::size_t(1) << kBandRowsLog), bands = rows / band_rows;
+    const std::size_t band_rows = std::min(rows, std::size_t(1) << kBandRowsLog);
     const std::size_t size = row_offset(rows - 1, block) + block + kBandSkew;  // an array, then a skew
     std::uint32_t* const a = allocate(2 * size);
     std::uint32_t* const b = a + size;
@@ -214,10 +240,8 @@ void solve() {
     }
     io::Writer out;
     char* const text = text_buffer<fields::kTextBytes>(b, size * sizeof(std::uint32_t));  // b is dead
-    for (std::size_t r = 0; r < rows; ++r) {
-        row_levels<true>(a + row_offset(r, block), block_log);
-        fields::write(out, a + row_offset(r, block), std::min(block, total), text);
-    }
+    for (std::size_t r = 0; r < rows; r += band_rows)
+        print_band(out, a + row_offset(r, block), band_rows, block, std::min(band_rows * block, total), block_log, text);
 }
 
 #ifdef __ELF__

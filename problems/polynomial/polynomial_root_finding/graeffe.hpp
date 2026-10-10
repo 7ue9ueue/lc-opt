@@ -1,15 +1,17 @@
-// Tangent Graeffe transforms and zeros on a subgroup, modulo P = 998244353 = 119 2^23 + 1, for
-// polynomial_root_finding. x86-64 with AVX2. Design: notes.md.
+// Tangent Graeffe transforms and zeros on cosets of roots of unity, modulo P = 998244353 =
+// 119 2^23 + 1, for polynomial_root_finding. x86-64 with AVX2. Design: notes.md.
 //
-//   roots::Graeffe graeffe(t, arena, d_max);  // t: lg_max >= log2(2 length(d_max))
-//   graeffe.run(a, b, k);                     // a: d + 1 coefficients, b: d, d <= d_max
+//   roots::Graeffe graeffe(t, arena, d_max);  // t: lg_max >= log2(2 graeffe_length(d_max))
+//   graeffe.run(a, b, k, saves);              // a: d + 1 coefficients, b: d, d <= d_max
 //       // A + eps B = (a + eps b)(x) (a + eps b)(-x) as a polynomial in x^2, k times: a = A and
-//       // b = B / 2^k, both times one common factor. With b = a', the roots r of a become r^N,
-//       // N = 2^k, and at a simple root z = r^N of A: r = z A'(z) / (B(z) / N).
-//   roots::Subgroup h(arena, d_max);
-//   h.zeros(l, a, x, b, sink);                // sink(x(z), b(z)) for each zero z of a in the
-//                                             // subgroup of order 119 2^l; values times one
-//                                             // common factor. d + 1 <= 16 2^l coefficients.
+//       // b = B / 2^k, both times one common factor; saves get the iterates of their levels.
+//       // With b = a', the roots r of a become r^N, N = 2^k, and at a simple root z = r^N of
+//       // A: r = z A'(z) / (B(z) / N).
+//   roots::CosetZeros cosets(t, arena, d_max, log_max);  // t: lg_max >= log_max + 3
+//   cosets.prepare(polys, count, size, log_n);  // up to 3 polynomials of size <= d_max + 1
+//   cosets.evaluate(which, v);                  // lane l: the coset v_l W, W the n-th roots of
+//       // unity (n = 2^log_n, v in Montgomery form); value(i, q), lane l: polynomial i (bit i
+//       // of which) at v_l w^bitrev(q).
 #pragma once
 
 #include <immintrin.h>
@@ -154,6 +156,12 @@ inline void pair_step(const poly::Transform& t, u32* a, u32* b, std::size_t leng
 // Transform length for degree d.
 inline std::size_t graeffe_length(std::size_t d) { return std::max<std::size_t>(64, std::bit_ceil(d + 1)); }
 
+// Where run() copies the iterate of a level (d + 1 and d words).
+struct Save {
+    int level;
+    u32 *a, *b;
+};
+
 class Graeffe {
 public:
     Graeffe(const poly::Transform& t, poly::Arena& arena, std::size_t d_max) : t_(t) {
@@ -162,7 +170,7 @@ public:
         ca_ = arena.take(length).data(), cb_ = arena.take(length).data();
     }
 
-    void run(std::span<u32> a, std::span<u32> b, int k) const {
+    void run(std::span<u32> a, std::span<u32> b, int k, std::span<const Save> saves) const {
         const std::size_t d = b.size(), n = graeffe_length(d);
         const std::span<u32> ta(ta_, 2 * n), tb(tb_, 2 * n), ca(ca_, n), cb(cb_, n);
         t_.forward(a, 0, ta.first(n));
@@ -173,6 +181,8 @@ public:
             detail::pair_step(t_, ta_, tb_, n);
             t_.inverse(ta.first(n), ca);
             t_.inverse(tb.first(n), cb);
+            for (const Save& s : saves)
+                if (s.level == step) std::copy_n(ca_, d + 1, s.a), std::copy_n(cb_, d, s.b);
             if (step == k) break;
             t_.forward_upper(ca.first(d + 1), 0, ta.subspan(n));
             t_.forward_upper(cb.first(d), 0, tb.subspan(n));
@@ -186,81 +196,118 @@ private:
     u32 *ta_, *tb_, *ca_, *cb_;
 };
 
-// The subgroup H of order 119 2^l as 119 cosets v W of W, the 2^l-th roots of unity, v = u^c for
-// u of order 119; cosets 8g .. 8g + 7 in the lanes of group g. On a coset, with n = 2^l and
-// V = v^n, a(v w) is the transform of length n of c_j = v^j sum_t a[j + n t] V^t.
-class Subgroup {
+// On a coset v W of the n-th roots of unity, n = 2^log_n, with V = v^n, a(v w) is the transform
+// of length n of c_j = v^j sum_t a[j + n t] V^t. Eight cosets in the lanes of a vector; the
+// transform of the lanes layout (word 8 j + lane: c_j of that lane) is Transform's of length 8n,
+// whose output q is the value at v w^bitrev(q), w = 3^((p - 1) / n).
+class CosetZeros {
 public:
-    static constexpr int kMaxLog = 12;
+    static constexpr int kPolys = 3;
 
-    Subgroup(poly::Arena& arena, std::size_t d_max) {
-        using detail::kP;
-        const int l_max = std::min(kMaxLog, std::max(0, int(std::bit_width(d_max)) - 4));
-        const std::size_t n = std::size_t(1) << l_max;
-        for (auto& c : padded_) c = arena.take(d_max + 1 + 2 * n + 8).data();  // terms * n <= d + n
-        for (auto& v : values_) v = arena.take(8 * n).data();
-        twiddles_ = arena.take(2 * n).data(), quotients_ = arena.take(2 * n).data();
+    CosetZeros(const poly::Transform& t, poly::Arena& arena, std::size_t d_max, int log_max) : t_(t) {
+        const std::size_t n = std::size_t(1) << log_max;
+        for (auto& r : rows_) r = arena.take(d_max + 1 + n).data();  // terms * n <= d + n
+        for (auto& v : values_) v = arena.take(std::max<std::size_t>(64, 8 * n)).data();
+        powers_ = arena.take(16 * (d_max + 2)).data();  // V^t, both operands, t <= d_max + 1
+        twiddles_ = arena.take(n).data(), quotients_ = arena.take(n).data();
         // twiddles_[h + j] = w_2h^j for j < h: the butterflies of half-length h.
         for (std::size_t h = 1; h < n; h *= 2) {
-            const u32 w = ntt::detail::power(3, (kP - 1) / u32(2 * h));
+            const u32 w = ntt::detail::power(3, (detail::kP - 1) / u32(2 * h));
             u32 x = 1;
             for (std::size_t j = 0; j < h; ++j, x = ntt::detail::multiply_mod(x, w))
                 twiddles_[h + j] = x, quotients_[h + j] = ntt::detail::quotient(x);
         }
-        // u^c 2^32 for c < 120 (c = 119 pads the last group).
-        const u32 u = ntt::detail::power(3, (kP - 1) / 119);
-        u32 x = detail::kR;
-        for (int c = 0; c < 120; ++c, x = ntt::detail::multiply_mod(x, u)) coset_[c] = x;
     }
 
-    // d + 1 = a.size() = x.size() = b.size() + 1 <= 16 2^l coefficients, l <= the l_max of d_max.
-    template <class Sink>
-    void zeros(int l, std::span<const u32> a, std::span<const u32> x, std::span<const u32> b, Sink sink) const {
-        using namespace detail;
-        const std::size_t n = std::size_t(1) << l, terms = (a.size() + n - 1) / n;
-        const std::span<const u32> in[3] = {a, x, b};
-        for (int i = 0; i < 3; ++i) {
-            std::copy(in[i].begin(), in[i].end(), padded_[i]);
-            std::fill(padded_[i] + in[i].size(), padded_[i] + terms * n, 0);
+    // polys[0, count), count <= 3, of size coefficients (zero past their spans), on cosets of
+    // n = 2^log_n points, log_n <= log_max. Row j of polynomial i: a[j + n t] for t < terms.
+    void prepare(const std::span<const u32>* polys, int count, std::size_t size, int log_n) {
+        log_n_ = log_n;
+        const std::size_t n = std::size_t(1) << log_n, terms = (size + n - 1) / n;
+        terms_ = terms;
+        for (int i = 0; i < count; ++i) {
+            const std::span<const u32> a = polys[i];
+            u32* const rows = rows_[i];
+            for (std::size_t j = 0; j < n; ++j)
+                for (std::size_t t = 0, at = j; t < terms; ++t, at += n) rows[j * terms + t] = at < a.size() ? a[at] : 0;
         }
-        for (int group = 0; group < 15; ++group) {
-            twist(group, n, terms);
-            for (u32* v : values_) transform(v, n);
-            scan(group, n, sink);
+    }
+
+    std::size_t points() const { return std::size_t(1) << log_n_; }
+
+    // Lanes: the values of polynomials 0 (which = 1), 1 and 2 (which = 6) or all three (which =
+    // 7) on the cosets v W, v in Montgomery form; value(i, q): canonical, in the order above.
+    void evaluate(unsigned which, detail::Vec v) {
+        powers(v);
+        switch (which) {
+            case 1: return evaluate<1>({0}, v);
+            case 6: return evaluate<2>({1, 2}, v);
+            default: return evaluate<3>({0, 1, 2}, v);
         }
+    }
+
+    detail::Vec value(int i, std::size_t q) const { return detail::load(values_[i] + 8 * q); }
+
+    // Bit reversal of q < n.
+    std::size_t reverse(std::size_t q) const {
+        std::size_t r = 0;
+        for (int i = 0; i < log_n_; ++i) r = r << 1 | (q >> i & 1);
+        return r;
+    }
+
+    // w^bitrev(q), the root of unity of output q.
+    u32 root(std::size_t q) const {
+        const std::size_t n = points(), beta = reverse(q);
+        if (n == 1) return 1;
+        return beta < n / 2 ? twiddles_[n / 2 + beta] : detail::kP - twiddles_[beta];
     }
 
 private:
-    // values_[i][j] = c_j for polynomial i on the cosets of group, times 2^-32.
-    void twist(int group, std::size_t n, std::size_t terms) const {
+    // powers_ = V^t 2^32, t < terms, each as its even and odd operands.
+    void powers(detail::Vec v) {
         using namespace detail;
-        const Vec v = load(coset_ + 8 * group);  // v 2^32
-        Vec big = v;                              // V 2^32 = v^n 2^32
-        for (std::size_t m = 1; m < n; m *= 2) big = reduce(montgomery(big, big), kP);
-        Operand power[16];  // V^t 2^32
+        Vec big = v;
+        for (int m = 0; m < log_n_; ++m) big = reduce(montgomery(big, big), kP);
         Vec y = broadcast(kR);
-        for (std::size_t t = 0; t < terms; ++t, y = reduce(montgomery(y, big), kP)) power[t] = operand(y);
-        Vec f = broadcast(kR);  // v^j 2^32
-        for (std::size_t j = 0; j < n; ++j) {
-            Sum s[3];
-            for (int i = 0; i < 3; ++i) {
-                const Vec c = broadcast(padded_[i][j]);
-                s[i] = Operand{c, c} * power[0];
-            }
-            for (std::size_t t = 1; t < terms; ++t)
-                for (int i = 0; i < 3; ++i) {
-                    const Vec c = broadcast(padded_[i][j + n * t]);
-                    s[i] = s[i] + Operand{c, c} * power[t];
-                }
-            for (int i = 0; i < 3; ++i) store(values_[i] + 8 * j, montgomery(reduce_long(s[i]), f));  // < 2P
-            f = reduce(montgomery(f, v), kP);
+        for (std::size_t t = 0; t < terms_; ++t, y = reduce(montgomery(y, big), kP)) {
+            store(powers_ + 16 * t, y);
+            store(powers_ + 16 * t + 8, _mm256_srli_epi64(y, 32));
         }
     }
 
-    // In place, vectors of n lanes: the transform of length n (decimation in frequency, outputs
-    // in bit-reversed order), values < 2P.
-    void transform(u32* c, std::size_t n) const {
+    template <int K>
+    void evaluate(const int (&which)[K], detail::Vec v) {
         using namespace detail;
+        const std::size_t n = points(), terms = terms_;
+        Vec f = broadcast(kR);  // v^j 2^32
+        for (std::size_t j = 0; j < n; ++j) {
+            Vec total[K];
+            for (int i = 0; i < K; ++i) total[i] = _mm256_setzero_si256();
+            for (std::size_t t0 = 0; t0 < terms; t0 += 16) {  // 64-bit sums below 16 P^2
+                const std::size_t t1 = std::min(terms, t0 + 16);
+                Sum s[K];
+                for (int i = 0; i < K; ++i) s[i] = {_mm256_setzero_si256(), _mm256_setzero_si256()};
+#pragma GCC unroll 4
+                for (std::size_t t = t0; t < t1; ++t) {
+                    const Operand power{load(powers_ + 16 * t), load(powers_ + 16 * t + 8)};
+                    for (int i = 0; i < K; ++i) {
+                        const Vec c = broadcast(rows_[which[i]][j * terms + t]);
+                        s[i] = s[i] + Operand{c, c} * power;
+                    }
+                }
+                for (int i = 0; i < K; ++i) total[i] = reduce(add(total[i], reduce_long(s[i])), kP);
+            }
+            for (int i = 0; i < K; ++i) store(values_[which[i]] + 8 * j, reduce(montgomery(total[i], f), kP));
+            f = reduce(montgomery(f, v), kP);
+        }
+        for (int i = 0; i < K; ++i) transform(values_[which[i]]);
+    }
+
+    // In place: the transform of length n of the lanes (outputs in bit-reversed order).
+    void transform(u32* c) const {
+        using namespace detail;
+        const std::size_t n = points();
+        if (n >= 8) return t_.forward(std::span<u32>(c, 8 * n));
         const Vec p2 = broadcast(2 * kP);
         for (std::size_t h = n / 2; h >= 1; h /= 2)
             for (std::size_t start = 0; start < n; start += 2 * h)
@@ -270,30 +317,15 @@ private:
                     store(x, reduce(add(a, b), 2 * kP));
                     store(y, times(_mm256_sub_epi32(add(a, p2), b), Factor(twiddles_[h + j], quotients_[h + j])));
                 }
+        for (std::size_t j = 0; j < n; ++j) store(c + 8 * j, reduce(load(c + 8 * j), kP));
     }
 
-    template <class Sink>
-    void scan(int group, std::size_t n, Sink& sink) const {
-        using namespace detail;
-        const unsigned valid = group == 14 ? 0x7F : 0xFF;
-        for (std::size_t j = 0; j < n; ++j) {
-            const Vec a = reduce(load(values_[0] + 8 * j), kP);
-            unsigned mask = unsigned(_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(a, _mm256_setzero_si256())))) & valid;
-            if (!mask) continue;
-            alignas(32) u32 x[8], b[8];
-            store(x, reduce(load(values_[1] + 8 * j), kP));
-            store(b, reduce(load(values_[2] + 8 * j), kP));
-            for (; mask; mask &= mask - 1) {
-                const int lane = std::countr_zero(mask);
-                sink(x[lane], b[lane]);
-            }
-        }
-    }
-
-    u32* padded_[3];
-    u32* values_[3];
-    u32 *twiddles_, *quotients_;
-    alignas(32) u32 coset_[120];
+    const poly::Transform& t_;
+    u32* rows_[kPolys];
+    u32* values_[kPolys];
+    u32 *powers_, *twiddles_, *quotients_;
+    int log_n_ = 0;
+    std::size_t terms_ = 0;
 };
 
 }  // namespace roots

@@ -64,7 +64,14 @@ def degrees(rng: random.Random, r: int) -> list[int]:
         k = rng.randint(1, 40)
         return [k] * max(1, total // k)
     if shape == 5:  # small degrees
-        return [rng.randint(0, 4) for _ in range(max(1, total // 2))]
+        d, s = [], 0
+        for _ in range(max(1, total // 2)):
+            d.append(rng.randint(0, 4))
+            s += d[-1]
+            if s > 500000:  # D <= 500000
+                d.pop()
+                break
+        return d
     return [rng.choice([0, 1, 2, 3, 5, 8, 31, 32, 33, 64, 100]) for _ in range(rng.randint(0, 40))]
 
 
@@ -94,9 +101,10 @@ def main() -> int:
             kind = rng.randrange(4)
             polys = [coefficients(rng, d, kind) for d in ds]
             text = f'{len(polys)}\n' + ''.join(f'{len(a) - 1} {" ".join(map(str, a))}\n' for a in polys)
-            got = subprocess.run([work / 'main'], input=text, capture_output=True, text=True, check=True).stdout
+            run = subprocess.run([work / 'main'], input=text, capture_output=True, text=True)
+            got = run.stdout
             tokens = got.split()
-            ok = got.endswith('\n') and len(tokens) == sum(ds) + 1
+            ok = run.returncode == 0 and got.endswith('\n') and len(tokens) == sum(ds) + 1
             if ok and sum(ds) <= 3000:
                 want = subprocess.run([work / 'brute'], input=text, capture_output=True, text=True,
                                       check=True).stdout.split()

@@ -10,10 +10,13 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
 ## Design
 
 - `lib/ntt`: one cyclic transform of length 2^lg >= N + M - 1 (2^20 at the maximum).
-  For 2^lg = 2 * 4^j >= 256 with both factors at most half the length (all large tests),
+  For 2^lg = 2 * 4^j >= 1024 with both factors at most half the length (all large tests),
   `solution.cpp` replaces the top level: one radix-8 pass per factor reads its lower half once
   and writes the first radix-4 group of both halves (no copy of the lower half, no separate
-  pass for the upper half's group); the rest is `lib/ntt`'s recursion and kernels.
+  pass for the upper half's group). Below it, `lib/ntt`'s recursion and kernels (copied as
+  `Subtrees`) except the bottom stage, which comes from `bottom.hpp` (`gen_bottom.py`, built on
+  `lib/ntt/gen_kernels.py`): two groups per inlined asm statement, leaf weights taken from the
+  group's own twiddles (no weight array), leaf products with each coefficient of B broadcast once.
 - `lib/io` for input: `io::read_bulk` (`lib/io/bulk32.hpp`, the transposed parser on Zen 3)
   straight into the transform buffers.
 - Output: `fields.hpp`, every value in a 10-byte field (judge-specific; the checker compares
@@ -162,6 +165,38 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
     the 21 and 20 ms cases (fft_killer_01, all_same_01; fft_killer_03, all_same_02) are launch
     spikes. Large cases without spikes: 3 and 1 at 13 ms, the rest 9-12 (409226: 7 at 13 ms).
     Best judged stays 13 ms (409226).
-- Next: the bottom stage (31% of the transform, ~68% of its slot bound) is the largest
-  inefficiency left; its leaf products need 20 multiplies per leaf on 2 pipes. The formatter is
-  at 34 cycles per 16 values whatever the instruction order.
+- 2026-10-10, claude (round 4). `lc-amd`, GCC 15.2 image, judge flags. Scratch probes, not
+  committed. Bottom stage in isolation: one 256-vector tile, groups from k = 4096, cycles per group
+  (median of 41 interleaved rounds; the VM is shared, so only same-run comparisons count).
+  - Zen 3 probes (independent ops, cycles per pattern): loads, `vbroadcastss` and `vpbroadcastd`
+    from memory 2 per cycle, none takes a vector ALU slot (12 `vpaddd` + 4 broadcasts: 3.0);
+    stores 1 per cycle and no ALU slot (11 `vpaddd` + 1 store: 2.73); multiplies and shifts on
+    disjoint pipe pairs (8 + 8: 4.0); mixes of ALU ops and loads reach 5-6 ops per cycle. Strict
+    alternation of `vpmuludq` and `vpaddd` costs 25% (mama...: 5.06 per 16 against 4.0), pairs
+    (mmaa) cost nothing. This corrects round 3's "stores take a slot".
+  - What does not limit `bottom_both` (145): the front end (1 or 3 extra prefix bytes per
+    instruction: 146, 144.5), memory dependences (windows from a never-written buffer: 145; read
+    two calls after they are written: 149), op order within a modeled cycle (class-sorted: 145-147),
+    stores (removed: 144). Multiplies replaced by adds: 129.5; broadcasts by 32-byte loads: 157.
+    A toy out-of-order model (64-entry scheduler) matches `forward` (30 vs 29.3 per iteration) but
+    predicts 108 for `bottom_both`. Part of the gap is the call: the kernel is an out-of-line
+    function with 10 arguments (4 on the stack) and `leaf_weights` stores 8 words per call. Same
+    pointers every call: 129; no `leaf_weights`: 138; fixed table pointers: 138.
+  - Kept, `bottom.hpp` from `gen_bottom.py` (cumulative, cycles per group): leaf products with
+    each b_j broadcast once and the windows as memory operands (553 -> 485 instructions per group)
+    141; no weight array (w = y, -y, z, -z are the group's own twiddles; the windows of t = 1, 3
+    hold P - canonical(y A_t)) 135; `always_inline` 131.5; two groups per statement 126-127 (-13%).
+    Four groups per statement (3881 instructions): 137-140. Prefetching the table 8 or 16 groups
+    ahead: +2-3. Weights computed two calls ahead: 144 (no gain). Product now needs lg >= 10, so
+    tiles have at least 16 vectors and start at even groups; lg = 8 uses `ntt::Convolution`.
+  - Lost: `lib/ntt` `forward` with 4 butterflies per iteration (generator windows 16-24):
+    30.6-31.6 against 29.35 cycles per iteration (h = 1024). Knob sweep of the two-group
+    statement: not resolvable, the VM was busy (base 145 measured as 222).
+  - `judge.py bench`, 31 rounds, slowest 3 cases: 13.33 -> 13.19 ms, ratio 0.9856.
+  - Checks: 53/53 official tests, stress 500 rounds (pipe input), ASan/UBSan on 13 official cases
+    (file and pipe input). `bottom.hpp`'s asm equals the benchmarked variant.
+- Next: the formatter is at 34 cycles per 16 values whatever the instruction order; `forward` at
+  29.3 cycles per iteration against a 24.5 slot bound; `forward_pair` and `inverse` at h = 4
+  are out-of-line calls of 2-4 iterations (0.31 and 0.15 ms against 0.275 and 0.135 at large h).
+  Page-aligned text with page-multiple blocks (lib/io/notes.md: d = 0 is 1-2.5% faster in
+  `write(2)`) needs a block-size change in the shared `fields.hpp`.

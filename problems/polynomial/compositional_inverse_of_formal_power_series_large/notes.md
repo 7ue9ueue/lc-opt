@@ -4,7 +4,7 @@ N <= 131072 coefficients of f (f[0] = 0, f[1] != 0) mod 998244353; print g with 
 10 s. Slowest tests: max_random (5), max_identity, random_00 (N = 131072 or near). mid: N <= 8000;
 small_degree: N <= 11.
 
-Best judged: none yet.
+Best judged: ours, 47 ms (clean 37): [409541](https://judge.yosupo.jp/submission/409541), #258's `main.cpp`.
 Record when opened (issue #87): 93 ms.
 
 ## Design
@@ -13,8 +13,9 @@ Record when opened (issue #87): 93 ms.
   = k [x^(N-1-k)] (x / g)^(N-1). Power projection gives a[k] = [x^(N-1)] f^k; H = (x / g)^(N-1) /
   (N - 1) by one division by index; g / x = (H / H[0])^(-1 / (N-1)) / f[1] by `poly::power`.
   `lib/poly/compositional_inverse.hpp`, `lib/poly/projection.hpp`; design in lib/poly/notes.md.
-- m = 2^17 for N = 131072: 17 levels; levels 0 and 1 one-dimensional in x, 2 .. 14 bivariate
-  (transforms of length 4m = 2^19), 15 and 16 one-dimensional in y. Forward only: two arrays of 4m.
+- m = 2^17 for N = 131072: 17 levels; levels 0 and 1 one-dimensional in x, 2 .. 13 bivariate
+  (transforms of length 4m = 2^19), 14, 15 and 16 one-dimensional in y. Forward only: two arrays
+  of 4m and a work span of ~2m.
 - Input by `lib/io/bulk32.hpp`; output in fixed-width fields
   (`problems/convolution/convolution_mod/fields.hpp`, judge-specific: the checker compares tokens),
   its text in f's span after the inverse. One `poly::Arena` (huge pages). `lib/run/early.hpp`.
@@ -37,7 +38,17 @@ and 16 1.88; division by index 0.16; power at N - 1 4.56.
   `RUN_EARLY`; lib/poly unchanged. 28/28 official tests (`judge.py test`, `lc-amd`, slowest
   37.0 ms); `stress.py` 300 rounds (`lc-intel`): brute force up to N = 400, and for N up to 131072
   series with known inverses (a x / (1 - b x), x - c x^2, log(1 + x), x e^-x). A mutation that
-  changes one output coefficient for N > 1000 fails it.
+  changes one output coefficient for N > 1000 fails it. Merged as #258.
+- Submitted #258's `main.cpp`: [409541](https://judge.yosupo.jp/submission/409541) AC 47 ms,
+  9.9 MiB: max_random_01 47 and max_random_03 46 ms, the other large cases 36-37: two launch
+  spikes, clean 37 ms (`tools/spikes.py` had no earlier run to compare with).
+- lib/poly/projection.hpp (this round, lib/poly composition and owner lanes): level T - 3
+  one-dimensional in y (as composition's), level 1's coefficient loops in AVX2, no zero fills of
+  the row halves the pruned forwards do not read. In process (`phases.cpp`): 34.5 -> 32.3 ms;
+  levels 0 and 1 2.01 -> 1.75, levels T - 3 .. T - 1 ~4.2 -> 2.7 (columns 0.06, 14 forwards at
+  m/4 0.38, Q' products 0.26, P' products 0.59; then 6 forwards at m/2 0.37, products at m/2
+  0.45, the product at m 0.58). `judge.py bench` (21 rounds, against #258): `lc-amd` 0.9466
+  (36.89 -> 34.92 ms), `lc-intel` 0.9607. 28/28 official tests; `stress.py` 400 rounds.
 
 ## Sources
 

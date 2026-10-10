@@ -4,7 +4,8 @@ f(p_i) mod 998244353 for f of N <= 2^17 coefficients and M <= 2^17 points. 10 s.
 max_random_* and issue_1287_cpp_* (N = M = 2^17; issue_1287 has points that are roots of f) and
 random_02 (N, M near 2^17).
 
-Best judged: none yet.
+Best judged: ours, 15 ms: [409516](https://judge.yosupo.jp/submission/409516) (`main.cpp` of #231),
+clean score 15 ms (`tools/spikes.py`: no launch spike).
 Record when opened (issue #75): 39 ms.
 
 ## Design
@@ -47,7 +48,10 @@ issue_1287_cpp_00, random_02.
   - CI of #231: product_of_polynomial_sequence (re-bundled for product_tree.hpp; `.text` and
     `.rodata` byte-identical, `lc-intel`) timed 1.0019 (1.0065, 1.0014, 0.9977), then 1.0011
     (1.0023, 1.0055, 0.9956): noise failed the verdict twice; later commits went into the same
-    pull request.
+    pull request. Merged as #231; last CI: product_of_polynomial_sequence 0.9992 (0.9956, 1.0022,
+    0.9999); multipoint_evaluation 11/11 on each machine, slowest 13.0-16.7 ms.
+  - Submitted the merged `main.cpp` (#231): [409516](https://judge.yosupo.jp/submission/409516)
+    AC 15 ms, 28.8 MiB; clean score 15 ms. Record when opened 39 ms.
   - Next: the trees' scratch shared (~1 huge page; needs ProductTree's split points kept apart);
     the conversions between the top tree's standard transforms and the lanes in the transform
     domain (3 butterfly levels inside leaves and 8 x 8 transposes instead of transforms of

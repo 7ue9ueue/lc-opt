@@ -44,6 +44,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [product_of_polynomial_sequence](problems/polynomial/product_of_polynomial_sequence) | [29 ms](https://judge.yosupo.jp/submission/409448) | 82 ms |
 | [multipoint_evaluation_on_geometric_sequence](problems/polynomial/multipoint_evaluation_on_geometric_sequence) | [10 ms](https://judge.yosupo.jp/submission/409475) | 34 ms |
 | [polynomial_interpolation_on_geometric_sequence](problems/polynomial/polynomial_interpolation_on_geometric_sequence) | [15 ms](https://judge.yosupo.jp/submission/409510) | 90 ms |
+| [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |
 
 Times are the judge's, for the slowest test, checked against the judge's API on 2026-10-10.
 Each time links to its submission.

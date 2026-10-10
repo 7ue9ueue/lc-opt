@@ -4,7 +4,8 @@ The b_i with f = sum_i b_i prod_(j < i) (x - p_j) mod 998244353 for f of N <= 2^
 and points p_0 .. p_(N-1) (repeats allowed). 10 s. Slowest tests: max_random_* (N = 2^17), then
 random_01 (N = 101656) and random_00 (N = 94808).
 
-Best judged: none yet.
+Best judged: ours, 13 ms: [409606](https://judge.yosupo.jp/submission/409606) (`main.cpp` of #292),
+clean score 13 ms (`tools/spikes.py`: no launch spike).
 Record when opened (issue #84): 142 ms.
 
 ## Design
@@ -44,6 +45,10 @@ parsing): 1.55 ms.
     descent 3.9 (top tree 1.3, lanes 2.6 of which bases 0.54), output order 0.07. Profile
     (`lc-intel`, perf): transforms ~55%, leaf products 6%, page zeroing 5% (11% before the
     memory change).
+  - Merged as #292. CI: 15/15 on each machine, slowest 10.1-14.5 ms; the four re-bundled
+    problems (`.text` identical) timed 1.0006 first (noise: verdict failed), 0.9995 on rerun.
+  - Submitted the merged `main.cpp`: [409606](https://judge.yosupo.jp/submission/409606) AC 13 ms,
+    16.0 MiB; clean score 13 ms. Record when opened 142 ms.
   - Next: a division that keeps T(q0) for the root's right child (~0.07 ms, estimate); the
     blocked division (B = 4, ~0.1 ms); the top tree's leaves from the lane root's transform
     (~0.1 ms); the division's scratch partly in the tree's stack region (fewer huge pages).

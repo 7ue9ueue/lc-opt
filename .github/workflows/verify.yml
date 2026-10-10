@@ -75,8 +75,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Bundled main.cpp files match their solution.cpp
         run: python3 tools/bundle.py --check
-      - name: Generated NTT kernels match their generator
-        run: python3 lib/ntt/gen_kernels.py --check
+      - name: Generated kernels match their generators
+        run: for g in lib/*/gen_kernels.py; do python3 "$g" --check; done
       - name: Library tests, judge flags and ASan/UBSan
         run: |
           image=$(cd tools && python3 -c 'import judge; print(judge.IMAGE)')

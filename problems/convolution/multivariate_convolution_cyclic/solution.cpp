@@ -2,7 +2,7 @@
 // Short axes: a direct DFT over F_p along the axis (roots of order n_i exist since n_i | p - 1).
 // Long axes: regrouped into the fewest cyclic factors D_r (Chinese remainder theorem); for each
 // point of the short axes' spectrum, the exact product over Z by Kronecker substitution (factor
-// r padded to 2 D_r - 1), modulo three NTT primes (transform.hpp), the CRT straight to residues
+// r padded to 2 D_r - 1), modulo three NTT primes (lib/multimod), the CRT straight to residues
 // mod p, then folded back to cyclic.
 #include <sys/mman.h>
 #include <unistd.h>
@@ -13,16 +13,16 @@
 
 #include "lib/io/io.hpp"
 #include "fields.hpp"
-#include "transform.hpp"
+#include "lib/multimod/transform.hpp"
 
 namespace {
 
 using multimod::Vec;
-using multimod::detail::add;
-using multimod::detail::broadcast;
-using multimod::detail::Factor;
-using multimod::detail::multiply;
-using multimod::detail::reduce;
+using multimod::add;
+using multimod::broadcast;
+using multimod::Factor;
+using multimod::multiply;
+using multimod::reduce;
 
 #ifdef SHORT_LIMIT
 constexpr std::size_t kShortLimit = SHORT_LIMIT;  // test hook
@@ -467,8 +467,8 @@ private:
     void products(const std::uint32_t* x, const std::uint32_t* y, std::size_t count, std::uint32_t* last_work) {
         const multimod::Transform transform(lg_, tables_);
         for (int k = 0; k < kPrimes; ++k)
-            transform.multiply(x, count, y, count, residues_[k], k + 1 < kPrimes ? residues_[kPrimes - 1] : last_work,
-                               moduli_[k], kCrtScale[k]);
+            transform.multiply(multimod::Bounded{x, count}, multimod::Bounded{y, count}, residues_[k],
+                               k + 1 < kPrimes ? residues_[kPrimes - 1] : last_work, moduli_[k], kCrtScale[k]);
     }
 
     // visit(offset in f, place in the Kronecker array) for every point of the long axes, axis 0

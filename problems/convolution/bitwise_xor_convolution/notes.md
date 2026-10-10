@@ -130,7 +130,8 @@ faults), columns a 0.59, columns b 1.05, inverse rows 0.75, print 4.63, exit 0.9
   250 KB (63 page faults), and blocks are 60 pages (`lib/io/notes.md`). `judge.py bench`,
   `lc-amd`, slowest 3 cases: 31 rounds 14.70 → 14.61 ms (0.998); 41 rounds with a copy of main as
   control: 0.991, control 0.995. Outputs byte-identical to main on all 13 tests (judge build,
-  ASan/UBSan, pipe input).
+  ASan/UBSan, pipe input). PR #187 merged; CI 0.9810 (EPYC 9V74 0.981, EPYC 9V45 0.982,
+  EPYC 7763 0.980). Not submitted (best judged 14 ms; the gain is ~0.1 ms).
 
 ## Next
 

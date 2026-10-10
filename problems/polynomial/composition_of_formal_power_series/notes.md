@@ -75,9 +75,13 @@ score = slowest of max_random_00, max_random_03, hack_02, random_04): read and w
   bodies with a stride separate from the count). compose in process 0.923; in the bundle the
   first call 1518 -> 1398 us; whole process (`judge.py bench`) 0.9637 on `lc-amd` (2.78 -> 2.67
   ms, 31 rounds), 0.9261 on `lc-intel`. Merged as #232 (CI 0.9362 for this problem).
-- Next: level 1 one-dimensional (Y = 2, ~50 us estimate); the bottoms (`leaf_graeffe` 7%,
-  `CompositionBottom` 15% of a `lc-intel` profile); always inlining their leaf functions was
-  2.3% slower whole process.
+- 2026-10-10, claude (composition_of_formal_power_series_large round 1, lib/poly owner lane):
+  the bottoms in power projection's leaf-sum form, levels 1 and T - 3 one-dimensional
+  (lib/poly/notes.md, Composition; steps in composition_of_formal_power_series_large/notes.md).
+  m is now at least 256. compose in process (`lc-amd`, median of 20): 1342 -> 1150 us, first
+  call ~1450 -> ~1220. Whole process (`judge.py bench`, 21 rounds): `lc-amd` 0.9275 (2.66 ->
+  2.46 ms), `lc-intel` 0.9631. PR #242.
+- Next: level T - 4 one-dimensional; the y levels by doubling (composition_of_formal_power_series_large/notes.md).
 
 ## Sources
 

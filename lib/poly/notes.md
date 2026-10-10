@@ -310,7 +310,8 @@ history is saved.
 ## Composition
 
 h = f(g) mod x^n, g[0] = 0, as the transpose of power projection (Kinoshita and Li, Sources).
-m = 2^T >= max(n, 128); n <= 32 by Horner's rule.
+m = 2^T >= max(n, 256) (level 1's inverses at m need tiles of 16 vectors); n <= 32 by Horner's
+rule.
 - Levels: Q_0 = 1 - y g(x), Q_(s+1)(x^2, y) = Q_s(x, y) Q_s(-x, y) mod x^L, L = m / 2^s, Y = 2^s
   the y degree; Q_s(x, 0) = Q_s(0, y) = 1. Power projection maps w to ([x^(m-1)] w g^i)_i by
   P_(s+1) = odd part of P_s Q_s(-x); composition applies its transpose to f: P_s from P_(s+1)
@@ -324,17 +325,37 @@ m = 2^T >= max(n, 128); n <= 32 by Horner's rule.
   the stored level; leaves 2p, 2p + 1 (moduli z^8 -+ s, s = r[p], s^2 = w_p) give V =
   Q_s(x) Q_s(-x) mod (u^8 - w_p), u = z^2, as the CRT of a(z) a(-z) = e(u)^2 - u o(u)^2 mod
   (u^4 - s) and the same for b: 20 products per leaf instead of a 64-product leaf product, 8
-  pairs per step in transposed form (one pair per lane). Then the inverse of V at 2m and the
-  next layout (truncate x, unwrap row 2Y).
+  pairs per step in transposed form (one pair per lane), with power projection's leaf sums
+  (`graeffe_leaf`: s c_k for k >= 4 by 4 Shoup products, then each output one sum and one
+  reduction, even lanes then odd lanes). V comes out as twice the CRT times 2^-32 (`combine_pairs`);
+  `graeffe_scale` folds 2^31 into its inverse's scale. Then the inverse of V at 2m and the next
+  layout (truncate x, unwrap row 2Y; the x >= L/2 halves are left as they are, the pruned
+  forward does not read them).
 - Backward pass: with P_(s+1) reversed in x and y (layout stride L), the middle product is the
   plain product R = P(z^2) Q_s(-z) mod (z^4m - 1); rows Y .. 2Y - 1 of R, x below L, are P_s
   reversed, the next input at once (the reversals cancel). `CompositionBottom`: P(z^2) mod
   (z^8 -+ s) = lo +- s hi from P's leaf p at 2m, 4 terms, so leaf products of 4 by 8; 8 pairs per
-  step transposed, s folded into the wrapped operands. Per generic level: transform of P at 2m,
-  inverse at 4m with this bottom (upper half).
-- One-dimensional levels: 0 (Graeffe of g at 2m; h = p1(x^2) - p0(x^2) g(-x) with the same
-  bottom at 2m, lower half), T - 1 (Q = 1 + x q(y): one cyclic product of length m) and T - 2
-  (Q = 1 + x q1 + x^2 q2 + x^3 q3: four products of length m/2; q of level T - 1 = 2 q2 - q1^2).
+  step transposed, s folded into the wrapped operands. Each output coefficient is one sum of 4
+  products over one parity of lanes (the odd ones negated from 4 P^2) and one reduction. Per
+  generic level: transform of P at 2m, inverse at 4m with this bottom (upper half).
+- One-dimensional levels:
+  - 0: Graeffe of g at 2m; h = p1(x^2) - p0(x^2) g(-x) with the same bottom at 2m, lower half.
+  - 1 (`first_level`, Q_1 = 1 + y q1 + y^2 q2): the transforms of q1, q2 at m are the stored
+    level; `FirstLevelProducts` (shared with power projection) gives G(q1), G(q2), E(q1, q2),
+    inverses at m/2. Backward (`first_level_transposed`): rows 2, 3 of R are
+    P2(x^2) + P1(x^2) q1(-x) + P0(x^2) q2(-x) and P3 + P2 q1 + P1 q2 the same way: transforms of
+    P0 .. P2 at m/2, two inverses at m with `CompositionSumBottom` (two CompositionBottom terms).
+  - T - 3 (`third_last_level`, Q = sum_(k < 8) x^k q_k(y), deg q_k <= m/8): the transforms of
+    c_k = (-1)^k q_k at m/4 are the stored level; Q_(T-2) by 6 products (c1^2, c2^2, c1 c3, c3^2,
+    c1 c5, c2 c4) in 3 inverses at m/4; the wraps land on y^0, which is zero. Backward: the 8
+    columns of R are sums of P_j c_k over 2j + k = c (16 products, up to 4 per column) in 7
+    inverses at m/4 (upper half), from the transforms of P0 .. P3.
+  - T - 2 (Q = 1 + x q1 + x^2 q2 + x^3 q3: four products of length m/2; q of level T - 1 =
+    2 q2 - q1^2) and T - 1 (Q = 1 + x q(y): one cyclic product of length m).
+  Per level at m = 2^17 (`lc-amd`, µs, forward + backward): generic level 1 ~2440, 1-D 1540;
+  generic level T - 3 with its share of the last levels ~2170 (forward) + ~1150 (backward),
+  1-D ~1270 + ~760. A 1-D level T - 4 (16 columns: 28 products forward, 64 backward) is
+  estimated at ~0.5 ms better than generic; not built.
 - Pruned transforms (`Pruned`, `forward_pruned`, `inverse_pruned`; shared with power
   projection). A row of a Kronecker layout holds x below half the stride, so one vector bit b of
   the index is zero in the input (or unused in the output). The levels above b act on columns
@@ -343,14 +364,18 @@ m = 2^T >= max(n, 128); n <= 32 by Horner's rule.
   levels run `kernels.hpp`'s column loops: lib/ntt's radix-4 loop bodies (same schedule), the
   stride separate from the count, chunks of width columns (width 1: every other column). In
   composition, per level s: the forward of Q_s at 4m (b = T - s - 3), the inverse of V at 2m
-  (x < L/2 kept: b = T - s - 4), the forward of P at 2m (b = T - s - 4; not at s = T - 3, whose
-  rows are 8 words) and the inverse of R at 4m (upper half, x < L kept: b = T - s - 3).
+  (x < L/2 kept: b = T - s - 4), the forward of P at 2m (b = T - s - 4) and the inverse of R at
+  4m (upper half, x < L kept: b = T - s - 3).
 - Costs at m = 8192 (`lc-amd`, in process, µs): per generic level forward 48 (plain transform
   of 4m: 27) + 13 (inverse of 2m), backward 13 + 50 (plain inverse of 4m: 27); compose 1460.
   Pruned: compose 1445 -> 1332 (0.923); in the bundle, the first call 1518 -> 1398, a second
-  1452 -> 1344.
-- Memory: level s keeps its transform of 4m words (levels 0, T - 2, T - 1 less); 2 work spans of
-  4m. compose_scratch(8000) = 504200 words.
+  1452 -> 1344. With the leaf sums and levels 1 and T - 3 one-dimensional (#86): 1342 -> 1150.
+- Costs at m = 2^17 (`lc-amd`, in process, ms): compose 29.97 (was 34.0). Generic levels
+  2 .. T - 4, per level: forward of Q_s with the Graeffe bottom 0.76 (the bottom ~0.25), inverse
+  of V 0.23; forward of P 0.24, inverse of R with the product bottom 0.79 (the bottom ~0.30).
+  Levels 0: 0.60 + 0.68; 1: 0.73 + 0.81; T - 3: 0.51 + 0.75; T - 2 and T - 1: 0.61 + 0.94.
+- Memory: level s keeps its transform of 4m words (levels 0, 1, T - 3, T - 2, T - 1 less); 2
+  work spans of 4m.
 - For power projection (#68, #86, #87): the forward pass is the same; P_(s+1) = odd part of
   P_s Q_s(-x) is, per leaf pair, the CRT of the odd parts of a_P(z) a_Q(-z) and b_P(z) b_Q(-z),
   so the same pair structure fits a forward-only pass with P's transform at 4m per level.
@@ -968,6 +993,26 @@ products 1.77 and 1.69).
   log 0.9981, multipoint_evaluation_on_geometric_sequence 0.9964, pow 0.9998,
   product_of_polynomial_sequence 0.9959, sqrt 0.9936; all 9 0.9892. Not submitted: no problem
   gained 1 ms on `lc-amd` (composition 0.11 ms).
+
+2026-10-10, claude (issue #86, composition_of_formal_power_series_large; owner lane):
+- composition.hpp: `LevelBottom` and `CompositionBottom` in power projection's leaf-sum form
+  (the helpers moved from projection.hpp to composition.hpp, unchanged: `graeffe_sums`,
+  `product_sums`, `load_leaves`, `scaled_leaves`, `combine_pairs`, `PairWeights`,
+  `FirstLevelProducts`, the latter now also without the numerator). `Tables` lost its s 2^32 and
+  s^-1 2^63 arrays (PairWeights reads the twiddle tables). V comes out times 2^-31:
+  `graeffe_scale`. Levels 1 and T - 3 one-dimensional; m >= 256. Composition above has the
+  design and costs.
+- Instruction counts per 8 pairs (GCC 15, znver3): Graeffe 935 -> 684 (stack accesses 222 ->
+  111), product 1070 -> 893 (375 -> 247). In process at m = 2^17: Graeffe bottom ~350 -> ~250 µs
+  per level, product ~370 -> ~300.
+- transform.hpp unchanged: level T - 3's backward needs a sum of 4 products; a `case 4` in
+  `Transform::inverse_product_sum` instantiates the 4-pair bottom in every program that uses it
+  (compositional_inverse: 0.9974 against 0.9936 without it, 31 rounds, noise-level), so
+  composition.hpp has its own `inverse_product_sum<K>` on its tables.
+- `judge.py bench` (21 rounds, new/main), `lc-amd` (`lc-intel`):
+  composition_of_formal_power_series_large 0.8973 (0.9219), composition_of_formal_power_series
+  0.9275 (0.9631), compositional_inverse_of_formal_power_series 0.9974 (0.9895). PR #242. All official tests pass (`judge.py test`); `test.cpp` passes at -O2 (x86-64-v3 and
+  native) and ASan/UBSan (`lc-intel`); both composition `stress.py` 400 rounds.
 
 ## Sources
 

@@ -351,12 +351,12 @@ files on tmpfs.
 from convolution_mod's `read_values` (its notes, round 5, have the design measurements). New: an
 early return for count 0, and no `read_bulk` call when the fixed path took every token.
 `io.hpp`, `bulk32.hpp` and `bulk64.hpp` are unchanged.
-- Bug found by CI's ASan run (EPYC 9V74, so `read_bulk` is `Reader::read`): the copy called
-  `read_bulk(in, dst + done, 0)` when the fixed path took every token. `Reader::read` skips
+- Bug found by CI's ASan run (a runner without Zen 3, so `read_bulk` is `Reader::read`): the copy
+  called `read_bulk(in, dst + done, 0)` when the fixed path took every token. `Reader::read` skips
   whitespace before its first token even for count 0; at the end of the input it scans past the
   buffer (heap overflow with pipe input in `test_bulk_at_end`). The transposed parser (Zen 3) did
-  not, so `lc-amd` passed. convolution_mod's `main.cpp` on main had the same call; its official
-  inputs end with a newline and it passed, but it read past its input on non-Zen 3 CPUs.
+  not, so `lc-amd` passed. convolution_mod's `main.cpp` on main had the same call and passed its
+  official tests on CI's other CPUs; a guess: the scan ran on through zero memory there.
 - Users: convolution_mod (moved) and convolution_mod_large (was `io::read_bulk`; 13 of its 21
   large inputs have 9-digit tokens, all_same_00 1-digit ones).
 - convolution_mod_large per case, `lc-bench` (EPYC 7B13), medians of 7 interleaved runs (ms),

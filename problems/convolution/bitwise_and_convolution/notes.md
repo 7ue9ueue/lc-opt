@@ -18,12 +18,17 @@ Next other user: 26 ms (adamant, 400554).
   `Reader::read` call; each band starts 256 words (16 lines) after the previous one ends, so the 16
   rows of a and b spread over 4 groups of L1 sets. Each row is transformed over its own 17 bits
   after its band is parsed; one column pass then does the 3 row bits of a and b, the product and
-  the inverse row bits; each row then gets its inverse 17 bits and is printed with
-  `../convolution_mod/fields.hpp`, its text in b (dead by then).
+  the inverse row bits; each row then gets its inverse 17 bits. Output with
+  `../convolution_mod/fields.hpp`, its text in b (dead by then): per band, whole 25600-value blocks
+  as rows finish and the rest at the band's end, so no write goes through the Writer's buffer.
 - Inside a row: pieces of 2^12 values (16 KiB, L1), then the row's upper bits. The lane bits use a
-  transpose: per 8-vector tile, radix-8 over the vector bits, 8x8 transpose, radix-8 over the former
-  lane bits. Forward tiles stay transposed (the product does not care); the inverse restores them.
-  Sweeps do not store the last vector of a group (all bits set: no level changes it).
+  transpose: per piece, a radix-8 sweep over the 3 lowest vector bits, then per 8-vector tile an
+  8x8 transpose and radix-8 over the former lane bits. The transpose's 128-bit stage is done by the
+  loads (128-bit broadcasts and blends; shuffles run on 2 of Zen 3's 4 vector pipes). Forward tiles
+  stay transposed (the product does not care); the inverse restores them. The forward pass
+  prefetches the next piece (fresh from the parser, in L3). Sweeps do not store the last vector of
+  a group (all bits set: no level changes it).
+- The input mapping is advised `MADV_SEQUENTIAL`: its `munmap` then skips marking pages accessed.
 - Shorter inputs are padded with zeros to 2^6 values; zeros do not change c_k for k < 2^N.
 - Memory: a and b in one mapping, 4 huge pages (`MADV_HUGEPAGE`) and one 4 KiB page below them
   for the 4 KiB beyond 8 MiB.
@@ -180,6 +185,45 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
     in lib/io); the upper 5 row bits in the column pass (8 bits per column block, in an L1
     scratch) instead of L2 sweeps: at most ~0.15 ms (a guess), and it needs a layout skewed per
     piece, which costs many `read_bulk` calls.
+- 2026-10-10, claude, round 4 (`agent/bitwise_and_convolution-r4`). Judge flags and image;
+  builds on `lc-amd`, timing on `lc-bench` (EPYC 7B13, idle). "wall" is fork to exit with the
+  output unlinked first, interleaved runs on max_random_01, median of paired ratios; phases are
+  in-process stamps. Sources, scripts, raw numbers: `lc-opt-explore/bitwise_and_convolution/r4/`.
+  - Judge: 409430 scored max_random_00/01/02 at 11/12/11 ms, so ~0.2 ms could make 11.
+  - Kept, input and output: `madvise(MADV_SEQUENTIAL)` on the input mapping (from
+    `Reader::scan().cur`; `munmap` 0.674 → 0.635 ms), and printing per band in whole 25600-value
+    blocks (each row used to end with 3072 values, 30 KB, copied into the Writer's stack buffer
+    and flushed by the next block). Both: wall 0.9824 (61 runs); `judge.py bench` 0.9939 (31).
+  - Kernel costs in core cycles per 8 vectors (microbenchmark `xb.cpp`): radix-8 sweep in L1 9.4
+    (ALU bound 9); tile (levels, transpose, levels) 32.0 (bound 24); upper sweeps of a row in L2
+    21.9 (ALU 15); column pass 76 per column warm (bound 57), 134 from memory.
+  - Zen 3 pipes: every timing fits "shuffles on 2 pipes, other ops split evenly over 4": tile
+    (24 + 72 / 2) / 2 = 30 (32.0); transpose + levels (24 + 36 / 2) / 2 = 21 (19.5-20.1).
+  - Tile variants (`xt.cpp`, piece in L1, forward / inverse): one pass 32.0 / 32.5; sweep at
+    stride 1 then transpose + levels 29.4 / 27.6; one pass software-pipelined over 2 tiles 33.0 /
+    33.2; 128-bit stage by `vinserti128` loads 28.9 / 28.0; by 128-bit broadcasts and `vpblendd`
+    27.6 / 27.3. Kept the last.
+  - In the program the two-pass tiles first lost: forward rows 0.803 vs 0.749 ms (0.746 vs 0.738
+    in a second run). The forward's first pass over a piece reads it from L3 (just parsed); a
+    9.4-cycle sweep cannot hide that, the 32-cycle tile could. Prefetching the next piece during
+    the transpose pass: 0.711 / 0.707 (T0 / T1 hint) vs 0.738-0.753. The inverse (pieces in L2
+    after its upper sweeps): 0.393-0.403 vs 0.397-0.402 with or without prefetch; prefetch kept
+    for the forward only.
+  - Column pass software-pipelined (forward levels of column j + 1 beside the product of column
+    j, through an L1 buffer): 73.5 vs 77.9 cycles per column in `xc.cpp`, but 0.398 vs 0.364 ms in
+    the program. Dropped.
+  - Upper sweeps: one radix-32 pass through a 1 KiB L1 scratch (32 vectors 16 KiB apart): 10x
+    slower (all in one L1 set). Software prefetch 8-64 vectors ahead: 25.2-27.6 vs 23.7. Dropped.
+  - S8, every 2^12 piece skewed by a cache line and all 8 bits above the piece in the column
+    pass through an L1 scratch (no upper row sweeps; pieces moved to the skewed layout by the
+    forward piece pass): byte-identical output, but transforms 1.574 vs 1.509 ms: column pass
+    0.77 ms. Per unit (TSC): gathers fill 64-byte lines for 32 bytes each (even units also miss
+    L3), the product stage spills. With the top radix fused into the product: same; with
+    prefetch of the next unit's lines: 0.81. Dropped.
+  - Final (`main.cpp` of this round) against round 3's: `judge.py bench`, 41 rounds, slowest 3
+    cases: 11.90 → 11.83 ms (0.9902). Checks: 13/13 official tests; `stress.py` 120 rounds; tokens
+    equal to round 3's output on the 13 official and 57 generated inputs (N = 0..20), file and
+    pipe, also with ASan/UBSan.
 
 ## Sources
 
@@ -190,4 +234,5 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
 - Barrett reduction: P. Barrett, "Implementing the Rivest Shamir and Adleman public key encryption
   algorithm on a standard digital signal processor", CRYPTO '86. Shift and error bound derived here.
 - `.preinit_array` start: taken from `../convolution_mod/solution.cpp`.
-- 8x8 transpose of 32-bit lanes with unpack/permute2x128: the common AVX2 idiom.
+- 8x8 transpose of 32-bit lanes with unpack/permute2x128: the common AVX2 idiom. The 128-bit stage
+  by broadcast loads and blends: derived here (round 4), as `fields.hpp` loads its value pairs.

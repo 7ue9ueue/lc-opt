@@ -4,8 +4,9 @@ N <= 500000 coefficients of f mod 998244353, f[0] = 1; print the first N coeffic
 10 s. Largest tests: max_* and random_01/03 (N close to 500000; q = f'/f has up to 499999
 coefficients, transforms up to 2^19).
 
-Best judged: ours, 14 ms, no spike: [409363](https://judge.yosupo.jp/submission/409363) (`main.cpp`
-of #166). Earlier: 15 ms, [409264](https://judge.yosupo.jp/submission/409264) (#131).
+Best judged: ours, 13 ms, no spike: [409452](https://judge.yosupo.jp/submission/409452) (`main.cpp`
+of #208). Earlier: 14 ms, [409363](https://judge.yosupo.jp/submission/409363) (#166); 15 ms,
+[409264](https://judge.yosupo.jp/submission/409264) (#131).
 Record when opened (issue #64): 32 ms.
 
 ## Design
@@ -94,5 +95,12 @@ blocked division 15.26 ms. So log itself takes ~10.5 ms of 15.3.
     products of 2^17 instead of 28, inverse to 2^16 only): ~9.0 ms estimated against 8.9 now.
     Fusing the residual's inverse top level, the subtraction of d and the q product's forward
     top level into one pass: ~0.04 ms per block estimated (three passes of ~0.02-0.04 ms each).
+  - Merged as #208. CI: log 0.9760, pow 0.9853, composition 0.9709, sqrt 0.9898, inv 0.9998,
+    exp 1.0004, product_of_polynomial_sequence 1.0002, compositional_inverse 1.0052; all 8 0.9909.
+  - Submitted the merged `main.cpp` (`tools/spikes.py` for each): 409447 AC 16 ms (spike on
+    near_262144_02, 16 against peers 6; clean 13), 409449 22 ms (4 spikes, clean 13), 409450 22 ms
+    (2 spikes, clean 13), 409451 23 ms (2 spikes, clean 13),
+    [409452](https://judge.yosupo.jp/submission/409452) AC 13 ms, 14.8 MiB (5/5, no spike;
+    large cases 13 ms, against 13-14 in 409363). New best judged: 13 ms.
 - Next: the transform levels (lib/ntt's kernels) and the leaf products (~0.2 ms each at 2^18,
   11 of them) are the cost; the fused top levels above (~0.15 ms in all).

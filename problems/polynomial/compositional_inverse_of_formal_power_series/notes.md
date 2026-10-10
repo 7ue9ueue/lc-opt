@@ -4,9 +4,9 @@ N <= 8000 coefficients of f (f[0] = 0, f[1] != 0) mod 998244353; print g with f(
 10 s. Slowest tests: max_random, max_identity and most random (N = 8000 or near). Small tests
 N <= 11.
 
-Best judged: ours, 9 ms: [409373](https://judge.yosupo.jp/submission/409373) (`main.cpp` of #174),
-with a +9 ms launch spike on small_degree_02 (`tools/spikes.py`): clean score 2 ms; large cases
-2 ms. Current `main.cpp` (#178): clean 2-3 ms, every submission so far spiked (P(clean) 0.29).
+Best judged: ours, 3 ms, no spike: [409399](https://judge.yosupo.jp/submission/409399)
+(probably the `main.cpp` of #178). Current `main.cpp` (#178): clean 2-3 ms; 23 cases within 9 ms of
+the max, so P(clean run) = 0.29.
 Record when opened (issue #68): 14 ms.
 
 ## Design
@@ -89,6 +89,11 @@ g = f) 1.22 ms. main.cpp 2.70 ms (#174's 2.76).
     small_degree_00 (clean 2 ms, large cases all 2 ms); same file
     [409386](https://judge.yosupo.jp/submission/409386) AC 11 ms, spikes on random_00 and
     small_degree_08 (clean 3 ms). 4 of the session's 5 submissions used.
+- 2026-10-10, audit (claude): submissions not logged before; who submitted them is not recorded.
+  2026-10-10 03:19 UTC, after #178 and before #185 (#185 does not change this folder), so probably
+  the `main.cpp` of #178 (guess). [409398](https://judge.yosupo.jp/submission/409398) AC 9 ms, spike
+  on small_degree_02 (clean 3 ms); [409399](https://judge.yosupo.jp/submission/409399) AC 3 ms,
+  2.8 MiB, no spike. New best judged: 3 ms (was 9, 409373).
 - Next: the pruned y levels as generated asm (`lib/poly/gen_kernels.py`'s scheduler; the
   intrinsics run a radix-4 level 19% slower, and since #170 P's pruned forward only matches the
   plain one); `power` at N - 1 = 7999 (262 us, a fifth of the time; owner lane); the last levels

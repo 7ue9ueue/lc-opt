@@ -14,16 +14,17 @@ Record when opened: 29 ms (another user). Best judged: ours, 22 ms, spike-free:
 - Three NTT primes below 2^28 with 2^17 | p - 1: 268042241, 265420801, 264634369. Product
   2^83.96 > 2^19 (10^9 + 6)^2 = 2^78.8. 16P < 2^32, so values may grow to 16P between
   reductions; inputs < 10^9 + 7 < 4P are used as they are.
-- `product.hpp` (`lazy::Product`): lib/multimod's tables and recursion with ntt::Product's
-  bottom stage (two groups per kernel, no leaf weight array) and fused inverse top level, as
-  convolution_mod_2_64's `product.hpp`. Its kernels (`kernels.hpp`, from `gen_kernels.py`, which
+- `multimod::LazyProduct` (`lib/multimod/lazy_product.hpp`; this folder's `product.hpp` until
+  #156 round 3): lib/multimod's tables and recursion with ntt::Product's bottom stage (two groups
+  per kernel, no leaf weight array) and fused inverse top level, as convolution_mod_2_64's
+  `WideProduct`. Its kernels (`lib/multimod/lazy_kernels.hpp`, from `gen_lazy_kernels.py`, which
   reuses lib/ntt's graphs, scheduler and allocator) drop most reductions: forward butterflies
   take and return values < 8P (one min step on f0: 44 vector ops instead of 49), inverse ones
   < 4P (48 instead of 52), leaves are products of values <= 2P (sums < 2^61, Montgomery result
   < 3P, no final min), and the radix-8 first level reads the raw input (no narrowing). odd lg:
   C++ radix-4 top levels with the same ranges. 4P and 8P are memory operands.
 - The transform length is 2^lg >= max(2^9, n + m - 1, 2 max(n, m)): both factors fill at most
-  half of it, so lazy::Product serves every size (no lib/multimod fallback).
+  half of it, so LazyProduct serves every size (no Transform fallback).
 - a and b are the two halves of one array, which becomes the last prime's residues: its b
   transform goes to the scratch array first, then a's runs in place. 4 arrays of 2^lg words.
 - CRT straight to mod 10^9 + 7: y_k = c / M_k mod p_k (factor folded into the transform's scale),
@@ -163,9 +164,13 @@ Record when opened: 29 ms (another user). Best judged: ours, 22 ms, spike-free:
     [409643](https://judge.yosupo.jp/submission/409643) AC 22 ms (clean 22). 28.9 MiB (was
     30.9). Best judged 23 -> 22 ms.
 - Next: the first level waits on memory (about 0.5 ms over its 6 calls; a fused radix-8 and
-  radix-4 first pass might hide it); primes below 2^27. `product.hpp` and convolution_mod_2_64's
-  differ only in the kernels' ranges and the input: one run-time-modulus Product in lib/multimod
-  could serve both (#156).
+  radix-4 first pass might hide it); primes below 2^27.
+- 2026-10-10, claude (lib, issue #156 round 3): `product.hpp`, `kernels.hpp`, `gen_kernels.py`
+  and `test_product.cpp` moved to lib/multimod (`LazyProduct`, one kernel set of
+  `multimod::Product`; the test is now part of `lib/multimod/test.cpp`). Same instructions but in
+  `Product::multiply` (other registers and stack slots around the calls); `judge.py bench`,
+  `lc-bench`, 61 rounds: 22.30 -> 22.34 ms (1.0020, noise). 48/48 official tests, stress 200
+  rounds, ASan/UBSan on 6 official cases. Details: `lib/multimod/notes.md`.
 
 ## Sources
 

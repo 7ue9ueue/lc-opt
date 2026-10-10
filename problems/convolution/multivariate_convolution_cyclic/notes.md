@@ -25,7 +25,7 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   prime-power parts: the largest power of each prime to factor 0, the next to factor 1, ...).
   Point (i_1..) maps to y_r = sum i_j w_jr mod D_r. Then per point of the short axes' spectrum:
   Kronecker substitution with factor r padded to 2 D_r - 1, the product over Z mod three NTT
-  primes below 2^28 (`../convolution_mod_1000000007/product.hpp`, `lazy::Product`: lazy
+  primes below 2^28 (`multimod::LazyProduct`, `lib/multimod/lazy_product.hpp`: lazy
   reductions, 2^9 <= length <= 2^20, inputs < 4P raw), CRT straight to residues mod p
   (Montgomery, p odd), fold j + D_r onto j. Coefficients < 2^18 p^2 < 2^77.8, folded sums
   < 2^78.8; the primes' product is 2^83.96.
@@ -199,11 +199,18 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   one RFO per line of A). Every dim case now judges 9-10 ms; the products (6.0 ms hot for three
   primes at 2^19) are most of it: faster subtree kernels, or fewer passes without the set
   conflicts above (a buffered radix-16).
+- 2026-10-10, claude (lib, issue #156 round 3): the product comes from lib/multimod
+  (`LazyProduct`) instead of `../convolution_mod_1000000007/product.hpp`, which moved there. Same
+  instructions but in `Product::multiply` (other registers and stack slots around the calls) and
+  two compares with swapped operands in `solve()`; `judge.py bench`, `lc-bench`, 61 rounds:
+  10.33 -> 10.32 ms (1.0004, noise). 24/24 official tests, stress 200 rounds, ASan/UBSan on 7
+  official cases. Details: `lib/multimod/notes.md`.
 
 ## Sources
 
 - Chinese remainder theorem for cyclic groups (Z_ab = Z_a x Z_b for coprime a, b), as in the
   Good-Thomas prime-factor FFT; invariant-factor decomposition of finite abelian groups.
 - Kronecker substitution for multivariate products.
-- Our own code: `../convolution_mod_1000000007` (`product.hpp`, CRT), `../convolution_mod`
+- Our own code: `../convolution_mod_1000000007` (its `product.hpp`, now lib/multimod's
+  `LazyProduct`; CRT), `../convolution_mod`
   (`fields.hpp`), `lib/io`.

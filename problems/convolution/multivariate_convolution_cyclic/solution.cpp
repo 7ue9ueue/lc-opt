@@ -2,8 +2,8 @@
 // Short axes: a direct DFT over F_p along the axis (roots of order n_i exist since n_i | p - 1).
 // Long axes: regrouped into the fewest cyclic factors D_r (Chinese remainder theorem); for each
 // point of the short axes' spectrum, the exact product over Z by Kronecker substitution (factor
-// r padded to 2 D_r - 1), modulo three NTT primes below 2^28 (convolution_mod_1000000007's lazy
-// product), the CRT straight to residues mod p, then folded back to cyclic.
+// r padded to 2 D_r - 1), modulo three NTT primes below 2^28 (multimod::LazyProduct), the CRT
+// straight to residues mod p, then folded back to cyclic.
 #include <algorithm>
 #include <array>
 #include <vector>
@@ -12,7 +12,7 @@
 #include "lib/io/io.hpp"
 #include "lib/mem/huge.hpp"
 #include "../convolution_mod/fields.hpp"
-#include "../convolution_mod_1000000007/product.hpp"
+#include "lib/multimod/lazy_product.hpp"
 #include "lib/run/early.hpp"
 
 namespace {
@@ -21,6 +21,7 @@ using multimod::Vec;
 using multimod::add;
 using multimod::broadcast;
 using multimod::Factor;
+using multimod::LazyProduct;
 using multimod::multiply;
 using multimod::reduce;
 
@@ -475,12 +476,12 @@ private:
     std::size_t wide_;  // columns done in 8 x 8 blocks
 };
 
-// Transform length for a Kronecker extent (lazy::Product needs 2^9 at least).
+// Transform length for a Kronecker extent (LazyProduct needs 2^9 at least).
 int transform_log(std::size_t padded) { return std::max(9, int(std::bit_width(padded - 1))); }
 
 // Products over the long axes, one per point of the short axes' spectrum. The two factors of a
 // product are the halves of one pair array of 2^lg words, each zero past its places; the pair then
-// holds the last prime's residues (lazy::Product in place). Direct (one long axis, of stride 1):
+// holds the last prime's residues (LazyProduct in place). Direct (one long axis, of stride 1):
 // the caller's array holds pairs [row r of f | row r of g], and the products run on them in place.
 class LongProduct {
 public:
@@ -496,18 +497,18 @@ public:
             padded_ *= 2 * d - 1;
         }
         lg_ = transform_log(padded_);
-        const std::size_t words = (std::size_t(1) << lg_) + lazy::kPadding;
+        const std::size_t words = (std::size_t(1) << lg_) + LazyProduct::kPadding;
         if (!is_direct(axes)) pair_ = arena.take<std::uint32_t>(words);
         for (int k = 0; k + 1 < kPrimes; ++k) residues_[k] = arena.take<std::uint32_t>(words);
         work_ = arena.take<std::uint32_t>(words);
-        tables_ = arena.take<std::uint32_t>(lazy::Product::table_words(lg_));
+        tables_ = arena.take<std::uint32_t>(LazyProduct::table_words(lg_));
         for (int k = 0; k < kPrimes; ++k) moduli_.emplace_back(kPrimeList[k][0], kPrimeList[k][1]);
     }
 
     static std::size_t arena_bytes(const std::vector<Axis>& axes) {
         const int lg = transform_log(CyclicFactors(axes).padded());
-        const std::size_t words = (std::size_t(1) << lg) + lazy::kPadding;
-        return (kPrimes + 1) * take_bytes(words) + take_bytes(lazy::Product::table_words(lg));
+        const std::size_t words = (std::size_t(1) << lg) + LazyProduct::kPadding;
+        return (kPrimes + 1) * take_bytes(words) + take_bytes(LazyProduct::table_words(lg));
     }
 
     static bool is_direct(const std::vector<Axis>& axes) { return axes.size() == 1 && axes[0].stride == 1; }
@@ -519,7 +520,7 @@ public:
 
     // Direct: pair r < count of x (rows of n values, zero up to half the pair) into x[r n, r n + n),
     // times the scale. For r >= 1 that range lies in pairs < r (n <= half a pair); for r = 0 the
-    // CRT runs in place. x is readable up to count pairs plus lazy::kPadding words.
+    // CRT runs in place. x is readable up to count pairs plus LazyProduct::kPadding words.
     void multiply_rows(std::uint32_t* x, std::size_t count) {
         const std::size_t n = lengths_[0];
         for (std::size_t r = 0; r < count; ++r) {
@@ -593,7 +594,7 @@ private:
     // The product of pair's halves (readable 8 words past each) mod every prime: residues 0 and 1,
     // then the last prime's in place, which becomes residues_[2].
     void products(std::uint32_t* pair) {
-        const lazy::Product product(lg_, tables_);
+        const LazyProduct product(lg_, tables_);
         for (int k = 0; k < kPrimes; ++k)
             product.multiply(pair, pair + half(), k + 1 < kPrimes ? residues_[k] : pair, work_, moduli_[k],
                              kCrtScale[k]);
@@ -760,7 +761,7 @@ void solve() {
     const std::size_t pair = direct ? LongProduct::pair_words(long_axes) : 0;
     const std::size_t block = 8 * narrow_row(short_axes);
     const std::size_t padded_total = (total + block - 1) / block * block;
-    const std::size_t words = direct ? std::max(rows * pair + lazy::kPadding, padded_total) : 2 * padded_total;
+    const std::size_t words = direct ? std::max(rows * pair + LazyProduct::kPadding, padded_total) : 2 * padded_total;
     mem::Arena arena(take_bytes(words) + take_bytes(fields::kTextBytes / 4 + 1) +
                      (long_axes.empty() ? 0 : LongProduct::arena_bytes(long_axes)));
     auto* f = arena.take<std::uint32_t>(words);

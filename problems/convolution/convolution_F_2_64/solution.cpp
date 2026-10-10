@@ -12,6 +12,7 @@
 
 #include <array>
 #include <bit>
+#include <utility>
 
 #include "lib/io/bulk64.hpp"
 #include "lib/io/io.hpp"
@@ -22,7 +23,7 @@ namespace {
 using u64 = std::uint64_t;
 
 constexpr int kMaxLog = 20;  // N + M - 1 < 2^20
-constexpr int kMinLog = 3;   // the last three stages run in one 8-element kernel
+constexpr int kMinLog = 4;   // the last four stages run in a 16-element kernel
 
 // Field arithmetic. The polynomial's low part: x^64 = x^4 + x^3 + x + 1.
 
@@ -119,7 +120,7 @@ inline Vec reduce(Vec low, Vec high) {
                                       kFold[15], kFold[0], kFold[1], kFold[2], kFold[3], kFold[4], kFold[5], kFold[6],
                                       kFold[7], kFold[8], kFold[9], kFold[10], kFold[11], kFold[12], kFold[13],
                                       kFold[14], kFold[15]);
-    const Vec s = _mm256_xor_si256(high, _mm256_slli_epi64(high, 1));
+    const Vec s = _mm256_xor_si256(high, _mm256_add_epi64(high, high));  // high << 1 off the shift pipes
     const Vec times_r = _mm256_xor_si256(s, _mm256_slli_epi64(s, 3));  // high * (x^4 + x^3 + x + 1) mod x^64
     const Vec top = _mm256_shuffle_epi8(fold, _mm256_srli_epi64(high, 60));
     return _mm256_xor_si256(_mm256_xor_si256(low, times_r), top);
@@ -164,6 +165,92 @@ inline void xor_rows(u64* dst, const u64* src, std::size_t count) {
     }
 }
 
+// change_basis<4> in registers. Its XOR steps, as (dst, src) element pairs, are recorded at
+// compile time by running the recursion of taylor and change_basis on element indices.
+struct XorStep {
+    std::uint8_t dst, src;
+};
+
+struct XorProgram {
+    std::array<XorStep, 64> step{};
+    std::size_t count = 0;
+
+    // Element dst + e * s ^= element src + e * s for e < n.
+    constexpr void rows(std::size_t dst, std::size_t src, std::size_t n, std::size_t s) {
+        for (std::size_t e = 0; e < n; ++e) step[count++] = {std::uint8_t(dst + e * s), std::uint8_t(src + e * s)};
+    }
+};
+
+constexpr void record_taylor(XorProgram& p, std::size_t f, std::size_t s, std::size_t len, std::size_t tau, bool inverse,
+                             std::size_t size) {
+    if (len <= tau) return;
+    const std::size_t half = len / 2, d = half / tau, a = f, b = f + half * s;
+    if (inverse) {
+        record_taylor(p, a, s, half, tau, true, half);
+        record_taylor(p, b, s, half, tau, true, half);
+        p.rows(b, b + (half - d) * s, d, s);
+        p.rows(a + d * s, b, half - d, s);
+        p.rows(a + d * s, b + (half - d) * s, d, s);
+    } else if (size <= half) {
+        record_taylor(p, a, s, half, tau, false, size);
+    } else {
+        p.rows(a + d * s, b, half - d, s);
+        p.rows(a + d * s, b + (half - d) * s, d, s);
+        p.rows(b, b + (half - d) * s, d, s);
+        record_taylor(p, a, s, half, tau, false, half);
+        record_taylor(p, b, s, half, tau, false, size - half);
+    }
+}
+
+constexpr void record_change(XorProgram& p, std::size_t f, std::size_t s, int l, bool inverse, std::size_t size) {
+    if (l < 2) return;
+    const int k = 1 << (std::bit_width(unsigned(l - 1)) - 1);
+    const std::size_t tau = std::size_t(1) << k, rows = std::size_t(1) << (l - k), len = std::size_t(1) << l;
+    if (inverse) {
+        for (std::size_t c = 0; c < tau; ++c) record_change(p, f + c * s, tau * s, l - k, true, rows);
+        for (std::size_t r = 0; r < rows; ++r) record_change(p, f + r * tau * s, s, k, true, tau);
+        record_taylor(p, f, s, len, tau, true, len);
+    } else {
+        record_taylor(p, f, s, len, tau, false, size);
+        const std::size_t used = (size + tau - 1) / tau;
+        for (std::size_t r = 0; r < used; ++r) record_change(p, f + r * tau * s, s, k, false, tau);
+        for (std::size_t c = 0; c < tau; ++c) record_change(p, f + c * s, tau * s, l - k, false, used);
+    }
+}
+
+// The forward change maps elements [0, Size) to themselves (deg X_j = j). Inputs [Size, 16) are
+// zero, so steps whose source is still zero are dropped.
+template <bool Inverse, std::size_t Size>
+constexpr XorProgram kProgram4 = [] {
+    XorProgram all, p;
+    record_change(all, 0, 1, 4, Inverse, Size);
+    std::uint32_t live = (std::uint32_t(1) << Size) - 1;
+    for (std::size_t i = 0; i < all.count; ++i) {
+        if (!(live >> all.step[i].src & 1)) continue;
+        p.step[p.count++] = all.step[i];
+        live |= std::uint32_t(1) << all.step[i].dst;
+    }
+    return live >> Size ? throw "output outside [0, Size)" : p;
+}();
+
+template <const XorProgram& P, std::size_t... I>
+inline void run(Vec* x, std::index_sequence<I...>) {
+    ((x[P.step[I].dst] = _mm256_xor_si256(x[P.step[I].dst], x[P.step[I].src])), ...);
+}
+
+// change_basis<4> on the first Size of 16 elements (W words at stride S), four words at a time.
+template <std::size_t Size, std::size_t W, std::size_t S, bool Inverse>
+void change_basis4(u64* f) {
+    for (std::size_t k = 0; k < W; k += 4) {
+        Vec x[Size];
+#pragma GCC unroll 16
+        for (std::size_t e = 0; e < Size; ++e) x[e] = load(f + e * S + k);
+        run<kProgram4<Inverse, Size>>(x, std::make_index_sequence<kProgram4<Inverse, Size>.count>{});
+#pragma GCC unroll 16
+        for (std::size_t e = 0; e < Size; ++e) store(f + e * S + k, x[e]);
+    }
+}
+
 // The Taylor expansion below for rows <= 16 long rows, in one pass. With y = x^Tau,
 // f = sum_r f_r(x) y^r; substituting y = t + x gives sum_k H_k(x) t^k, H_k = sum_r C(r, k) x^(r-k) f_r
 // (a Taylor shift by x, its own inverse), deg H_k < Tau + 15. Split H_k = lo_k + x^Tau hi_k:
@@ -192,7 +279,8 @@ void shift(u64 (*buf)[kWidth]) {
 }
 
 // H for columns [c, c + width) of f's rows (each Tau words), zero past Tau, into buf[r][kHalo, ...).
-template <std::size_t Tau, std::size_t Rows>
+// With Columns, change_basis<4> across the 16 rows first: see taylor.
+template <std::size_t Tau, std::size_t Rows, bool Columns>
 void block(const u64* f, std::size_t c, std::size_t width, u64 (*buf)[kWidth]) {
     const bool inside = c >= kHalo && width == kBlock;  // c + kBlock <= Tau
     for (std::size_t r = 0; r < Rows; ++r) {
@@ -205,42 +293,107 @@ void block(const u64* f, std::size_t c, std::size_t width, u64 (*buf)[kWidth]) {
             buf[r][j] = c + j >= kHalo && col < Tau && j < kHalo + width ? f[r * Tau + col] : 0;
         }
     }
+    if constexpr (Columns) change_basis4<16, kWidth, kWidth, true>(buf[0]);
     shift<Rows>(buf);
 }
 
-template <std::size_t Tau, std::size_t Rows, bool Inverse>
-void taylor(u64* f) {
-    static_assert(Tau % kBlock == 0);
-    alignas(32) static u64 buf[Rows][kWidth];
-    alignas(32) static u64 high[Rows][kHalo];
-    block<Tau, Rows>(f, Tau, 0, buf);
-    for (std::size_t r = 0; r < Rows; ++r) std::memcpy(high[r], buf[r] + kHalo, sizeof(high[r]));
-    for (std::size_t c = Tau; c > 0;) {
-        c -= kBlock;
-        block<Tau, Rows>(f, c, kBlock, buf);
-        for (std::size_t r = 0; r < Rows; ++r) std::memcpy(f + r * Tau + c, buf[r] + kHalo, kBlock * sizeof(u64));
-    }
+// The fixes of columns [0, kHalo) from the high parts; row r starts at f + r * stride.
+template <std::size_t Rows, bool Inverse>
+void fix_low(u64* f, std::size_t stride, const u64 (*high)[kHalo]) {
     for (std::size_t r = 1; r < Rows; ++r) {
-        for (std::size_t e = 0; e < kHalo; ++e) f[r * Tau + e] ^= high[r - 1][e];
+        for (std::size_t e = 0; e < kHalo; ++e) f[r * stride + e] ^= high[r - 1][e];
     }
     if constexpr (!Inverse) {
         for (std::size_t r = 0; r < Rows; ++r) {
-            for (std::size_t e = 0; e + 1 < kHalo; ++e) f[r * Tau + e + 1] ^= high[r][e];
+            for (std::size_t e = 0; e + 1 < kHalo; ++e) f[r * stride + e + 1] ^= high[r][e];
         }
     }
 }
 
-template <std::size_t Tau, bool Inverse>
+// With Columns, change_basis<4> across the rows (one element per row and column) also runs in
+// this pass: after the forward Taylor step, or before the inverse one (Rows = 16 there).
+template <std::size_t Tau, std::size_t Rows, bool Inverse, bool Columns>
+void taylor(u64* f) {
+    static_assert(Tau % kBlock == 0 && (!Columns || !Inverse || Rows == 16));
+    constexpr bool before = Columns && Inverse, after = Columns && !Inverse;
+    alignas(32) static u64 buf[Rows][kWidth];
+    alignas(32) static u64 high[Rows][kHalo];
+    block<Tau, Rows, before>(f, Tau, 0, buf);
+    for (std::size_t r = 0; r < Rows; ++r) std::memcpy(high[r], buf[r] + kHalo, sizeof(high[r]));
+    for (std::size_t c = Tau; c > 0;) {
+        c -= kBlock;
+        block<Tau, Rows, before>(f, c, kBlock, buf);
+        if constexpr (after) {
+            if (c == 0) fix_low<Rows, false>(buf[0] + kHalo, kWidth, high);
+            change_basis4<Rows, kBlock, kWidth, false>(buf[0] + kHalo);
+        }
+        for (std::size_t r = 0; r < Rows; ++r) std::memcpy(f + r * Tau + c, buf[r] + kHalo, kBlock * sizeof(u64));
+    }
+    if constexpr (!after) fix_low<Rows, Inverse>(f, Tau, high);
+}
+
+template <std::size_t Tau, bool Inverse, bool Columns>
 void taylor(u64* f, std::size_t rows) {
     switch (rows) {
-    case 2: return taylor<Tau, 2, Inverse>(f);
-    case 4: return taylor<Tau, 4, Inverse>(f);
-    case 8: return taylor<Tau, 8, Inverse>(f);
-    case 16: return taylor<Tau, 16, Inverse>(f);
+    case 2: return taylor<Tau, 2, Inverse, Columns>(f);
+    case 4: return taylor<Tau, 4, Inverse, Columns>(f);
+    case 8: return taylor<Tau, 8, Inverse, Columns>(f);
+    case 16: return taylor<Tau, 16, Inverse, Columns>(f);
     }
 }
 
 }  // namespace wide
+
+// The Taylor step for 16 rows of Tau elements of E words (rows Stride words apart), in one pass.
+// In sheared columns g_r[J] = f_r[J - r], the shift H of wide:: becomes G_k[J] = sum over r with
+// k's bits among r's of g_r[J], with H_k[c] = G_k[c + k]. Sheared column J reads f_r[J - r] and
+// writes H_k[J - k] to the same places, except H_k[Tau + i] (i < 15), which is xored straight into
+// the low columns as the fixes of wide::taylor.
+inline void superset_sums(Vec* x) {
+#pragma GCC unroll 4
+    for (std::size_t bit = 1; bit < 16; bit *= 2) {
+#pragma GCC unroll 16
+        for (std::size_t k = 0; k < 16; ++k) {
+            if (!(k & bit)) x[k] = _mm256_xor_si256(x[k], x[k | bit]);
+        }
+    }
+}
+
+template <std::size_t Tau, std::size_t E, std::size_t Stride, bool Inverse>
+void sheared_taylor(u64* f) {
+    static_assert(Tau >= 16 && E % 4 == 0);
+    const auto at = [f](std::size_t r, std::size_t c) { return f + r * Stride + c * E; };
+    for (std::size_t j = 15; j < Tau; ++j) {
+        for (std::size_t q = 0; q < E; q += 4) {
+            Vec x[16];
+#pragma GCC unroll 16
+            for (std::size_t r = 0; r < 16; ++r) x[r] = load(at(r, j - r) + q);
+            superset_sums(x);
+#pragma GCC unroll 16
+            for (std::size_t k = 0; k < 16; ++k) store(at(k, j - k) + q, x[k]);
+        }
+    }
+    // Partial columns: rows r <= j with j - r < Tau; H_k[c] = 0 for c < 0.
+    for (std::size_t n = 0; n < 30; ++n) {
+        const std::size_t j = n < 15 ? n : Tau + n - 15;
+        for (std::size_t q = 0; q < E; q += 4) {
+            Vec x[16];
+            for (std::size_t r = 0; r < 16; ++r) {
+                x[r] = r <= j && j - r < Tau ? load(at(r, j - r) + q) : _mm256_setzero_si256();
+            }
+            superset_sums(x);
+            for (std::size_t k = 0; k <= std::min<std::size_t>(j, 15); ++k) {
+                const std::size_t c = j - k;
+                if (c < Tau) {
+                    store(at(k, c) + q, x[k]);
+                    continue;
+                }
+                if (k < 15) store(at(k + 1, c - Tau) + q, _mm256_xor_si256(load(at(k + 1, c - Tau) + q), x[k]));
+                if (!Inverse) store(at(k, c - Tau + 1) + q, _mm256_xor_si256(load(at(k, c - Tau + 1) + q), x[k]));
+            }
+        }
+    }
+}
 
 // f[0, Len) = sum_m g_m(x) t^m with t = x^Tau + x, deg g_m < Tau: g_m in f[m * Tau, (m + 1) * Tau).
 // With A, B the halves and d = Len / 2 / Tau: x^(Len/2) = t^d + x^d, so
@@ -249,7 +402,7 @@ template <std::size_t Len, std::size_t Tau, std::size_t W, std::size_t S, bool I
 void taylor(u64* f, std::size_t size) {
     if constexpr (W == 1 && S == 1 && Tau >= 4096 && Len / Tau <= 16) {
         const std::size_t rows = Inverse ? Len / Tau : std::bit_ceil((size + Tau - 1) / Tau);
-        if (rows > 1) wide::taylor<Tau, Inverse>(f, rows);
+        if (rows > 1) wide::taylor<Tau, Inverse, false>(f, rows);
     } else if constexpr (Len > Tau) {
         constexpr std::size_t half = Len / 2, d = half / Tau;
         u64* a = f;
@@ -277,12 +430,27 @@ template <int L, std::size_t W, std::size_t S, bool Inverse>
 void change_basis(u64* f, std::size_t size);
 
 // The column step of change_basis<L>: rows [0, used) of 2^(L-K) rows, each Tau elements.
-// Contiguous rows are cut into column blocks that fit L1/L2; all column stages run per block.
+// Rows of at least kGatherWords words: column slices of one cache line are copied into a
+// contiguous buffer, transformed there and copied back (long strides alias in L1 and L2).
+// Shorter contiguous rows are cut into column blocks; all column stages run per block.
+constexpr std::size_t kGatherWords = 256, kLine = 8;
+
 template <int L, int K, std::size_t W, std::size_t S, bool Inverse>
 void change_columns(u64* f, std::size_t used) {
-    constexpr std::size_t tau = std::size_t(1) << K;
-    if constexpr (W == S) {
-        constexpr std::size_t width = tau * W, rows = std::size_t(1) << (L - K);
+    constexpr std::size_t tau = std::size_t(1) << K, width = tau * W, rows = std::size_t(1) << (L - K);
+    if constexpr (W == S && width >= kGatherWords) {
+        alignas(64) static u64 buf[rows * kLine];
+        for (std::size_t p = 0; p < width; p += kLine) {
+            for (std::size_t r = 0; r < used; ++r) {
+                for (std::size_t k = 0; k < kLine; k += 4) store(buf + r * kLine + k, load(f + r * width + p + k));
+            }
+            std::memset(buf + used * kLine, 0, (rows - used) * kLine * sizeof(u64));
+            change_basis<L - K, kLine, kLine, Inverse>(buf, used);
+            for (std::size_t r = 0; r < used; ++r) {
+                for (std::size_t k = 0; k < kLine; k += 4) store(f + r * width + p + k, load(buf + r * kLine + k));
+            }
+        }
+    } else if constexpr (W == S) {
         constexpr std::size_t chunk = std::min(width, std::max<std::size_t>(kColumnWords / rows, 4));
         for (std::size_t p = 0; p < width; p += chunk) change_basis<L - K, chunk, width, Inverse>(f + p, used);
     } else {
@@ -336,18 +504,45 @@ void change_rows(u64* f, std::size_t used) {
 // Monomial coefficients of f[0, 2^L) to X coefficients (or back). With K = 2^k the largest power
 // of two below L: expand in t = s_K = x^(2^K) + x, convert each row g_m (length 2^K), then each
 // column (a polynomial in t, whose basis s_i(t) = s_{K + i}(x) for i < L - K <= K).
+// The row and column steps commute. For L = 20 the column step runs inside the Taylor pass. For
+// L = 16 (rows of 512 KiB, the size of L2) the steps go in three passes: the top four Taylor
+// levels, then the bottom four and the row step per 32 KiB block, then the column step.
 template <int L, std::size_t W, std::size_t S, bool Inverse>
 void change_basis(u64* f, std::size_t size) {
-    if constexpr (L >= 2) {
-        constexpr int K = 1 << (std::bit_width(unsigned(L - 1)) - 1);
-        constexpr std::size_t tau = std::size_t(1) << K, rows = std::size_t(1) << (L - K);
+    constexpr int K = L >= 2 ? 1 << (std::bit_width(unsigned(L - 1)) - 1) : 0;
+    constexpr std::size_t tau = std::size_t(1) << K, rows = std::size_t(1) << (L - K), len = std::size_t(1) << L;
+    const std::size_t used = Inverse ? rows : (size + tau - 1) / tau;  // deg f < size: g_m = 0 for m >= used
+    if constexpr (L == 4 && W % 4 == 0 && Inverse) {
+        change_basis4<16, W, S, true>(f);
+    } else if constexpr (L == 4 && W % 4 == 0) {
+        if (size > 8) return change_basis4<16, W, S, false>(f);
+        change_basis4<8, W, S, false>(f);
+    } else if constexpr (W == 1 && S == 1 && L - K == 4 && tau >= 4096) {
+        if constexpr (Inverse) {
+            change_rows<K, rows, W, S, true>(f, rows);
+            wide::taylor<tau, rows, true, true>(f);
+        } else {
+            if (used > 1) wide::taylor<tau, false, true>(f, std::bit_ceil(used));
+            change_rows<K, rows, W, S, false>(f, used);
+        }
+    } else if constexpr (W == 1 && S == 1 && L == 16) {
+        constexpr std::size_t block = 16 * tau;
+        if constexpr (Inverse) change_columns<L, K, W, S, true>(f, rows);
+        if constexpr (!Inverse) sheared_taylor<tau, 16, block, false>(f);
+        for (std::size_t b = 0; b < len; b += block) {
+            if constexpr (!Inverse) taylor<block, tau, W, S, false>(f + b, block);
+            change_rows<K, 16, W, S, Inverse>(f + b, 16);
+            if constexpr (Inverse) taylor<block, tau, W, S, true>(f + b, block);
+        }
+        if constexpr (Inverse) sheared_taylor<tau, 16, block, true>(f);
+        if constexpr (!Inverse) change_columns<L, K, W, S, false>(f, rows);
+    } else if constexpr (L >= 2) {
         if constexpr (Inverse) {
             change_columns<L, K, W, S, true>(f, rows);
             change_rows<K, rows, W, S, true>(f, rows);
-            taylor<(std::size_t(1) << L), tau, W, S, true>(f, std::size_t(1) << L);
+            taylor<len, tau, W, S, true>(f, len);
         } else {
-            taylor<(std::size_t(1) << L), tau, W, S, false>(f, size);
-            const std::size_t used = (size + tau - 1) / tau;  // deg f < size: g_m = 0 for m >= used
+            taylor<len, tau, W, S, false>(f, size);
             change_rows<K, rows, W, S, false>(f, used);
             change_columns<L, K, W, S, false>(f, used);
         }
@@ -435,75 +630,84 @@ void stages_inverse(u64* p, std::size_t c, int i) {
     }
 }
 
-// Stages 2, 1, 0 of the 8 words at c (c a multiple of 8): x holds c + [0, 4), y c + [4, 8).
-// Stage 1 pairs [c, c+1, c+4, c+5] with [c+2, c+3, c+6, c+7]; stage 0 pairs the even indices
-// [c, c+2, c+4, c+6] with the odd ones.
-struct Twiddles8 {
-    Vec w2, w1, w0;
+// Stages 1 and 0 of the 16 words at c (c a multiple of 16), four blocks of 4 words. A 4x4
+// transpose puts word j of block k in lane k of t[j]; stage 1 then pairs t[0] with t[2] and t[1]
+// with t[3], stage 0 t[0] with t[1] and t[2] with t[3]. The forward transform leaves each 16 words
+// transposed and the inverse starts from there; the pointwise product does not care.
+// Lane k's twiddle is omega((c + 4k + j) >> s) = omega((c + j) >> s) ^ omega(4k >> s).
+alignas(32) constexpr std::array<std::array<u64, 4>, 2> kLaneOmega = [] {
+    std::array<std::array<u64, 4>, 2> t{};  // [s][k] = omega(4k >> s)
+    for (int s = 0; s < 2; ++s) {
+        for (int k = 0; k < 4; ++k) t[s][k] = kOmega.low[(4 * k) >> s];
+    }
+    return t;
+}();
+
+struct Twiddles16 {
+    Vec w1, w0;  // j = 0
 };
 
-inline Twiddles8 twiddles8(std::size_t c) {
-    const Vec b1 = broadcast(kBeta[1]), b2 = broadcast(kBeta[2]), zero = _mm256_setzero_si256();
-    const Vec w1 = _mm256_xor_si256(broadcast(omega(c >> 1)), _mm256_blend_epi32(zero, b1, 0xF0));
-    const Vec w0 = _mm256_xor_si256(broadcast(omega(c)), _mm256_xor_si256(_mm256_blend_epi32(zero, b1, 0xCC),
-                                                                           _mm256_blend_epi32(zero, b2, 0xF0)));
-    return {broadcast(omega(c >> 2)), w1, w0};
+inline Twiddles16 twiddles16(std::size_t c) {
+    const auto lanes = [c](int s) { return _mm256_xor_si256(broadcast(omega(c >> s)), load(kLaneOmega[s].data())); };
+    return {lanes(1), lanes(0)};
 }
 
-inline void kernel8_forward(u64* p, std::size_t c) {
-    const Twiddles8 t = twiddles8(c);
-    Vec x = load(p), y = load(p + 4);
-    x = _mm256_xor_si256(x, multiply(y, t.w2));
-    y = _mm256_xor_si256(y, x);
-    Vec u = _mm256_permute2x128_si256(x, y, 0x20), v = _mm256_permute2x128_si256(x, y, 0x31);
-    u = _mm256_xor_si256(u, multiply(v, t.w1));
+// (u, v) -> (u + w v, u + w v + v), and back.
+inline void butterfly_forward(Vec& u, Vec& v, Vec w) {
+    u = _mm256_xor_si256(u, multiply(v, w));
     v = _mm256_xor_si256(v, u);
-    Vec e = _mm256_unpacklo_epi64(u, v), o = _mm256_unpackhi_epi64(u, v);
-    e = _mm256_xor_si256(e, multiply(o, t.w0));
-    o = _mm256_xor_si256(o, e);
-    u = _mm256_unpacklo_epi64(e, o), v = _mm256_unpackhi_epi64(e, o);
-    store(p, _mm256_permute2x128_si256(u, v, 0x20));
-    store(p + 4, _mm256_permute2x128_si256(u, v, 0x31));
 }
 
-inline void kernel8_inverse(u64* p, std::size_t c) {
-    const Twiddles8 t = twiddles8(c);
-    const Vec x0 = load(p), y0 = load(p + 4);
-    Vec u = _mm256_permute2x128_si256(x0, y0, 0x20), v = _mm256_permute2x128_si256(x0, y0, 0x31);
-    Vec e = _mm256_unpacklo_epi64(u, v), o = _mm256_unpackhi_epi64(u, v);
-    o = _mm256_xor_si256(o, e);
-    e = _mm256_xor_si256(e, multiply(o, t.w0));
-    u = _mm256_unpacklo_epi64(e, o), v = _mm256_unpackhi_epi64(e, o);
+inline void butterfly_inverse(Vec& u, Vec& v, Vec w) {
     v = _mm256_xor_si256(v, u);
-    u = _mm256_xor_si256(u, multiply(v, t.w1));
-    Vec x = _mm256_permute2x128_si256(u, v, 0x20), y = _mm256_permute2x128_si256(u, v, 0x31);
-    y = _mm256_xor_si256(y, x);
-    x = _mm256_xor_si256(x, multiply(y, t.w2));
-    store(p, x);
-    store(p + 4, y);
+    u = _mm256_xor_si256(u, multiply(v, w));
 }
 
-// Block d[c, c + 2^(i+1)), i < kBlockLog: stages i down to 0 (or back), in pairs down to stage 3,
-// then the 8-word kernel.
+inline Vec plus_beta1(Vec w) { return _mm256_xor_si256(w, broadcast(kBeta[1])); }  // omega(m + 2), m % 4 = 0
+
+inline void kernel16_forward(u64* p, std::size_t c) {
+    const Twiddles16 w = twiddles16(c);
+    Vec x0 = load(p), x1 = load(p + 4), x2 = load(p + 8), x3 = load(p + 12);
+    transpose4(x0, x1, x2, x3);
+    butterfly_forward(x0, x2, w.w1);
+    butterfly_forward(x1, x3, w.w1);
+    butterfly_forward(x0, x1, w.w0);
+    butterfly_forward(x2, x3, plus_beta1(w.w0));
+    store(p, x0), store(p + 4, x1), store(p + 8, x2), store(p + 12, x3);
+}
+
+inline void kernel16_inverse(u64* p, std::size_t c) {
+    const Twiddles16 w = twiddles16(c);
+    Vec x0 = load(p), x1 = load(p + 4), x2 = load(p + 8), x3 = load(p + 12);
+    butterfly_inverse(x0, x1, w.w0);
+    butterfly_inverse(x2, x3, plus_beta1(w.w0));
+    butterfly_inverse(x0, x2, w.w1);
+    butterfly_inverse(x1, x3, w.w1);
+    transpose4(x0, x1, x2, x3);
+    store(p, x0), store(p + 4, x1), store(p + 8, x2), store(p + 12, x3);
+}
+
+// Block d[c, c + 2^(i+1)), 3 <= i < kBlockLog: stages i down to 0 (or back), in pairs down to
+// stage 2, then the 16-word kernel.
 void forward_block(u64* d, std::size_t c, int i) {
     const std::size_t end = c + (std::size_t(2) << i);
     int s = i;
-    for (; s >= 4; s -= 2) {
+    for (; s >= 3; s -= 2) {
         for (std::size_t b = c; b < end; b += std::size_t(2) << s) stages_forward(d + b, b, s);
     }
-    if (s == 3) {
-        for (std::size_t b = c; b < end; b += 16) stage_forward(d + b, 8, omega(b >> 3));
+    if (s == 2) {
+        for (std::size_t b = c; b < end; b += 8) stage_forward(d + b, 4, omega(b >> 2));
     }
-    for (std::size_t b = c; b < end; b += 8) kernel8_forward(d + b, b);
+    for (std::size_t b = c; b < end; b += 16) kernel16_forward(d + b, b);
 }
 
 void inverse_block(u64* d, std::size_t c, int i) {
     const std::size_t end = c + (std::size_t(2) << i);
-    for (std::size_t b = c; b < end; b += 8) kernel8_inverse(d + b, b);
-    if (i % 2 == 1) {
-        for (std::size_t b = c; b < end; b += 16) stage_inverse(d + b, 8, omega(b >> 3));
+    for (std::size_t b = c; b < end; b += 16) kernel16_inverse(d + b, b);
+    if (i % 2 == 0) {
+        for (std::size_t b = c; b < end; b += 8) stage_inverse(d + b, 4, omega(b >> 2));
     }
-    for (int s = i % 2 == 1 ? 5 : 4; s <= i; s += 2) {
+    for (int s = i % 2 == 0 ? 4 : 3; s <= i; s += 2) {
         for (std::size_t b = c; b < end; b += std::size_t(2) << s) stages_inverse(d + b, b, s);
     }
 }

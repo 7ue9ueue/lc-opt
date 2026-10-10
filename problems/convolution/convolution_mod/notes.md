@@ -2,8 +2,8 @@
 
 N, M <= 2^19 coefficients mod 998244353; print the N + M - 1 coefficients of the product. 5 s.
 
-Best judged: ours, 13 ms: [409226](https://judge.yosupo.jp/submission/409226) (current
-`main.cpp`). Earlier versions: 14 ms, [409184](https://judge.yosupo.jp/submission/409184) and [408716](https://judge.yosupo.jp/submission/408716) (the QPoly exploration-011
+Best judged: ours, 13 ms: [409226](https://judge.yosupo.jp/submission/409226) (#50's version);
+the current `main.cpp` (#197) ties it, [409431](https://judge.yosupo.jp/submission/409431)-[409433](https://judge.yosupo.jp/submission/409433). Earlier versions: 14 ms, [409184](https://judge.yosupo.jp/submission/409184) and [408716](https://judge.yosupo.jp/submission/408716) (the QPoly exploration-011
 program, `../SymPoly/work/ntt/yosupo_convolution_mod_large_io_probe.cpp`, a guess from the
 submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
 
@@ -20,13 +20,15 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
 - `lib/io` for input: `io::read_bulk` (`lib/io/bulk32.hpp`, the transposed parser on Zen 3)
   straight into the transform buffers.
 - Output: `fields.hpp`, every value in a 10-byte field (judge-specific; the checker compares
-  tokens), the same bytes as `../fixed_width.hpp`. Per value: w = v / 10 as 8 digits, most
-  significant first, in a qword; leading zeros from x ^ (x - 1) and `vpblendvb`; the units digit
-  and separator from v - 10w. 16 values per step, ten 16-byte chunks built by `pshufb`; the
-  divisions of the next step are issued before the digits of this one. The text buffer sits
-  after the NTT tables in their huge page. Shared, not copied: gcd, lcm, mul_mod2n, mul_modp,
-  convolution_mod_large and multivariate_convolution_cyclic include it, and six polynomial
-  problems.
+  tokens), the same bytes as the former `../fixed_width.hpp` (deleted in #198). Per value:
+  w = v / 10 as 8 digits, most significant first, in a qword; leading zeros from x ^ (x - 1) and
+  `vpblendvb`; the units digit and separator from v - 10w. 16 values per step, ten 16-byte chunks
+  built by `pshufb`; the divisions of the next step are issued before the digits of this one. The
+  text buffer sits after the NTT tables in their huge page. Shared, not copied: 21 other `main.cpp`
+  files include it (gcd, lcm, mul_mod2n, mul_modp, bitwise_and, bitwise_xor, multivariate and
+  multivariate_cyclic, convolution_mod_large, the min_plus problems through `../floor.cpp`, nine
+  polynomial problems). A change to it re-times all of them in CI. Its first comment still names
+  `../fixed_width.hpp`; fix that with the next change that alters its code.
 - The program runs from `.preinit_array` and ends with `_exit`: libstdc++'s initializers
   (iostreams, locales) and exit handlers never run.
 
@@ -195,8 +197,19 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
   - `judge.py bench`, 31 rounds, slowest 3 cases: 13.33 -> 13.19 ms, ratio 0.9856.
   - Checks: 53/53 official tests, stress 500 rounds (pipe input), ASan/UBSan on 13 official cases
     (file and pipe input). `bottom.hpp`'s asm equals the benchmarked variant.
+  - CI (#197): geomean 0.9936 (EPYC 9V45 0.9936 and 0.9957, EPYC 7763 0.9915).
+  - Submitted the merged `main.cpp` five times (5 of 5 this session):
+    [409431](https://judge.yosupo.jp/submission/409431) AC 13 ms,
+    [409432](https://judge.yosupo.jp/submission/409432) AC 13,
+    [409433](https://judge.yosupo.jp/submission/409433) AC 13,
+    [409434](https://judge.yosupo.jp/submission/409434) AC 20 (spike: random_00),
+    [409435](https://judge.yosupo.jp/submission/409435) AC 21 (spikes: random_00, fft_killer_04,
+    small_15). `spikes.py`: all five clean 13 ms. Large cases at 13 ms per run: 2, 1, 3, 2, 1, the
+    rest 11-12 (409226: 7; 409392 and 409394: 3 and 1). Best judged stays 13 ms.
 - Next: the formatter is at 34 cycles per 16 values whatever the instruction order; `forward` at
   29.3 cycles per iteration against a 24.5 slot bound; `forward_pair` and `inverse` at h = 4
   are out-of-line calls of 2-4 iterations (0.31 and 0.15 ms against 0.275 and 0.135 at large h).
   Page-aligned text with page-multiple blocks (lib/io/notes.md: d = 0 is 1-2.5% faster in
-  `write(2)`) needs a block-size change in the shared `fields.hpp`.
+  `write(2)`) needs a block-size change in the shared `fields.hpp`. `bottom.hpp` would also fit
+  convolution_mod_large and `lib/ntt` itself (every NTT user), once a `lib/` round can afford the
+  re-timing.

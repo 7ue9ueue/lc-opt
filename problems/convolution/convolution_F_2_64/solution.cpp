@@ -23,7 +23,7 @@ namespace {
 using u64 = std::uint64_t;
 
 constexpr int kMaxLog = 20;  // N + M - 1 < 2^20
-constexpr int kMinLog = 4;   // the last four stages run in a 16-element kernel
+constexpr int kMinLog = 4;   // stages 3 to 0 run on groups of 16 words
 
 // Field arithmetic. The polynomial's low part: x^64 = x^4 + x^3 + x + 1.
 
@@ -123,7 +123,7 @@ inline Vec reduce_add(Vec acc, Vec low, Vec high) {
     const Vec s = _mm256_xor_si256(high, _mm256_add_epi64(high, high));  // high << 1 off the shift pipes
     const Vec top = _mm256_shuffle_epi8(fold, _mm256_srli_epi64(high, 60));
     // high * (x^4 + x^3 + x + 1) = s ^ (s << 3) mod x^64. s << 3 is ready last, so it is added last;
-    // the empty asm keeps GCC from reassociating it into the front of the chain (3 cycles later).
+    // the empty asm keeps GCC from reassociating it to the front of the XOR chain (1 cycle shorter).
     Vec sum = _mm256_xor_si256(_mm256_xor_si256(acc, low), _mm256_xor_si256(top, s));
     __asm__("" : "+x"(sum));
     return _mm256_xor_si256(sum, _mm256_slli_epi64(s, 3));

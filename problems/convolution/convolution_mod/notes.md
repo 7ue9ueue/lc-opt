@@ -23,9 +23,10 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
   level between them and the scale) is one pass, `inverse_top`: the scale is folded into the
   twiddles, 9 Shoup products per column instead of 13. Other sizes use `ntt::Convolution`.
 - Input: 9-digit tokens (fft_killer, all_same_01-03: 13 of the 16 large tests) and 1-digit tokens
-  (all_same_00) take a fixed-width fast path in `solution.cpp`: token i starts at 10i (or 2i),
-  so 8 tokens come from four 32-byte loads with no separator search; each block is checked by its
-  separator mask, and the first block that fails, with everything after it, goes to
+  (all_same_00) take a fixed-width fast path (`io::read_fixed`, `lib/io/fixed32.hpp`, moved there
+  from this solution by issue #156): token i starts at 10i (or 2i), so 8 tokens come from four
+  32-byte loads with no separator search; each block is checked by its separator mask, and the
+  first block that fails, with everything after it, goes to
   `io::read_bulk` (`lib/io/bulk32.hpp`, the transposed parser on Zen 3). max_random and
   max_ans_zero have tokens of mixed lengths and take `io::read_bulk` throughout.
 - Output: `fields.hpp`, every value in a 10-byte field (judge-specific; the checker compares
@@ -276,3 +277,9 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
 - 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
   `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
   before (judge flags, `lc-amd`).
+- 2026-10-10, claude (lib, issue #156 round 2): the fixed-width input path moved to
+  `lib/io/fixed32.hpp` (`io::read_fixed`, plus an early return for count 0). convolution_mod_large
+  uses it too. Fixed on the way (found by CI's ASan run of the lib test): when the fixed path took
+  every token, `read_values` still called `io::read_bulk(in, dst + done, 0)`, which off Zen 3 is
+  `Reader::read` and skips whitespace past the end of the input. `judge.py bench`, `lc-bench`:
+  11.83 -> 11.89 ms (1.0038, 31 rounds), sources swapped 0.9994 (41 rounds): noise.

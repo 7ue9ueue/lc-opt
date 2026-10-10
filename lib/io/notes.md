@@ -30,6 +30,12 @@ convolution problems: `problems/convolution/floor.py`.
   two tokens of each stream, into a buffer; a 4x4 transpose of value pairs then writes each
   stream's values in order. Elsewhere `io::read_bulk` is `Reader::read`; `-DIO_BULK32_TRANSPOSE`
   forces either. Like `bulk64.hpp`, it needs no input end.
+- Fixed-width `uint32_t` read (`fixed32.hpp`, `io::read_fixed(in, dst, n)`; from convolution_mod's
+  round 5): if all tokens have 9 digits (or all 1 digit), each with one separator, token i starts
+  at 10i (2i), so a block of 8 (16) tokens is four (one) 32-byte loads with no separator search,
+  checked by its separator masks: ~37 vector ops per 8 tokens. The first block that fails, and the
+  rest of the array, go to `io::read_bulk`; other inputs cost one failed block. Loads stay within
+  the block's bytes plus 2 (the input's zero padding at the end).
 - Output: 64 KiB buffer, `write(2)`. Integers: 4-digit table (10000 entries), groups placed in a
   vector, `pshufb` drops the leading zeros, one 16-byte store. Digit count from a 32-entry table
   (32-bit) or two 65-entry tables (64-bit). No branches on value size. `write<MaxDigits>()` with
@@ -341,6 +347,34 @@ files on tmpfs.
   (unchanged); convolution_F_2_64 409429 45 ms with three launch spikes, clean 38 as before.
   Details in their notes.
 
+2026-10-10, claude, issue #156 round 2 (lib extraction): `fixed32.hpp`, `io::read_fixed`, moved
+from convolution_mod's `read_values` (its notes, round 5, have the design measurements). New: an
+early return for count 0, and no `read_bulk` call when the fixed path took every token.
+`io.hpp`, `bulk32.hpp` and `bulk64.hpp` are unchanged.
+- Bug found by CI's ASan run (a runner without Zen 3, so `read_bulk` is `Reader::read`): the copy
+  called `read_bulk(in, dst + done, 0)` when the fixed path took every token. `Reader::read` skips
+  whitespace before its first token even for count 0; at the end of the input it scans past the
+  buffer (heap overflow with pipe input in `test_bulk_at_end`). The transposed parser (Zen 3) did
+  not, so `lc-amd` passed. convolution_mod's `main.cpp` on main had the same call and passed its
+  official tests on CI's other CPUs; a guess: the scan ran on through zero memory there.
+- Users: convolution_mod (moved) and convolution_mod_large (was `io::read_bulk`; 13 of its 21
+  large inputs have 9-digit tokens, all_same_00 1-digit ones).
+- convolution_mod_large per case, `lc-bench` (EPYC 7B13), medians of 7 interleaved runs (ms),
+  `read_bulk` -> `read_fixed`: fft_killer_01 401.9 -> 390.3, fft_killer_06 400.3 -> 391.2,
+  all_same_00 381.1 -> 351.8, all_same_01 403.3 -> 389.5, max_random_00 402.3 -> 401.7,
+  max_random_01 401.8 -> 403.0, max_ans_zero_00 403.2 -> 401.7. The score stays at the
+  mixed-length inputs (~402 ms): `judge.py bench`, 9 rounds, 8 slowest cases, 0.9957.
+- convolution_mod: `read_fixed` is 263 instructions against `read_values`' 259 (the count check);
+  `BulkParser32::parse` and `fields::write` differ by 3 instructions of register allocation.
+  `judge.py bench`, `lc-bench`, slowest 3 cases: 11.83 -> 11.89 ms (1.0038, 31 rounds); sources
+  swapped, 11.92 vs 11.91 (old/new 0.9994, 41 rounds): noise.
+- Checks (`lc-amd`): official tests 53/53 and 54/54; stress 500 and 200 rounds; ASan/UBSan builds
+  on 6 and 3 official cases with 9-digit, 1-digit and mixed tokens, file and pipe input.
+- Tests: `test.cpp` runs the bulk tests through `read_fixed` and a new `test_fixed` (9- and 1-digit
+  tokens, one defect at a random place: another width, CRLF, two spaces, a tab; more input after
+  or none; file and pipe), at -O2 (native and x86-64-v3) and with ASan/UBSan, each with
+  `-DIO_BULK32_TRANSPOSE=0` and `1`.
+
 ## Sources
 
 - Our own QPoly explorations 007 and 011 (`../SymPoly/work/ntt/io_yosupo`, `io_large`): the
@@ -354,6 +388,9 @@ files on tmpfs.
 
 ## Next
 
+- `Reader::read(dst, 0)` (and `io::read_bulk(in, dst, 0)` off Zen 3) at the end of the input scans
+  past the buffer while skipping whitespace (issue #156, round 2). Return early for count 0 with the
+  next io.hpp change.
 - Bulk write is 1.3 ns per value slower than fixed-width output; the vector work, not the stores,
   is the limit (in-memory: compute 1.4, with movemask 1.7, full 2.4 ns per value).
 - Bulk reads for signed values.

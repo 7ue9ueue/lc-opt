@@ -80,4 +80,5 @@ first version 8.49 (w = 3), 8.55 (w = 4), 8.63 (w = 5), 8.96 (w = 8).
   with `lib/poly/holonomic.hpp` (slopes by V(n) = V0 + n V1 advanced per block, no products;
   chained kernel from w = 6 with slopes). In process (`lc-bench`, 10^6 coefficients) w = 8:
   2.51 -> 2.22 ms; w = 3, 4, 5 (small_dense_00, 06, 08): -0.08, -0.06, -0.05.
-  `judge.py bench` (`lc-bench`, 21 rounds, 4 slowest cases): 7.84 -> 7.61 ms (0.9610).
+  `judge.py bench` (`lc-bench`, 21 rounds, 4 slowest cases): 7.84 -> 7.61 ms (0.9610). Merged as
+  #344; CI sqrt 0.9551 (EPYC 7763 0.9623 and 0.9703, EPYC 9V45 0.9330). Not submitted here.

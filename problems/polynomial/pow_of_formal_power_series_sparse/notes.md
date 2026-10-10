@@ -3,9 +3,10 @@
 f with K <= 10 nonzero terms, N <= 10^6, M <= 10^18; print the first N coefficients of f^M
 mod 998244353. 10 s. Input is tiny; output up to 10 MB.
 
-Best judged: ours, 13 ms: [409426](https://judge.yosupo.jp/submission/409426) (`main.cpp` of
-#196), with one launch spike (max_random_01 13 ms against 3 for its peers); clean score 7 ms
-(`tools/spikes.py`). Record when opened (issue #72): 43 ms.
+Best judged: ours, 10 ms: [409705](https://judge.yosupo.jp/submission/409705) and
+[409706](https://judge.yosupo.jp/submission/409706) (`main.cpp` of #344), each with one launch
+spike (10 ms against 1-2 for its peers); clean score 7 ms (`tools/spikes.py`), small_dense at
+6-7 ms. Record when opened (issue #72): 43 ms.
 
 ## Tests
 
@@ -104,4 +105,16 @@ round 7.49 (1.32; small_dense_02 7.48). The gap is still the solve, 1.92-2.23 ms
       from memory (`vpbroadcastq`, no shuffles): chained 2.26 -> 2.41.
   - Checks: 35/35 official tests (`judge.py test`; exp 25/25, log 24/24, sqrt 45/45);
     `stress.py` 300 rounds each for pow, sqrt and exp; `lib/poly/test.cpp` at -O2 with default
-    kernels, `-DHOLONOMIC_CHAINED=0` and `1`, and ASan/UBSan; mutations fail it (below).
+    kernels, `-DHOLONOMIC_CHAINED=0` and `1`, and ASan/UBSan; 8 mutations fail it (list in
+    `lib/poly/notes.md`).
+  - Merged as #344. CI: pow 0.9639 (EPYC 9V45 0.9686, 7763 0.9738, Xeon 6973P 0.9494), sqrt
+    0.9551, exp 1.0001, log 1.0067 (identical executable); all 4 0.9812. Submitted:
+    [409705](https://judge.yosupo.jp/submission/409705) AC 10 ms, 14.1 MiB: low_deg_zero_01
+    10 (spike; peers 2), small_dense_04, 02 7 ms, 01, 00 6; resubmitted
+    [409706](https://judge.yosupo.jp/submission/409706) AC 10 ms: random_03 10 (spike; peers 1),
+    small_dense_04, 02, 00 7, 01 6. `tools/spikes.py`: clean 7 ms for both (P(clean run) = 0.15);
+    not resubmitted again. The judge rounds the 0.1-0.2 ms gained per case away.
+- Next: the solve is 1.9-2.2 ms of 7.5 on `lc-bench` (floor 5.4-5.7). The chained kernel runs
+  at about 123 cycles per 16 coefficients against a chain of about 72 and about 80 cycles of
+  vector ops; the batch inversion takes 0.18-0.31 ms. A 6 ms judged score needs about 0.3-0.5 ms
+  more (a guess from the 6-7 ms spread of small_dense).

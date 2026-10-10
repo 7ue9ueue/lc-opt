@@ -38,7 +38,10 @@ tables 0.07, inverse 8.26, format 0.32 (to /dev/null); total 9.5. Whole process 
     reciprocal and Schoenhage's 3k-length step (estimates in lib/poly/notes.md).
   - Submitted the merged `main.cpp` (#107): [409242](https://judge.yosupo.jp/submission/409242)
     AC 13 ms, 14.9 MiB.
+- 2026-10-09, claude (lib/poly round, issue #95): faster leaf products (#158; lib/poly/notes.md):
+  `cyclic_product` at 2^19 3.38 -> 3.07 ns per coefficient. `judge.py bench` (21 rounds):
+  `lc-amd` 13.11 -> 12.52 ms (0.9550), `lc-intel` 0.9800; CI 0.9493. Not submitted (0.6 ms).
 - Next: the transform levels run at ~4.5 cycles per vector per radix-4 level, near the ~3.6 cycle
-  uop bound; the leaf product at ~23 cycles per leaf inside `cyclic_product` (bound ~11 by uop
-  count). A scheduled asm bottom (as lib/ntt's generator does) is the largest item left; then
-  writing g directly from the last inverse (0.15 ms) and a smaller arena (~1-2 MiB less first touch).
+  uop bound; the leaf product now at ~16 cycles per leaf inside `cyclic_product` (multiply-pipe
+  bound ~12). Then writing g directly from the last inverse (0.15 ms) and a smaller arena (~1-2
+  MiB less first touch).

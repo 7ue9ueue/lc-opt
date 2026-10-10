@@ -362,6 +362,10 @@ products 1.77 and 1.69).
   log 0.9442, pow 0.9311, sqrt 0.9490 (exp 18.65 -> 17.53 ms, pow 29.33 -> 27.33 ms); `lc-intel`
   inv 0.9800, exp 0.9841, log 0.9700, pow 0.9768, sqrt 0.9826. All official tests pass
   (`judge.py test`, `lc-amd`).
+- Merged as #158 (CI: exp 0.9384, inv 0.9493, log 0.9529, pow 0.9402, sqrt 0.9561; all 5
+  0.9473). Judged: exp [409327](https://judge.yosupo.jp/submission/409327) AC 18 ms (one case
+  at 18, the rest <= 17); pow [409328](https://judge.yosupo.jp/submission/409328) AC 32 ms
+  with two launch spikes, large cases 25-27 ms (clean 27, was 29).
 
 ## Sources
 

@@ -4,9 +4,8 @@ N <= 131072 coefficients of f and of g (g[0] = 0) mod 998244353; print f(g) mod 
 Slowest tests: max_random, hack, hack2 and random_00, _01 (N = 131072; hack and hack2 start g
 after a run of zeros, which the algorithm does not use). mid: N <= 8000; small: N <= 10.
 
-Best judged: ours, 39 ms, no spike: [409504](https://judge.yosupo.jp/submission/409504)
-(`main.cpp` of #238). Clean score 35 ms: [409517](https://judge.yosupo.jp/submission/409517)
-(#242, judged 43 ms from two +9 ms launch spikes).
+Best judged: ours, 35 ms: [409535](https://judge.yosupo.jp/submission/409535) (`main.cpp` of
+#253; its one launch spike, on mid_04, does not set the score).
 Record when opened (issue #86): 72 ms.
 
 ## Design
@@ -80,18 +79,26 @@ generic levels 2 .. 13 forward 9.09 (with the Graeffe bottom ~3.0) + 2.76, backw
   (GCC left them scalar at -O2; the final h loop took 125 µs alone). compose in process 29.86 ->
   29.40 ms. `judge.py bench` (21 rounds, against #248): `lc-amd` 0.9879 (34.41 -> 34.03 ms),
   `lc-intel` 0.9912.
+- Merged as #253 (CI 0.9929 for this problem). Submitted:
+  [409535](https://judge.yosupo.jp/submission/409535) AC 35 ms, 40.0 MiB: 17 of the 19 large
+  cases 33 ms, random_00 35, hack_01 34; mid_04 took 10 ms against its peers' 2 (a launch spike,
+  not the max). New best judged: 35 ms (was 39, 409504). 3 of the session's 5 submissions used.
 - Tried, not kept: level T - 4 one-dimensional too (column levels for 16 columns: 28 products
   forward, 64 backward, at m/8). In process at m = 2^17: forward 766 µs, backward 1249 µs against
   ~1030 each for the generic level; compose 29.8 ms either way. Its leaf products cost 15-18 µs
   per 2048 leaves in sums of 8 (~31 cycles a leaf: 16 operand arrays of 64 KB exceed L2) against
   13 for a single product. Preparing the windows 2 or 3 groups ahead instead of 1 changed
   nothing (one product: 25.3, 24.9, 25.0 µs including the inverse of 12.3).
+- Profile of #253's `main.cpp` (`lc-intel`, `perf`, x86-64-v3, 30 runs of max_random_00):
+  transform levels ~50% (radix-4 kernels, column loops, bottoms), CompositionBottom 14.7%,
+  LevelBottom 8.7%, page zeroing (kernel_init_pages) 4.2%.
 - Next: the y levels by doubling (from V's transform at 2Y points, Q_(s+1) at the other 2Y
   points by an inverse and a forward in y of the truncated rows; the first half of the next
-  level's transform then needs no y levels): counted ~9-11% of the transform work, ~1.5-2 ms;
-  radix-4 subtrees do not align with the x blocks at odd s. Level T - 4 one-dimensional: ~0.5 ms
-  (estimate). Pack the small levels in memory (~3 huge pages, ~0.3 ms) and run the backward
-  pass in dead levels' storage (2 work spans of 2 MiB).
+  level's transform then needs no y levels): counted for the forward pass, (a + 2) m fewer
+  word-levels per level (a = log 2Y), ~0.5 ms; the backward pass's transpose needs one more x
+  transform and does not pay. Radix-4 subtrees do not align with the x blocks at odd s. The
+  bottoms (~23% of the profile) are near their uop count in this form (Graeffe ~220 cycles per
+  8 pairs, product ~250); a cheaper leaf formulation would be the next step there.
 
 ## Sources
 

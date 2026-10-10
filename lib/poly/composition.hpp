@@ -326,9 +326,10 @@ private:
     std::span<std::uint32_t> rest_;
 };
 
-// The levels of g (T of them, each the transform of length 4m of Q_s) and work spans.
+// The levels of g and work spans. Level 0 holds the transform of length 2m of g, levels
+// 1 .. T - 2 that of length 4m of Q_s, level T - 1 that of length m of -q, Q_(T-1) = 1 + x q(y).
 struct Levels {
-    std::size_t m;  // 2^T >= 64
+    std::size_t m;  // 2^T >= 128
     int lg;         // T
     Tables tables;
     std::span<std::uint32_t> transforms;
@@ -349,13 +350,6 @@ struct Levels {
     }
 };
 
-// Q_0 = 1 - y g(x) at stride 2m: a[0] = 1, a[2m + j] = -g[j].
-inline void first_level(std::span<const std::uint32_t> g, std::size_t m, std::span<std::uint32_t> a) {
-    std::fill(a.begin(), a.end(), 0);
-    a[0] = 1;
-    for (std::size_t j = 1; j < std::min(g.size(), m); ++j) a[2 * m + j] = g[j] ? kP - g[j] : 0;
-}
-
 // From v = Q_s(x) Q_s(-x) mod (z^(2m) - 1) at stride L (2Y rows, wrapped: row 0 holds 1 + row 2Y) in
 // a[0, 2m), Q_(s+1) at stride L in a: x below L / 2, rows 0 .. 2Y of 4Y.
 inline void next_level(std::span<std::uint32_t> a, std::size_t stride, std::size_t rows) {
@@ -370,17 +364,39 @@ inline void next_level(std::span<std::uint32_t> a, std::size_t stride, std::size
 }
 
 // The transforms of all levels of g. t: lg_max >= levels.lg + 1.
+//  - Level 0, Q_0 = 1 - y g: G = T_2m(g); with u = x^2, g(x) g(-x) = v(u) from G by LevelBottom's
+//    pairs, and Q_1 = 1 - 2y ge(u) + y^2 v(u) mod u^(m/2), g = ge(x^2) + x go(x^2).
+//  - Level T - 2 (stride 4): Q_(T-1) = 1 + x q(y), deg q <= m/2, from v at stride 4: q[i] = v[4i + 1]
+//    for 0 < i < m/2 and the wrapped q[m/2] = v[1].
 inline void build_levels(const Transform& t, std::span<const std::uint32_t> g, Levels& levels) {
     const std::size_t m = levels.m;
-    const std::span<std::uint32_t> graeffe = levels.work[0].first(2 * m);
-    first_level(g, m, levels.level(0));
-    for (int s = 0; s < levels.lg; ++s) {
-        const bool last = s + 1 == levels.lg;
-        forward_with(levels.level(s), levels.tables, LevelBottom{&levels.tables, last ? nullptr : graeffe.data()});
-        if (last) break;
-        t.inverse(graeffe, levels.level(s + 1).first(2 * m));
-        next_level(levels.level(s + 1), m >> s, std::size_t(2) << s);
+    const std::span<std::uint32_t> v = levels.work[0].first(2 * m), q0 = levels.level(0).first(2 * m);
+    std::fill(q0.begin(), q0.end(), 0);
+    std::copy(g.begin() + std::ptrdiff_t(std::min<std::size_t>(g.size(), 1)), g.begin() + std::ptrdiff_t(std::min(g.size(), m)),
+              q0.begin() + 1);
+    forward_with(q0, levels.tables, LevelBottom{&levels.tables, v.data()});
+    t.inverse(v.first(m));
+    const std::span<std::uint32_t> q1 = levels.level(1);
+    std::fill(q1.begin(), q1.end(), 0);  // stride m: rows 1, -2 ge, v
+    q1[0] = 1;
+    for (std::size_t j = 0; j < m / 2; ++j) {
+        const std::uint32_t e = j > 0 && 2 * j < g.size() ? g[2 * j] : 0, minus_2e = e ? 2 * kP - 2 * e : 0;  // < 2P
+        q1[m + j] = minus_2e >= kP ? minus_2e - kP : minus_2e;
+        q1[2 * m + j] = v[j];
     }
+    for (int s = 1; s + 1 < levels.lg; ++s) {
+        forward_with(levels.level(s), levels.tables, LevelBottom{&levels.tables, v.data()});
+        if (s + 2 < levels.lg) {
+            t.inverse(v, levels.level(s + 1).first(2 * m));
+            next_level(levels.level(s + 1), m >> s, std::size_t(2) << s);
+        }
+    }
+    t.inverse(v);  // stride 4
+    const std::span<std::uint32_t> q = levels.level(levels.lg - 1).first(m);
+    std::fill(q.begin(), q.end(), 0);
+    for (std::size_t i = 1; i < m / 2; ++i) q[i] = v[4 * i + 1] ? kP - v[4 * i + 1] : 0;
+    q[m / 2] = v[1] ? kP - v[1] : 0;
+    t.forward(q);
 }
 
 }  // namespace detail
@@ -388,13 +404,13 @@ inline void build_levels(const Transform& t, std::span<const std::uint32_t> g, L
 // Transform length compose() uses for n coefficients: the Transform needs lg_max >= this.
 inline int compose_log(std::size_t n) {
     if (n <= detail::kComposeBase) return Transform::kMinLog;
-    return int(std::bit_width(n - 1)) + 1;
+    return int(std::bit_width(std::max<std::size_t>(n, 128) - 1)) + 1;
 }
 
 // Scratch words for compose() of n coefficients.
 inline std::size_t compose_scratch(std::size_t n) {
     if (n <= detail::kComposeBase) return 0;
-    return detail::Levels::scratch(std::bit_ceil(n));
+    return detail::Levels::scratch(std::bit_ceil(std::max<std::size_t>(n, 128)));
 }
 
 // h = f(g) mod x^n for n = h.size() >= 1 and g[0] = 0 (if g is not empty); coefficients past
@@ -407,29 +423,46 @@ inline std::size_t compose_scratch(std::size_t n) {
 // reversed in x and y (stored at stride L), this is R = P(z^2) Q_s(-z) mod (z^4m - 1): P_s[a][b] =
 // R[L - 1 - a][2Y - 1 - b], so rows Y .. 2Y - 1 of R, x below L, are P_s reversed in x and y, the
 // input of level s - 1. P_T = f (one row in x); h[k] = P_0[m - 1 - k][0] = R[k][1] at level 0.
+// The first and last levels are one-dimensional:
+//  - level T - 1: P = f reversed, R = p(y) (1 - x q(y)): rows y in [m/2, m) of p and -p q;
+//  - level 0: P = p0(x) + y p1(x), R's row 1 = p1(x^2) - p0(x^2) g(-x) = h.
 inline void compose(const Transform& t, std::span<const std::uint32_t> f, std::span<const std::uint32_t> g,
                     std::span<std::uint32_t> h, std::span<std::uint32_t> scratch) {
+    using ntt::detail::multiply_mod, ntt::detail::power;
     const std::size_t n = h.size();
     if (n <= detail::kComposeBase) return detail::compose_direct(f, g, h);
-    detail::Levels levels(std::bit_ceil(n), scratch);
+    detail::Levels levels(std::bit_ceil(std::max<std::size_t>(n, 128)), scratch);
     detail::build_levels(t, g, levels);
     const std::size_t m = levels.m;
-    const std::uint32_t scale = ntt::detail::multiply_mod(ntt::detail::power(std::uint32_t(m / 2), kModulus - 2), ntt::detail::kR);
     std::span<std::uint32_t> in = levels.work[0], out = levels.work[1];
-    // Level T - 1 reads f reversed at stride 2 (x below 1, m rows) from in[2m, 4m).
-    for (std::size_t i = 0; i < m; ++i) in[2 * m + 2 * i] = m - 1 - i < f.size() ? f[m - 1 - i] : 0, in[2 * m + 2 * i + 1] = 0;
-    for (int s = levels.lg - 1; s >= 0; --s) {
-        const std::span<std::uint32_t> p = in.subspan(2 * m);
-        t.forward(p);
-        detail::inverse_with(out, levels.tables, detail::CompositionBottom{&levels.tables, p.data(), levels.level(s).data()},
+    // Level T - 1 into in[2m, 4m) at stride 4: rows [p[m/2 + i], (-p q)[m/2 + i], 0, 0].
+    const std::span<std::uint32_t> p = out.first(m), pq = out.subspan(m, m);
+    for (std::size_t i = 0; i < m; ++i) p[i] = m - 1 - i < f.size() ? f[m - 1 - i] : 0;
+    t.cyclic_product(p, 0, pq, levels.level(levels.lg - 1).first(m), Half::kUpper);
+    for (std::size_t i = 0; i < m / 2; ++i) {
+        in[2 * m + 4 * i] = p[m / 2 + i], in[2 * m + 4 * i + 1] = pq[m / 2 + i];
+        in[2 * m + 4 * i + 2] = in[2 * m + 4 * i + 3] = 0;
+    }
+    const std::uint32_t scale = multiply_mod(power(std::uint32_t(m / 2), kModulus - 2), ntt::detail::kR);
+    for (int s = levels.lg - 2; s >= 1; --s) {
+        const std::span<std::uint32_t> x = in.subspan(2 * m);
+        t.forward(x);
+        detail::inverse_with(out, levels.tables, detail::CompositionBottom{&levels.tables, x.data(), levels.level(s).data()},
                              scale, Half::kUpper);
         const std::size_t stride = 2 * (m >> s);  // rows of R; level s - 1 reads x below stride / 2
-        if (s > 0)
-            for (std::size_t i = 2 * m; i < 4 * m; i += stride)
-                std::fill(out.begin() + std::ptrdiff_t(i + stride / 2), out.begin() + std::ptrdiff_t(i + stride), 0);
+        for (std::size_t i = 2 * m; i < 4 * m; i += stride)
+            std::fill(out.begin() + std::ptrdiff_t(i + stride / 2), out.begin() + std::ptrdiff_t(i + stride), 0);
         std::swap(in, out);
     }
-    std::copy(in.begin() + std::ptrdiff_t(2 * m), in.begin() + std::ptrdiff_t(2 * m + n), h.begin());
+    // Level 0: p0 = in[2m, 3m), p1 = in[3m, 4m) (x below m/2).
+    const std::span<std::uint32_t> p0 = in.subspan(2 * m, m), r = out.first(2 * m);
+    t.forward(p0);
+    detail::inverse_with(r, levels.tables, detail::CompositionBottom{&levels.tables, p0.data(), levels.level(0).data()},
+                         multiply_mod(power(std::uint32_t(m / 4), kModulus - 2), ntt::detail::kR), Half::kLower);
+    for (std::size_t k = 0; k < n; ++k) {
+        const std::uint32_t a = k % 2 ? 0 : in[3 * m + k / 2];
+        h[k] = a >= r[k] ? a - r[k] : a + kModulus - r[k];
+    }
 }
 
 }  // namespace poly

@@ -32,7 +32,7 @@ Record when opened: 37 ms. Best judged: ours, [409237](https://judge.yosupo.jp/s
     prefix 2 by source). Target segments of 2^15 pairs descend: stage 0 sources (below the
     segment) are still old. Segment 0 by source, stage 0 first.
   - Moebius = stage 1 after stage 2, each c_im -= final c_i. A prefix copy gets stage 2 first;
-    segments of 2^16 dwords ascend, stage 1 reads final values below.
+    segments of 2^15 dwords ascend, stage 1 reads final values below.
   - In a segment, m <= 4096 go by m over a run of sources; larger m by source i <= n / 4097 over
     a run of m (carried index; sentinels 0 and 2^20 frame the list). m <= 256 of all stages take
     the segment together in 32 KiB pieces (zeta: ascending pieces, stateless bounds).
@@ -149,10 +149,14 @@ Record when opened: 37 ms. Best judged: ours, [409237](https://judge.yosupo.jp/s
   - Counted, not built (Python, N = 10^6): three stages (cuts 100, 1000) 1.716 N per transform
     against 1.767 N; four (50, 300, 1000) 1.654 N. Moebius 5..13 as a sweep stage needs final
     sources, so every 5..13-smooth m (0.738 N) against 0.511 N in passes: break-even estimate.
-  - `judge.py bench`, `lc-bench`, 31 rounds, slowest 3 cases: 15.21 → 14.29 ms (0.944).
-  - Checks: 29/29 official tests (`judge.py test`, slowest 15.0 ms on `lc-amd`); `stress.py`
-    300 rounds (gcc:15.2.0); ASan/UBSan (-O1, x86-64-v3) on all 29 tests, file and pipe input,
-    tokens equal to the expected output.
+  - Segments again, with the new loops (wall, 31-41 runs): Moebius 2^15 dwords 0.988 and 0.992
+    (IQR 0.987-0.997; targets and sources now fit L2), 2^14 0.999, 2^17 0.998; zeta 2^14 pairs
+    1.008, 2^16 0.999 (2^16 with Moebius 2^15: 1.000). Kept Moebius 2^15, zeta 2^15.
+  - `judge.py bench`, `lc-bench`, 31 rounds, slowest 3 cases: 15.21 → 14.29 ms (0.944) before
+    the Moebius segment change; 15.16 → 14.14 ms (0.936) after.
+  - Checks (final): 29/29 official tests (`judge.py test`, slowest 15.2 ms on `lc-amd`);
+    `stress.py` 300 rounds (gcc:15.2.0); ASan/UBSan (-O1, x86-64-v3) on all 29 tests, file and
+    pipe input, tokens equal to the expected output.
 
 ## Next
 

@@ -757,7 +757,9 @@ G = rev(g) and k = n - d: rev(q) = F / G mod x^k, rev(r) = (F - G rev(q))[k, n).
   c[0, D - L] comes from R1 times (a, b) mod x^(D - L + 1), whose support ends at n - L <= L
   (coefficient L wraps onto 0, fixed from the entries' coefficients 0). For n = 2k: 4 transforms
   (2 half-sparse), 8 leaf products and 4 inverses of length k, against 2 transforms, 4 products,
-  2 inverses of length 2k and R1's transforms at 2k. No mixing when D < L (the spine).
+  2 inverses of length 2k and R1's transforms at 2k. No mixing when D < L (the spine). When
+  few coefficients wrap (2 (D - L) + 1 <= L / 2), the low part is a short product of that
+  length instead (n = 50000: 848 coefficients at the top, 1.2% faster).
 - Combine: R2 R1 by cyclic products of length L = bit_ceil(p), p the progress (coefficient p = L
   wraps onto 0). Product transforms are kept: the parent's transforms of length 2L come from them
   by `forward_upper` of the entry mod x^L + 1 (doubling, as product_tree.hpp). `products<K>`

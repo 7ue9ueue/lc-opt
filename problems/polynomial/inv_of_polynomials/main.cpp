@@ -7987,13 +7987,28 @@ private:
             return stack_.release(mark);
         }
         const std::size_t low = std::size_t(mixed + 1);
-        transform_.forward(std::span<const std::uint32_t>(a, low), 0, ta);
-        transform_.forward(std::span<const std::uint32_t>(b, std::min(low, std::size_t(m + 1))), 0, tb);
         const std::span<std::uint32_t> lc = take(len), ld = take(len);
-        apply_products(r1, ta, tb, lc, ld);
-        // Coefficient L of the low products (if n = 2L) wraps onto 0.
-        lc[0] = std::uint32_t((std::uint64_t(r1.at0[0]) * a[0] + std::uint64_t(r1.at0[1]) * b[0]) % kP);
-        ld[0] = std::uint32_t((std::uint64_t(r1.at0[2]) * a[0] + std::uint64_t(r1.at0[3]) * b[0]) % kP);
+        const std::size_t short_len = std::max<std::size_t>(64, std::bit_ceil(2 * low - 1));
+        if (short_len < len) {
+            // Few wrapped coefficients: (r1 mod x^low) (a, b mod x^low) of degree < 2 low - 1.
+            Matrix r = r1;
+            for (int i = 0; i < 4; ++i) {
+                r.transform[i] = take(short_len).data();
+                transform_.forward(std::span<const std::uint32_t>(r1.entry[i], std::min(low, r1.size[i])), 0,
+                                   std::span<std::uint32_t>(r.transform[i], short_len));
+            }
+            const std::span<std::uint32_t> sa = ta.first(short_len), sb = tb.first(short_len);
+            transform_.forward(std::span<const std::uint32_t>(a, low), 0, sa);
+            transform_.forward(std::span<const std::uint32_t>(b, std::min(low, std::size_t(m + 1))), 0, sb);
+            apply_products(r, sa, sb, lc.first(short_len), ld.first(short_len));
+        } else {
+            transform_.forward(std::span<const std::uint32_t>(a, low), 0, ta);
+            transform_.forward(std::span<const std::uint32_t>(b, std::min(low, std::size_t(m + 1))), 0, tb);
+            apply_products(r1, ta, tb, lc, ld);
+            // Coefficient L of the low products (if n = 2L) wraps onto 0.
+            lc[0] = std::uint32_t((std::uint64_t(r1.at0[0]) * a[0] + std::uint64_t(r1.at0[1]) * b[0]) % kP);
+            ld[0] = std::uint32_t((std::uint64_t(r1.at0[2]) * a[0] + std::uint64_t(r1.at0[3]) * b[0]) % kP);
+        }
         // [s2, mixed] from the low products, (mixed, L) as computed, [L, c_deg] unwrapped.
         const std::ptrdiff_t first = std::min(s2, mixed + 1);
         std::copy(lc.begin() + first, lc.begin() + mixed + 1, c + first);

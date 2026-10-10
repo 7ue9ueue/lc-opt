@@ -51,7 +51,7 @@ Record when opened (issue #30): 81 ms.
   step, times 1/4, then to log order. Output levels m <= 7: direct cyclic convolutions.
 - Output: levels interleaved back by chunks (the inverse of the input deinterleave), formatted by
   `../convolution_mod/fields.hpp` (fixed-width fields). `.preinit_array` start, `_exit`.
-  The input mapping is advised `MADV_SEQUENTIAL` (as `../gcd_convolution`).
+  The input mapping is advised `MADV_SEQUENTIAL` (`io::advise_sequential`).
 
 ## Log
 
@@ -166,6 +166,9 @@ Record when opened (issue #30): 81 ms.
   stage count pay one more pass (radix-2 top); products sit at 13.5 cycles each against about 10
   for the `vpmuludq` bound; a fused recursion over all levels (products and inverse steps per
   block, twiddles shared) is untried.
+- 2026-10-10, claude (lib, issue #156 round 3): `advise_sequential` comes from
+  `lib/io/sequential.hpp` (`io::advise_sequential`) instead of a local copy. Same stripped
+  executable as before (judge flags, `lc-amd`).
 
 ## Sources
 

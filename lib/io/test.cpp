@@ -3,11 +3,13 @@
 #include "lib/io/bulk32.hpp"
 #include "lib/io/bulk64.hpp"
 #include "lib/io/fixed32.hpp"
+#include "lib/io/sequential.hpp"
 
 #include <sys/wait.h>
 
 #include <charconv>
 #include <cstdio>
+#include <fstream>
 #include <limits>
 #include <random>
 #include <string>
@@ -487,6 +489,47 @@ void test_write_array() {
     ::close(fd);
 }
 
+// Whether the mapping that holds address carries the sequential-read advice ("sr" in its VmFlags,
+// Linux).
+bool advised_sequential(const void* address) {
+    std::ifstream smaps("/proc/self/smaps");
+    std::string line;
+    bool inside = false;
+    const auto at = reinterpret_cast<std::uintptr_t>(address);
+    while (std::getline(smaps, line)) {
+        unsigned long begin, end;
+        if (std::sscanf(line.c_str(), "%lx-%lx ", &begin, &end) == 2) inside = begin <= at && at < end;
+        else if (inside && line.starts_with("VmFlags:")) return (line + ' ').find(" sr ") != std::string::npos;
+    }
+    return false;
+}
+
+// advise_sequential after the first token: the mapped file's pages are advised sequential, and
+// reading goes on unchanged; pipes and files the Reader copies are left alone.
+void test_advise_sequential() {
+    std::string text;
+    std::uint32_t count = 0;
+    while (text.size() <= 3 * io::detail::kMapAbove) text += text_of(count++) + separator(false);
+    for (int source = 0; source < 3; ++source) {
+        const int fd = source == 0 ? file_with(text) : source == 1 ? pipe_with(text) : file_with("1 2 3");
+        io::Reader in(fd);
+        const std::uint32_t first = in.read<std::uint32_t>();
+        io::advise_sequential(in, fd);
+#ifdef __linux__
+        CHECK(advised_sequential(in.scan().cur) == (source == 0));
+#endif
+        if (source == 2) {
+            CHECK(first == 1 && in.read<std::uint32_t>() == 2 && in.read<std::uint32_t>() == 3);
+        } else {
+            bool ok = first == 0;
+            for (std::uint32_t i = 1; i < count; ++i) ok &= in.read<std::uint32_t>() == i;
+            CHECK(ok);
+        }
+        ::close(fd);
+    }
+    reap();
+}
+
 }  // namespace
 
 int main() {
@@ -517,6 +560,7 @@ int main() {
     test_writer();
     test_vector_arithmetic();
     test_write_array();
+    test_advise_sequential();
     std::printf("%s\n", failures ? "FAIL" : "PASS");
     return failures != 0;
 }

@@ -38,7 +38,7 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.36 ms on `lc-amd`.
   block ends with '\n'.
 - Input: `runs.hpp`: runs of tokens of one length at a constant stride, 8 per step (the scheme of
   `../min_plus_convolution_convex_convex`); after 64 + 1/64 misses, `io::read_bulk` for the rest.
-  The input mapping is advised `MADV_SEQUENTIAL` (as `../bitwise_and_convolution`).
+  The input mapping is advised `MADV_SEQUENTIAL` (`io::advise_sequential`).
 - `.preinit_array` start and `_exit`, one huge-page arena (text buffer first, list buffers last).
 
 ## Log
@@ -133,6 +133,9 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.36 ms on `lc-amd`.
     [409563](https://judge.yosupo.jp/submission/409563) AC 19 ms (spike on monotone_02, clean 9);
     [409564](https://judge.yosupo.jp/submission/409564) AC 9 ms (spike only on example_00). Large
     cases 7-9 ms (409229: 9-11). New best (was 11 ms).
+- 2026-10-10, claude (lib, issue #156 round 3): `advise_sequential` comes from
+  `lib/io/sequential.hpp` (`io::advise_sequential`) instead of a local copy. Same stripped
+  executable as before (judge flags, `lc-amd`).
 
 ## Next
 

@@ -7,8 +7,6 @@
 // sweep with the last two stages.
 // a and b are interleaved as pairs, so one load fetches both. Design and measurements: notes.md.
 #include <immintrin.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -19,6 +17,7 @@
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
+#include "lib/io/sequential.hpp"
 #include "lib/mem/huge.hpp"
 #include "lib/run/early.hpp"
 #include "../convolution_mod/fields.hpp"
@@ -547,19 +546,10 @@ void moebius_sweep(std::uint32_t* c, std::uint32_t n, std::uint32_t* prefix) {
     }
 }
 
-// Marks a mapped input as read once, so the kernel skips marking each page accessed when the
-// Reader unmaps it. The range starts at the page of the next token.
-void advise_sequential(const io::Reader& in) {
-    struct stat st;
-    if (::fstat(0, &st) != 0 || !S_ISREG(st.st_mode) || std::size_t(st.st_size) <= io::detail::kMapAbove) return;
-    const auto start = reinterpret_cast<std::uintptr_t>(in.scan().cur) & ~std::uintptr_t(4095);
-    ::madvise(reinterpret_cast<void*>(start), std::size_t(st.st_size), MADV_SEQUENTIAL);
-}
-
 void solve() {
     io::Reader in;
     const auto n = in.read<std::uint32_t>();
-    advise_sequential(in);
+    io::advise_sequential(in);
     // One region: the pairs (2 words each), with a parsed into their second half, later c; then
     // scratch: chunks of b, later the sweeps' prefix copies, later the output text. b goes by
     // chunks so that its pages need not be faulted in: 5 huge pages instead of 7.

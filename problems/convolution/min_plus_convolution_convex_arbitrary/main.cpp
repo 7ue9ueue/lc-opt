@@ -769,6 +769,34 @@ private:
 };
 
 }  // namespace io
+// lib/io/sequential.hpp
+// Marks a mapped input as read once (MADV_SEQUENTIAL): when the Reader unmaps it, the kernel then
+// skips marking each page accessed, 0.03-0.04 ms per 20 MB (lib/io/notes.md).
+//
+//   io::Reader in;
+//   const auto n = in.read<std::uint32_t>();
+//   io::advise_sequential(in);   // while the Reader is in the input's first page
+//
+// fd is the Reader's. Inputs the Reader copies (pipes, files of kMapAbove bytes or less) are left
+// alone.
+
+#include <sys/mman.h>
+#include <sys/stat.h>
+
+#include <cstddef>
+#include <cstdint>
+
+
+namespace io {
+
+inline void advise_sequential(const Reader& in, int fd = 0) {
+    struct stat st;
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || std::size_t(st.st_size) <= detail::kMapAbove) return;
+    const auto start = reinterpret_cast<std::uintptr_t>(in.scan().cur) & ~std::uintptr_t(4095);
+    ::madvise(reinterpret_cast<void*>(start), std::size_t(st.st_size), MADV_SEQUENTIAL);
+}
+
+}  // namespace io
 // lib/mem/huge.hpp
 // Zero-filled memory in transparent huge pages (2 MiB) where the kernel allows. Never freed: the
 // programs end with _exit. Linux or macOS. Measurements: lib/mem/notes.md.
@@ -1937,19 +1965,10 @@ void block_minima(const u32* x, std::size_t blocks, u32* least) {
     }
 }
 
-// Marks a mapped input as read once, so the kernel skips marking each page accessed when the
-// Reader unmaps it (as ../bitwise_and_convolution). The mapping starts at the page of the first token.
-void advise_sequential(const io::Reader& in) {
-    struct stat st;
-    if (::fstat(0, &st) != 0 || !S_ISREG(st.st_mode) || std::size_t(st.st_size) <= io::detail::kMapAbove) return;
-    const auto start = reinterpret_cast<std::uintptr_t>(in.scan().cur) & ~std::uintptr_t(4095);
-    ::madvise(reinterpret_cast<void*>(start), std::size_t(st.st_size), MADV_SEQUENTIAL);
-}
-
 void solve() {
     io::Reader in;
     const std::size_t n = in.read<u32>(), m = in.read<u32>(), count = n + m - 1;
-    advise_sequential(in);
+    io::advise_sequential(in);
     const std::size_t groups = (count + kGroup - 1) / kGroup, nodes = std::bit_ceil(groups) + 1;
     const std::size_t a_blocks = (n + kBlock - 1) / kBlock, b_blocks = (m + kBlock - 1) / kBlock;
     mem::Arena arena(columns::kTextBytes + 4 * (kAPad + n + kTail + m + kTail + nodes + b_blocks + a_blocks + 1 +

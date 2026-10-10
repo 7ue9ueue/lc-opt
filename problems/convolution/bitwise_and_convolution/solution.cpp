@@ -9,11 +9,11 @@
 // product and the inverse row-bit levels; each row then gets its inverse low levels, and the
 // band's values are printed as they become ready.
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
+#include "lib/io/sequential.hpp"
 #include "../convolution_mod/fields.hpp"
 #include "../text_buffer.hpp"
 
@@ -205,15 +205,6 @@ std::uint32_t* allocate(std::size_t words) {
     return reinterpret_cast<std::uint32_t*>(start - small);
 }
 
-// Marks a mapped input as read once, so the kernel skips marking each page accessed when the
-// Reader unmaps it (0.04 ms per 20 MB). The mapping starts at the page of the first token.
-void advise_sequential(const io::Reader& in) {
-    struct stat st;
-    if (::fstat(0, &st) != 0 || !S_ISREG(st.st_mode) || std::size_t(st.st_size) <= io::detail::kMapAbove) return;
-    const auto start = reinterpret_cast<std::uintptr_t>(in.scan().cur) & ~std::uintptr_t(4095);
-    ::madvise(reinterpret_cast<void*>(start), std::size_t(st.st_size), MADV_SEQUENTIAL);
-}
-
 // The inverse low levels of each row of a band, then its values as fixed-width text: whole blocks
 // as rows finish, the rest at the band's end, so every write(2) goes straight from text.
 void print_band(io::Writer& out, std::uint32_t* band, std::size_t rows, std::size_t block, std::size_t count,
@@ -231,7 +222,7 @@ void print_band(io::Writer& out, std::uint32_t* band, std::size_t rows, std::siz
 void solve() {
     io::Reader in;
     const int n = int(in.read<std::uint32_t>());
-    advise_sequential(in);
+    io::advise_sequential(in);
     const std::size_t total = std::size_t(1) << n;
     const int lg = std::max(n, kMinLog), block_log = std::min(lg, kBlockLog), rows_log = lg - block_log;
     const std::size_t block = std::size_t(1) << block_log, rows = std::size_t(1) << rows_log;

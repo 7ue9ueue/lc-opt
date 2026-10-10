@@ -6,8 +6,6 @@
 // segment by segment so the sources stay in L2 (in L1 for m < 256).
 // a and b are interleaved as pairs, so one load fetches both.
 #include <immintrin.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -18,6 +16,7 @@
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
+#include "lib/io/sequential.hpp"
 #include "lib/mem/huge.hpp"
 #include "lib/run/early.hpp"
 #include "../convolution_mod/fields.hpp"
@@ -534,19 +533,10 @@ void moebius_rough(std::uint32_t* c, std::uint32_t n, std::uint32_t* b2) {
     }
 }
 
-// Marks a mapped input as read once, so the kernel skips marking each page accessed when the
-// Reader unmaps it (0.03 ms per 20 MB). The mapping starts at the page of the first token.
-void advise_sequential(const io::Reader& in) {
-    struct stat st;
-    if (::fstat(0, &st) != 0 || !S_ISREG(st.st_mode) || std::size_t(st.st_size) <= io::detail::kMapAbove) return;
-    const auto start = reinterpret_cast<std::uintptr_t>(in.scan().cur) & ~std::uintptr_t(4095);
-    ::madvise(reinterpret_cast<void*>(start), std::size_t(st.st_size), MADV_SEQUENTIAL);
-}
-
 void solve() {
     io::Reader in;
     const auto n = in.read<std::uint32_t>();
-    advise_sequential(in);
+    io::advise_sequential(in);
     // One region: the pairs, with a parsed into their first half; then b, later c; then the stage-2
     // sums of the rough sweeps (t2: pairs, b2: words). The pairs' first huge page later holds the
     // output text.

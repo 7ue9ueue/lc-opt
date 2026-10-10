@@ -28,7 +28,8 @@ Next other user: 26 ms (adamant, 400554).
   stay transposed (the product does not care); the inverse restores them. The forward pass
   prefetches the next piece (fresh from the parser, in L3). Sweeps do not store the last vector of
   a group (all bits set: no level changes it).
-- The input mapping is advised `MADV_SEQUENTIAL`: its `munmap` then skips marking pages accessed.
+- The input mapping is advised `MADV_SEQUENTIAL` (`io::advise_sequential`, first here): its
+  `munmap` then skips marking pages accessed.
 - Shorter inputs are padded with zeros to 2^6 values; zeros do not change c_k for k < 2^N.
 - Memory: a and b in one mapping, 4 huge pages (`MADV_HUGEPAGE`) and one 4 KiB page below them
   for the 4 KiB beyond 8 MiB.
@@ -234,6 +235,9 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
   User side, in core cycles: column pass 76 per column against 57 (the product's 6 multiplies
   and 5 shifts per vector), upper row sweeps 21.9 per 8 vectors against 15 (L2), split tiles
   27.5 against ~24; the formatter (`fields.hpp`) 34 cycles per 16 values against ~26.
+- 2026-10-10, claude (lib, issue #156 round 3): `advise_sequential` comes from
+  `lib/io/sequential.hpp` (`io::advise_sequential`) instead of a local copy. Same stripped
+  executable as before (judge flags, `lc-amd`).
 
 ## Sources
 

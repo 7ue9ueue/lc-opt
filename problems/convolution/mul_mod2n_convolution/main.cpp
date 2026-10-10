@@ -19,7 +19,6 @@
 // m <= 7 are convolved directly.
 #include <immintrin.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 
 #include <algorithm>
 #include <array>
@@ -1007,6 +1006,34 @@ inline void read_bulk(Reader& in, std::uint32_t* dst, std::size_t count) {
 #else
     in.read(dst, count);
 #endif
+}
+
+}  // namespace io
+// lib/io/sequential.hpp
+// Marks a mapped input as read once (MADV_SEQUENTIAL): when the Reader unmaps it, the kernel then
+// skips marking each page accessed, 0.03-0.04 ms per 20 MB (lib/io/notes.md).
+//
+//   io::Reader in;
+//   const auto n = in.read<std::uint32_t>();
+//   io::advise_sequential(in);   // while the Reader is in the input's first page
+//
+// fd is the Reader's. Inputs the Reader copies (pipes, files of kMapAbove bytes or less) are left
+// alone.
+
+#include <sys/mman.h>
+#include <sys/stat.h>
+
+#include <cstddef>
+#include <cstdint>
+
+
+namespace io {
+
+inline void advise_sequential(const Reader& in, int fd = 0) {
+    struct stat st;
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || std::size_t(st.st_size) <= detail::kMapAbove) return;
+    const auto start = reinterpret_cast<std::uintptr_t>(in.scan().cur) & ~std::uintptr_t(4095);
+    ::madvise(reinterpret_cast<void*>(start), std::size_t(st.st_size), MADV_SEQUENTIAL);
 }
 
 }  // namespace io
@@ -4188,19 +4215,10 @@ void band_products(const Level* a, Level* b, int e, int k, std::size_t first, st
     }
 }
 
-// Marks a mapped input as read once: the kernel then skips marking each page accessed when the
-// mapping goes (as ../gcd_convolution). The mapping starts at the page of the first token.
-void advise_sequential(const io::Reader& in) {
-    struct stat st;
-    if (::fstat(0, &st) != 0 || !S_ISREG(st.st_mode) || std::size_t(st.st_size) <= io::detail::kMapAbove) return;
-    const auto start = reinterpret_cast<std::uintptr_t>(in.scan().cur) & ~std::uintptr_t(4095);
-    ::madvise(reinterpret_cast<void*>(start), std::size_t(st.st_size), MADV_SEQUENTIAL);
-}
-
 void solve() {
     io::Reader in;
     const int n = in.read<int>();
-    advise_sequential(in);
+    io::advise_sequential(in);
     const std::size_t size = std::size_t(1) << n;
     const Plan plan(n);
     // Two factors of 2^n words, tables under 2^n words, the chunk text and 64 KiB of padding.

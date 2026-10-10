@@ -42,6 +42,11 @@ convolution problems: `problems/convolution/floor.py`.
   MaxDigits <= 16 skips one 64-bit division. `write_with()` hands the buffer to custom formatters.
 - Bulk `uint32_t` write: eight values per step in AVX2. Digit counts come first, from vector
   compares, so the store addresses do not wait for the digits.
+- `io::advise_sequential(in)` (`sequential.hpp`): `MADV_SEQUENTIAL` on a mapped input, from the
+  page of the Reader's position, so `munmap` skips marking each page accessed (0.62 vs 0.66 ms
+  per 20.7 MB; issue #21 round 4 in the Log). Its own header, so that io.hpp and every bundle
+  stay unchanged. Users: bitwise_and, gcd, lcm, mul_mod2n, min_plus_convolution_convex_arbitrary;
+  bitwise_xor keeps its copy (its round was running in #156 round 3).
 
 ## Measurements
 
@@ -375,6 +380,16 @@ early return for count 0, and no `read_bulk` call when the fixed path took every
   or none; file and pipe), at -O2 (native and x86-64-v3) and with ASan/UBSan, each with
   `-DIO_BULK32_TRANSPOSE=0` and `1`.
 
+2026-10-10, claude (issue #156, round 3): `io::advise_sequential` (`sequential.hpp`) from the
+copies in five convolution problems (bitwise_and first, then gcd, lcm, mul_mod2n and min_plus
+convex_arbitrary; the same code, comments apart). It takes the Reader's fd (default 0, as the
+copies had it fixed).
+- The judge's command builds byte-identical stripped executables before and after for all five
+  (GCC 15.2 image, `lc-amd`).
+- Tests: `test.cpp` (new: a mapped file is advised, "sr" in its `/proc/self/smaps` VmFlags, and
+  reads on; a pipe and a small file are not) at -O2 (native, x86-64-v3) and with ASan/UBSan;
+  `MADV_RANDOM` in its place fails it. Official tests of the five pass.
+
 ## Sources
 
 - Our own QPoly explorations 007 and 011 (`../SymPoly/work/ntt/io_yosupo`, `io_large`): the
@@ -401,7 +416,10 @@ early return for count 0, and no `read_bulk` call when the fixed path took every
   only with another gain for the 2_64 problems, since alone it is below their noise.
 - Writer: flushes of arbitrary size land at d = 1..31 with odds 31 in 4096, each then 2x slower
   (~0.8% of `write(2)` time on average); whole pages gain nothing more (round 5). Fold a fix in
-  with the next io.hpp change, together with `MADV_RANDOM` on the input (-0.04 ms per 20 MB).
+  with the next io.hpp change. The input advice is `io::advise_sequential` now; folding it into
+  the Reader would also serve the problems that do not call it (-0.04 ms per 20 MB).
+- bitwise_xor_convolution's copy of `advise_sequential`: move it to `sequential.hpp` (same
+  executable expected).
 - `convolution_mod/fields.hpp`'s first comment still names `../fixed_width.hpp`, deleted in
   round 5 (that folder belonged to another round); fix it with the next change there.
 - convolution_F_2_64's variable-width blocks (all_ones, all_same, small_values: 35-36 ms, near

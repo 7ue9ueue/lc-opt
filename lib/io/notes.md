@@ -357,6 +357,12 @@ early return for count 0. `io.hpp`, `bulk32.hpp` and `bulk64.hpp` are unchanged.
   all_same_00 381.1 -> 351.8, all_same_01 403.3 -> 389.5, max_random_00 402.3 -> 401.7,
   max_random_01 401.8 -> 403.0, max_ans_zero_00 403.2 -> 401.7. The score stays at the
   mixed-length inputs (~402 ms): `judge.py bench`, 9 rounds, 8 slowest cases, 0.9957.
+- convolution_mod: `read_fixed` is 263 instructions against `read_values`' 259 (the count check);
+  `BulkParser32::parse` and `fields::write` differ by 3 instructions of register allocation.
+  `judge.py bench`, `lc-bench`, slowest 3 cases: 11.83 -> 11.89 ms (1.0038, 31 rounds); sources
+  swapped, 11.92 vs 11.91 (old/new 0.9994, 41 rounds): noise.
+- Checks (`lc-amd`): official tests 53/53 and 54/54; stress 500 and 200 rounds; ASan/UBSan builds
+  on 6 and 3 official cases with 9-digit, 1-digit and mixed tokens, file and pipe input.
 - Tests: `test.cpp` runs the bulk tests through `read_fixed` and a new `test_fixed` (9- and 1-digit
   tokens, one defect at a random place: another width, CRLF, two spaces, a tab; more input after
   or none; file and pipe), at -O2 (native and x86-64-v3) and with ASan/UBSan.

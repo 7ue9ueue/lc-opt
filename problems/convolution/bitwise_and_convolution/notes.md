@@ -154,10 +154,11 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
   - Startup: empty programs, 300 runs: `g++` 1.13 ms, `g++` with the preinit `_exit` 0.965, `gcc`
     0.549, `-Wl,--as-needed` 0.555, `-static` 0.384. Loading libstdc++, libm and libgcc_s costs
     ~0.41 ms; the judge's link line adds them, so the source cannot avoid it.
-  - `tools/runner.c` opens the output with `O_TRUNC`, and `judge.py` reuses each output path, so
+  - `tools/runner.c` opened the output with `O_TRUNC`, and `judge.py` reuses each output path, so
     each timed run also frees the previous run's 10.5 MB output: fork to preinit 2.27 ms against
     1.03 with the file unlinked first (whole run 12.01 → 10.74). A constant for this problem; it
-    explains why `judge.py bench` (12.3) reads above the judge (12).
+    explains why `judge.py bench` (12.3) read above the judge (12). Fixed in #221: `runner.c`
+    now unlinks the output before the clock starts.
   - Zen 3 vector pipes (12 independent chains): add, sub, min, or, `vpblendd` 4 per cycle;
     multiplies (`vpmuludq`, `vpmulld`, `vpmulhuw`, `vpmullw`, `vpmaddwd`) and `vpblendvb` 2 per
     cycle on one pipe pair; `vpshufb`, unpacks and immediate shifts 2 per cycle on the other.

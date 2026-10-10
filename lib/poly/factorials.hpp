@@ -21,9 +21,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <span>
 #include <utility>
-#include <vector>
 
 #include "lib/poly/calculus.hpp"
 #include "lib/poly/factorial_table.hpp"
@@ -184,15 +182,15 @@ inline Lanes factorials(const Lanes& n) {
 }
 
 // x[i] = 1 / x[i] for nonzero x[i] (Montgomery's batch inversion: 3 products each, one
-// exponentiation).
-inline void invert(std::span<std::uint32_t> x) {
+// exponentiation). The prefix products live on the stack.
+template <std::size_t N>
+void invert(std::array<std::uint32_t, N>& x) {
     using ntt::detail::multiply_mod;
-    if (x.empty()) return;
+    std::array<std::uint32_t, N> before;
     std::uint32_t prefix = 1;
-    std::vector<std::uint32_t> before(x.size());
-    for (std::size_t i = 0; i < x.size(); ++i) before[i] = prefix, prefix = multiply_mod(prefix, x[i]);
+    for (std::size_t i = 0; i < N; ++i) before[i] = prefix, prefix = multiply_mod(prefix, x[i]);
     std::uint32_t inverse = detail::scalar_inverse(prefix);  // 1 / (x[0] ... x[i]) below
-    for (std::size_t i = x.size(); i-- > 0;) {
+    for (std::size_t i = N; i-- > 0;) {
         const std::uint32_t xi = x[i];
         x[i] = multiply_mod(inverse, before[i]);
         inverse = multiply_mod(inverse, xi);

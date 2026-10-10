@@ -1942,15 +1942,19 @@ void test_factorial_values() {
         for (int s = 0; s < 32; ++s) ok &= mul(f[s], g[s]) == 1;
         expect(ok, "invert lanes", trial);
     }
-    for (std::size_t size : {0, 1, 2, 33, 1000}) {
-        std::vector<u32> x(size);
+    const auto check_invert = [](auto x) {
         for (u32& v : x) v = rng() % 4 ? 1 + u32(rng() % (P - 1)) : rng() % 2 ? 1 : P - 1;
-        std::vector<u32> y = x;
+        auto y = x;
         poly::invert(y);
         bool ok = true;
-        for (std::size_t i = 0; i < size; ++i) ok &= mul(x[i], y[i]) == 1;
-        expect(ok, "invert", size);
-    }
+        for (std::size_t i = 0; i < x.size(); ++i) ok &= mul(x[i], y[i]) == 1;
+        expect(ok, "invert", x.size());
+    };
+    check_invert(std::array<u32, 0>{});
+    check_invert(std::array<u32, 1>{});
+    check_invert(std::array<u32, 2>{});
+    check_invert(std::array<u32, 33>{});
+    check_invert(std::array<u32, 1000>{});
     for (std::size_t n = 1; n < 1 << 21; n = n < 5000 ? n + 1 : n * 3 / 2 + pick(100)) {
         const std::size_t c = poly::detail::scan_chunk(n);
         const bool minimal = c == 16 || 32 * (c - 32) < n;  // the previous candidate is c - 32

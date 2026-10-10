@@ -3536,12 +3536,12 @@ public:
     // In place: transform -> coefficients in [0, P).
     void inverse(std::span<std::uint32_t> a, Half output = Half::kBoth) const { inverse(a, a, output); }
 
-    // out = (x^shift in) b mod (x^n - 1) for b a transform of length n = out.size(); in as for
-    // forward(). Only the output half of out is computed.
+    // out = c (x^shift in) b mod (x^n - 1) for b a transform of length n = out.size(), c < P; in
+    // as for forward(). Only the output half of out is computed.
     void cyclic_product(std::span<const std::uint32_t> in, std::size_t shift, std::span<std::uint32_t> out,
-                        std::span<const std::uint32_t> b, Half output = Half::kBoth) const {
+                        std::span<const std::uint32_t> b, Half output = Half::kBoth, std::uint32_t c = 1) const {
         using namespace ntt::detail;
-        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
+        const std::uint32_t scale = multiply_mod(multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR), c);  // and 2^-32
         run(out, source(in, shift, out.size()), detail::ProductBottom{roots_, inverse_roots_, b.data()}, scale, output);
     }
 
@@ -3836,25 +3836,35 @@ inline int inverse_log(std::size_t n) {
 // Scratch words for inverse() of n coefficients.
 inline std::size_t inverse_scratch(std::size_t n) { return 2 * Arena::footprint(std::size_t(1) << inverse_log(n)); }
 
+// One Newton step: to = (1 / f)[k, k + to.size()) from g = 1 / f mod x^k, to.size() <= k, with
+// transforms of length 2k (t: lg_max >= log2(2k)):
+//   e = f g mod (x^2k - 1), whose coefficients [k, 2k) are those of f g;
+//   to = -(x^k e[k, 2k) g mod (x^2k - 1))[k, k + to.size()).
+// 5 transforms of length 2k (g's is used twice). gt, work: 2k words each, 32-byte aligned. f may
+// start at work (f is then overwritten); to may start at work[k] (no copy is made then). Otherwise
+// none may overlap. (Writing the transform's output half straight into to was slower on lc-intel
+// than this copy: lib/poly/notes.md.)
+inline void inverse_step(const Transform& t, std::span<const std::uint32_t> f, std::span<const std::uint32_t> g,
+                         std::span<std::uint32_t> to, std::span<std::uint32_t> gt, std::span<std::uint32_t> work) {
+    const std::size_t k = g.size();
+    t.forward(g, 0, gt);
+    t.cyclic_product(f.first(std::min(2 * k, f.size())), 0, work, gt, Half::kUpper);
+    t.cyclic_product(work.subspan(k), k, work, gt, Half::kUpper, detail::kP - 1);
+    if (to.data() != work.data() + k) std::copy_n(work.begin() + std::ptrdiff_t(k), to.size(), to.begin());
+}
+
 // g = 1 / f mod x^n for n = g.size() >= 1. f[0] != 0; coefficients of f past f.size() are zero.
 // scratch: inverse_scratch(n) words, 32-byte aligned (from an Arena). t: lg_max >= inverse_log(n).
-//
-// Newton steps double the known prefix g_k: with transforms of length 2k,
-//   e = f g_k mod (x^2k - 1), whose coefficients [k, 2k) are those of f g_k;
-//   g[k, 2k) = -(x^k e[k, 2k) g_k mod (x^2k - 1))[k, 2k).
-// Each step takes 5 transforms of length 2k (g_k's is used twice).
+// Newton steps from kInverseBase, each doubling the known prefix of g.
 inline void inverse(const Transform& t, std::span<const std::uint32_t> f, std::span<std::uint32_t> g,
                     std::span<std::uint32_t> scratch) {
     const std::size_t n = g.size();
     std::size_t k = std::min(n, detail::kInverseBase);
     detail::inverse_direct(f, g.first(k));
     for (; k < n; k *= 2) {
-        const std::size_t len = 2 * k, end = std::min(len, n);
-        const std::span<std::uint32_t> gk = scratch.first(len), e = scratch.subspan(Arena::footprint(len), len);
-        t.forward(g.first(k), 0, gk);
-        t.cyclic_product(f.first(std::min(len, f.size())), 0, e, gk, Half::kUpper);
-        t.cyclic_product(e.subspan(k), k, e, gk, Half::kUpper);
-        for (std::size_t i = k; i < end; ++i) g[i] = e[i] ? detail::kP - e[i] : 0;
+        const std::size_t len = 2 * k;
+        inverse_step(t, f, g.first(k), g.subspan(k, std::min(k, n - k)), scratch.first(len),
+                     scratch.subspan(Arena::footprint(len), len));
     }
 }
 
@@ -3879,11 +3889,6 @@ inline void exp_direct(std::span<const std::uint32_t> d, std::span<std::uint32_t
         for (std::size_t k = 1; k <= i; ++k) sum += std::uint64_t(d[k - 1]) * g[i - k] % kP;
         g[i] = multiply_mod(std::uint32_t(sum % kP), inv[i]);
     }
-}
-
-// out[i] = -a[i] mod P, a.size() a multiple of 8, both 32-byte aligned.
-inline void negate(std::span<const std::uint32_t> a, std::span<std::uint32_t> out) {
-    for (std::size_t i = 0; i < a.size(); i += 8) store(out.data() + i, reduce(_mm256_sub_epi32(broadcast(kP), load(a.data() + i)), kP));
 }
 
 }  // namespace detail
@@ -3919,8 +3924,8 @@ namespace detail {
         t.forward(g.first(m), 0, g_low);
         // h[m/2, m) = -(h e mod x^(m/2)), e = (g h)[m/2, m)
         t.inverse_product(g_low, h_low, w_low, Half::kUpper);
-        t.cyclic_product(w_low.subspan(half), half, w_low, h_low, Half::kUpper);
-        negate(w_low.subspan(half), h.subspan(half, half));
+        t.cyclic_product(w_low.subspan(half), half, w_low, h_low, Half::kUpper, kP - 1);
+        std::copy_n(w.begin() + std::ptrdiff_t(half), half, h.begin() + std::ptrdiff_t(half));
         // T_m(r) = T_m(x q) G_lo at w[0, m), r at gt[m, 2m) until G's upper half goes there
         t.forward_product(d.first(m - 1), 1, w_low, g_low);
         t.inverse(w_low, gt.subspan(m, m));

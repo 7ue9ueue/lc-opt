@@ -211,9 +211,12 @@ void test_transforms(Fixture& fx) {
                     std::copy_n(a.begin(), size, out.begin() + shift);
                     in = std::span<const u32>(out).subspan(shift, size);
                 }
-                fx.t.cyclic_product(in, shift, out, tb, half);
+                // Times c: 1 (the default), P - 1, random; with each output half.
+                const u32 c = trial < 2 ? 1 : trial % 2 ? P - 1 : u32(rng() % P);
+                if (c == 1) fx.t.cyclic_product(in, shift, out, tb, half);
+                else fx.t.cyclic_product(in, shift, out, tb, half, c);
                 for (std::size_t i : {lo, hi - 1, lo + pick(hi - lo), lo + pick(hi - lo)})
-                    expect(out[i] == cyclic_coefficient(shifted, b, i), "cyclic_product of x^shift in", lg, i);
+                    expect(out[i] == mul(c, cyclic_coefficient(shifted, b, i)), "cyclic_product of x^shift in, times c", lg, i);
             }
 
             // forward_upper: leaves n/8 .. n/4 - 1 of the transform of length 2n.
@@ -329,9 +332,20 @@ std::vector<u32> inverse_reference(const std::vector<u32>& f, std::size_t n) {
     return g;
 }
 
-void check_inverse(Fixture& fx, const std::vector<u32>& f, std::size_t n) {
+// g = 1 / f mod x^n by inverse(), or (last_step_in_place) to k = 2^(inverse_log(n) - 1) by
+// inverse(), then inverse_step() in a buffer that holds f and receives g[k, n).
+void check_inverse(Fixture& fx, const std::vector<u32>& f, std::size_t n, bool last_step_in_place = false) {
     std::vector<u32> g(n, 0xFFFFFFFF);
-    poly::inverse(fx.t, f, g, fx.scratch);
+    const std::size_t k = (std::size_t(1) << poly::inverse_log(n)) / 2;
+    if (last_step_in_place && n > k && f.size() <= n) {
+        const auto work = fx.load(0, f);
+        poly::inverse(fx.t, work, std::span(g).first(k), fx.scratch);
+        poly::inverse_step(fx.t, work, std::span(g).first(k), work.subspan(k, n - k), fx.buffer[1].first(2 * k),
+                           fx.buffer[0].first(2 * k));
+        std::copy_n(work.begin() + k, n - k, g.begin() + k);
+    } else {
+        poly::inverse(fx.t, f, g, fx.scratch);
+    }
     if (n <= 3000) {
         expect(g == inverse_reference(f, n), "inverse", n, f.size());
         return;
@@ -366,7 +380,13 @@ void test_inverse(Fixture& fx) {
             auto f = random_poly(m, int(pick(3)));
             if (!f[0]) f[0] = 1;
             check_inverse(fx, f, m);
+            check_inverse(fx, f, m, true);
         }
+    }
+    for (std::size_t n = 33; n <= 300; ++n) {
+        auto f = random_poly(n - pick(3), int(pick(3)));
+        if (!f[0]) f[0] = 1;
+        check_inverse(fx, f, n, true);
     }
 }
 

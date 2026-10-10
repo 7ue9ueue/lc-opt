@@ -3546,12 +3546,12 @@ public:
     // In place: transform -> coefficients in [0, P).
     void inverse(std::span<std::uint32_t> a, Half output = Half::kBoth) const { inverse(a, a, output); }
 
-    // out = (x^shift in) b mod (x^n - 1) for b a transform of length n = out.size(); in as for
-    // forward(). Only the output half of out is computed.
+    // out = c (x^shift in) b mod (x^n - 1) for b a transform of length n = out.size(), c < P; in
+    // as for forward(). Only the output half of out is computed.
     void cyclic_product(std::span<const std::uint32_t> in, std::size_t shift, std::span<std::uint32_t> out,
-                        std::span<const std::uint32_t> b, Half output = Half::kBoth) const {
+                        std::span<const std::uint32_t> b, Half output = Half::kBoth, std::uint32_t c = 1) const {
         using namespace ntt::detail;
-        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
+        const std::uint32_t scale = multiply_mod(multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR), c);  // and 2^-32
         run(out, source(in, shift, out.size()), detail::ProductBottom{roots_, inverse_roots_, b.data()}, scale, output);
     }
 

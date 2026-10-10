@@ -32,7 +32,9 @@ powers of two and their neighbours up to 2^20, random sizes; also run under ASan
   products; each leaf product reduced, then added), `forward_product` (forward of a, leaf
   products with b, kept as a transform).
 - Sources: the forward top level reads x^shift in[0, size) from any span (in place or not);
-  coefficients outside are zero and not read. Outputs: `Half` computes one half only.
+  coefficients outside are zero and not read. Outputs: `Half` computes one half only;
+  `cyclic_product` multiplies its output by a constant c at no cost (c is folded into the
+  inverse's final scale), so a negated product needs no pass of its own.
 - Leaf product: a window [w a, a] (words <= P) gives x^i a mod (x^8 - w) as words [8 - i, 16 - i);
   16 `vpmuludq` into 64-bit sums (8 products < P^2 plus the Montgomery term stay below 2^64), one
   Montgomery reduction per lane. The factor 2^-32 is undone by the inverse's scale in
@@ -47,8 +49,11 @@ powers of two and their neighbours up to 2^20, random sizes; also run under ASan
 
 Newton from k to 2k with transforms of length 2k: G = T(g_k) (lower half input);
 e = f g_k mod (x^2k - 1), upper half only; g[k, 2k) = -(x^k e[k, 2k) g_k mod (x^2k - 1))[k, 2k),
-upper-half input and output. 5 transforms of length 2k and 2 leaf products per step, about
-10 T(n) + 4 LP(n) in all. Below 32 coefficients: the direct recurrence.
+upper-half input and output, the sign in the product's scale. 5 transforms of length 2k and 2
+leaf products per step, about 10 T(n) + 4 LP(n) in all. Below 32 coefficients: the direct
+recurrence. `inverse_step` is one step; f may start at its work buffer (f is overwritten) and
+its output may be the work buffer's upper half, so a caller can run the last step in f's buffer
+(inv_of_formal_power_series does: 3 huge pages instead of 5 at N = 500000).
 
 ## Calculus
 
@@ -470,6 +475,33 @@ products 1.77 and 1.69).
   form beat one pair per vector (50.1 against 58.6 us per inverse of 2^15).
 - For the owner lane: read access to Transform's twiddle tables would save Tables' copies (2 x
   2^lg / 8 words), and `times` could take per-lane factors.
+
+2026-10-09, claude (issue #62, round 2):
+- `cyclic_product(..., Half, c)`: output times c through the scale. The inverse's step negates
+  in the scale and copies the half into g (was: a scalar negation loop, 0.135 ms at 2^19);
+  `inverse_step` split out. exp: the negation of h[m/2, m) folded the same way, then a copy
+  (was: a vector negation pass).
+- Tried, not kept: the top level's inverse writing its half straight into a destination (a
+  `HalfOut` sink with a masked tail store) instead of in place and a copy. In process the same
+  or faster (inverse of 2^18, `lc-intel`: direct 4.548 ms, in place + copy 4.558, main's
+  negation 4.625). Whole process on `lc-intel` (`judge.py bench`, 31 rounds): sqrt with its five
+  copies replaced 1.0146 against the copies' 0.9940; pow 1.0151 with direct writes in the inverse
+  and exp, 1.0102 with them in the inverse only, 0.9995 with neither. `lc-amd`: neutral (sqrt
+  1.0020). Cause not found; guess: write-allocate traffic of the scattered half stores into a
+  cold array, which `memmove`'s streaming copy avoids. Destinations are kept for in-place halves
+  only.
+- `judge.py bench`, 21 rounds, ratios new/main, `lc-amd` (`lc-intel`): inv 0.9618 (0.9748), exp
+  1.0013 (0.9969), log 0.9954 (0.9997), pow 0.9985 (1.0015), sqrt 1.0012 (0.9946), composition
+  1.0018 (0.9996). All official tests pass on `lc-amd`; `test.cpp` passes at -O2 and
+  ASan/UBSan, `-march=native` and `-march=x86-64-v3` (`lc-intel`).
+- Kernel costs on `lc-amd`, cycles per vector (3.48 GHz), 256-vector tile in L1 (scratch probe):
+  lib/ntt `forward` kernel at h = 64, 16, 4: 3.61, 3.71, 4.27 (call overhead at h = 4); `inverse`
+  3.63, 3.67, 3.85; `ForwardBottom` 5.98 (GCC: 71 vector ops and ~26 scalar ops for the twiddle
+  slots per group); `InverseBottom` 4.39; `ProductBottom` 30.0 (326 vector ops per group, 128 on
+  the multiply pipes: bound ~20.4); `InverseProductBottom` 25.4. The same radix-4 butterfly in
+  intrinsics: 4.31 (forward), 4.11 (inverse) against the asm's 3.64, 3.62. At 2^19 in place:
+  forward top level (`Source`) 4.17, levels h = 4096, 1024, 256: 3.49, 3.65, 3.77; tiles 18.3;
+  the whole forward 34.3, `cyclic_product` 86.8.
 
 ## Sources
 

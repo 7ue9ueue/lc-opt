@@ -22,8 +22,9 @@ bool zero(const unsigned char* p, std::size_t bytes) {
 }
 
 void test_huge() {
-    for (const std::size_t bytes : {std::size_t(1), std::size_t(4096), mem::kHugePage - 1, mem::kHugePage,
-                                    mem::kHugePage + 1, 5 * mem::kHugePage + 12345}) {
+    constexpr std::size_t kBytes[] = {1, 4096, mem::kHugePage - 1, mem::kHugePage, mem::kHugePage + 1,
+                                      5 * mem::kHugePage + 12345};
+    for (const std::size_t bytes : kBytes) {
         auto* p = static_cast<unsigned char*>(mem::map_huge(bytes));
         const std::size_t rounded = (bytes + mem::kHugePage - 1) / mem::kHugePage * mem::kHugePage;
         expect(aligned(p, mem::kHugePage), "map_huge: aligned", bytes);

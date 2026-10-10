@@ -1,15 +1,17 @@
 // f(a r^i) mod 998244353 for i < M, f of N coefficients (N, M <= 2^19), by the chirp z-transform.
-// With t(k) = k (k - 1) / 2, i j = t(i + j) - t(i) - t(j), so
-//   f(a r^i) = r^-t(i) sum_j A_j r^t(i + j),  A_j = c_j a^j r^-t(j):
+// With t(k) = k (k - 1) / 2 and any g, i j = t(i + j - g) - t(i) - t(j - g) + g i, so
+//   f(a r^i) = r^(g i - t(i)) sum_j A_j K_(i + j),  A_j = c_j a^j r^-t(j - g),  K_u = r^t(u - g):
 // a middle product. One cyclic convolution of length L = 2^lg >= N + M - 1 of A with the reversed
-// chirp B_u = r^t(L - 1 - u) gives f(a r^i) = r^-t(i) (A B)[L - 1 - i].
+// kernel B_v = K_(L - 1 - v) gives f(a r^i) = r^(g i - t(i)) (A B)[L - 1 - i]. As t(1 - x) = t(x),
+// g = L / 2 - 1 makes B a palindrome (B = K): B is generated for v < L / 2 only, and its transform
+// at the conjugate of a node is a mirror of the node's (Subtrees), so b's forward transform runs
+// for about half of the nodes.
 // The convolution is ntt::Product's (lib/ntt/product.hpp: radix-8 top, Subtrees, bottom kernels)
-// with two changes: B fills the whole length, so its first pass is a full radix-8 one; and the
-// last inverse level computes only the outputs, times r^-t(i) and in reverse order. L >= 2
-// max(N, M), so A and the outputs each lie in one half.
+// with these changes: the radix-8 pass of B reads only its lower half; b's transform runs for one
+// node of each conjugate pair; the last inverse level computes only the outputs, times
+// r^(g i - t(i)) and in reverse order. L >= 2 max(N, M), so A and the outputs each lie in one half.
 // Output in fixed-width fields (problems/convolution/convolution_mod/fields.hpp).
 #include <sys/mman.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <bit>
@@ -19,6 +21,7 @@
 #include "lib/io/io.hpp"
 #include "lib/ntt/product.hpp"
 #include "lib/poly/chirp.hpp"
+#include "lib/run/early.hpp"
 #include "problems/convolution/convolution_mod/fields.hpp"
 
 namespace {
@@ -55,29 +58,166 @@ std::uint32_t inverse(std::uint32_t x) { return power(x, kP - 2); }
 // r^e for r != 0 and any e >= 0.
 std::uint32_t power_of(std::uint32_t r, std::uint64_t e) { return power(r, std::uint32_t(e % (kP - 1))); }
 
-// ntt::detail::forward_radix8 for a factor that fills f[0, 8q): the groups act on the halves
-// u = f mod (x^(n/2) - 1) and v = f mod (x^(n/2) + 1), u_t = f_t + f_(t+4) and
-// v_t = f_t - f_(t+4) for the blocks f_t = f[t q, (t + 1) q). Inputs canonical; outputs < 4P.
-void forward_radix8_full(Vec* f, std::size_t q, const std::uint32_t* roots) {
-    const Factor i(roots[1], roots[9]), y(roots[2], roots[10]), z(roots[3], roots[11]);
-    for (std::size_t j = 0; j < q; ++j) {
+// ntt::detail::forward_radix8 for a palindrome f[0, 8q), f[8q - 1 - i] = f[i] word by word, of
+// which f[0, 4q) is given: block f_(t+4) = f[(t + 4) q, (t + 5) q) is f_(3-t) reversed. The groups
+// act on u = f mod (x^(n/2) - 1) and v = f mod (x^(n/2) + 1), u_t = f_t + f_(t+4) and
+// v_t = f_t - f_(t+4). Writes blocks 0, 1, 2, 4 and 5 only: blocks 3, 6 and 7 are their conjugates
+// (Subtrees::mirror). Columns j and q - 1 - j read each other's vectors, so they go together.
+// Inputs canonical; outputs < 4P.
+void forward_radix8_palindrome(Vec* f, std::size_t q, const std::uint32_t* roots) {
+    const Factor i(roots[1], roots[9]), y(roots[2], roots[10]);
+    const auto column = [f, q, i, y](std::size_t j, const Vec* lo, const Vec* mirror) {
         Vec u[4], v[4];  // < 2P
 #pragma GCC unroll 4
         for (std::size_t t = 0; t < 4; ++t) {
-            const Vec lo = f[j + t * q], hi = f[j + (t + 4) * q];
-            u[t] = add(lo, hi), v[t] = diff_canonical(lo, hi);
+            const Vec hi = reverse(mirror[3 - t]);
+            u[t] = add(lo[t], hi), v[t] = diff_canonical(lo[t], hi);
         }
         const Vec g0 = low(add(u[0], u[2])), g1 = low(add(u[1], u[3]));
         const Vec h0 = low(diff(u[0], u[2])), ih1 = times(diff(u[1], u[3]), i);
-        f[j] = add(g0, g1), f[j + q] = diff(g0, g1);
-        f[j + 2 * q] = add(h0, ih1), f[j + 3 * q] = diff(h0, ih1);
+        f[j] = add(g0, g1), f[j + q] = diff(g0, g1), f[j + 2 * q] = add(h0, ih1);
         const Vec iv2 = times(v[2], i), iv3 = times(v[3], i);
-        const Vec u0 = low(add(v[0], iv2)), v0 = low(diff(v[0], iv2));
-        const Vec yu1 = times(add(v[1], iv3), y), zv1 = times(diff(v[1], iv3), z);
+        const Vec u0 = low(add(v[0], iv2)), yu1 = times(add(v[1], iv3), y);
         f[j + 4 * q] = add(u0, yu1), f[j + 5 * q] = diff(u0, yu1);
-        f[j + 6 * q] = add(v0, zv1), f[j + 7 * q] = diff(v0, zv1);
+    };
+    for (std::size_t j = 0, k = q - 1; j < k; ++j, --k) {
+        Vec at_j[4], at_k[4];
+#pragma GCC unroll 4
+        for (std::size_t t = 0; t < 4; ++t) at_j[t] = f[j + t * q], at_k[t] = f[k + t * q];
+        column(j, at_j, at_k);
+        column(k, at_k, at_j);
     }
 }
+
+// ntt::detail::Subtrees (lib/ntt/product.hpp) for a palindromic b. Node k of a level holds
+// b mod x^s - z_k, z_k = r[k]^2 (Recursion's numbering: children 4k + t). For a palindrome of
+// length L, b mod x^s - 1/z = z rev(b mod x^s - z), rev reversing the s coefficients. As r[k] =
+// w^bitrev(k), 1/z_k = z_c for the conjugate c = 3 * 2^e - 1 - k of 2^e <= k < 2^(e + 1): the
+// groups of 4 vectors (s = 32) of a node, in reverse order, are those of its conjugate. So b's
+// forward levels run for one node of each pair; mirror() derives the other's groups and
+// visit<false> skips its b levels. Only nodes 0 and 1 are their own conjugates (z = 1, -1); their
+// children pair up as 2 and 3 (node 0) or 4 and 7, 5 and 6 (node 1). Subtrees of at least 16
+// vectors, so tiles start at even group indices.
+class Subtrees {
+public:
+    Subtrees(const std::uint32_t* roots, const std::uint32_t* inverse_roots) : r_(roots), ir_(inverse_roots) {}
+
+    // The 8 blocks of q vectors after forward_radix8 (a) and forward_radix8_palindrome (b): forward
+    // transforms, leaf products into a, inverse transforms, then the top inverse group of each half.
+    void visit_top(Vec* a, Vec* b, std::size_t q) const {
+        visit_own_conjugate(a, b, q, 0);
+        visit_own_conjugate(a + q, b + q, q, 1);
+        visit_pair(a, b, q, 0, 2, 3);
+        ntt::kernels::inverse_identity(a, q, ir_);
+        visit_pair(a, b, q, 0, 4, 7);
+        visit_pair(a, b, q, 0, 5, 6);
+        ntt::kernels::inverse(a + 4 * q, q, ir_ + slot(1), ir_ + slot(2));
+    }
+
+private:
+    // Node k in {0, 1} of nv vectors at a, b.
+    void visit_own_conjugate(Vec* a, Vec* b, std::size_t nv, std::size_t k) const {
+        if (nv <= 256) return visit<true>(a, b, nv, k);
+        const std::size_t h = nv / 4;
+        forward<true>(a, b, h, k);
+        if (k == 0) {
+            visit_own_conjugate(a, b, h, 0);
+            visit_own_conjugate(a + h, b + h, h, 1);
+            visit_pair(a, b, h, 0, 2, 3);
+        } else {
+            visit_pair(a, b, h, 4, 4, 7);
+            visit_pair(a, b, h, 4, 5, 6);
+        }
+        inverse(a, h, k);
+    }
+
+    // Node k and its conjugate c in a row of nodes first, first + 1, ... of nv vectors at a, b.
+    void visit_pair(Vec* a, Vec* b, std::size_t nv, std::size_t first, std::size_t k, std::size_t c) const {
+        const std::size_t at = (k - first) * nv, to = (c - first) * nv;
+        visit<true>(a + at, b + at, nv, k);
+        mirror(b + at, b + to, nv, k * (nv / 4));
+        visit<false>(a + to, b + to, nv, c);
+    }
+
+    // to[nv - 1 - v] = reverse(from[v]) z_(first + v / 4) for v < nv: from holds nv / 4 groups
+    // from first (even), each b mod x^32 - z_k with z_k = r[k]^2 = (-1)^k r[k / 2]. Outputs < 2P.
+    void mirror(const Vec* from, Vec* to, std::size_t nv, std::size_t first) const {
+        for (std::size_t v = 0; v < nv; v += 8) {
+            const std::uint32_t* z = r_ + slot((first + v / 4) / 2);
+            const Factor plus(z[0], z[8]), minus(kP - z[0], ~z[8]);  // quotient(P - z) = ~quotient(z)
+#pragma GCC unroll 4
+            for (std::size_t t = 0; t < 4; ++t) {
+                to[nv - 1 - v - t] = times(reverse(from[v + t]), plus);
+                to[nv - 5 - v - t] = times(reverse(from[v + 4 + t]), minus);
+            }
+        }
+    }
+
+    // Forward transforms, leaf products into a, inverse transform; nv = 4^j >= 16. b keeps its
+    // transform down to the level above the bottom stage, which reads b and leaves it unchanged.
+    // Without kForwardB, b already holds that transform (from mirror()).
+    template <bool kForwardB>
+    void visit(Vec* a, Vec* b, std::size_t nv, std::size_t k) const {
+        switch (nv) {
+        case 16: return tile<kForwardB, 16>(a, b, k);
+        case 64: return tile<kForwardB, 64>(a, b, k);
+        case 256: return tile<kForwardB, 256>(a, b, k);
+        }
+        const std::size_t h = nv / 4;
+        forward<kForwardB>(a, b, h, k);
+        for (std::size_t t = 0; t < 4; ++t) visit<kForwardB>(a + t * h, b + t * h, h, 4 * k + t);
+        inverse(a, h, k);
+    }
+
+    template <bool kForwardB, std::size_t NV>
+    [[gnu::noinline]] void tile(Vec* a, Vec* b, std::size_t k) const {
+        for (std::size_t h = NV / 4; h >= 4; h /= 4)
+            for (std::size_t j = 0, g = k * (NV / (4 * h)); j < NV; j += 4 * h, ++g) forward<kForwardB>(a + j, b + j, h, g);
+        bottom(a, b, NV, k * (NV / 4));
+        for (std::size_t h = 4; h < NV; h *= 4)
+            for (std::size_t j = 0, g = k * (NV / (4 * h)); j < NV; j += 4 * h, ++g) inverse(a + j, h, g);
+    }
+
+    template <bool kForwardB>
+    void forward(Vec* a, Vec* b, std::size_t h, std::size_t k) const {
+        if (k == 0) {
+            ntt::kernels::forward_identity(a, h, r_);
+            if (kForwardB) ntt::kernels::forward_identity(b, h, r_);
+            return;
+        }
+        const std::uint32_t *x = r_ + slot(k), *y = r_ + slot(2 * k);
+        if (!kForwardB) return ntt::kernels::forward(a, h, x, y);
+        if (h == 4) return ntt::kernels::forward_pair(a, b, h, x, y);
+        ntt::kernels::forward(a, h, x, y);
+        ntt::kernels::forward(b, h, x, y);
+    }
+
+    void inverse(Vec* a, std::size_t h, std::size_t k) const {
+        if (k == 0) return ntt::kernels::inverse_identity(a, h, ir_);
+        ntt::kernels::inverse(a, h, ir_ + slot(k), ir_ + slot(2 * k));
+    }
+
+    struct alignas(64) Leaves {
+        std::uint32_t window[4][16];  // [w A_t, A_t]: x^i A_t mod x^8 - w is a sliding window
+        std::uint32_t coefficients[4][8];
+    };
+
+    // Groups [first, first + nv / 4) with h = 1 and their leaves, two per kernel; first is even.
+    // The next two groups' forward half overlaps the current two's products and inverse.
+    void bottom(Vec* a, Vec* b, std::size_t nv, std::size_t first) const {
+        Leaves leaves[2][2];
+        ntt::product_kernels::bottom_first(a, b, leaves[0], r_ + slot(first), r_ + slot(2 * first));
+        for (std::size_t j = 0, k = first;; j += 8, k += 2) {
+            const std::size_t cur = j / 8 % 2, next = cur ^ 1;
+            const std::uint32_t *ix = ir_ + slot(k), *iy = ir_ + slot(2 * k);
+            if (j + 8 == nv) return ntt::product_kernels::bottom_last(a + j, leaves[cur], ix, iy);
+            ntt::product_kernels::bottom_both(a + j + 8, b + j + 8, leaves[next], r_ + slot(k + 2),
+                                              r_ + slot(2 * k + 4), a + j, leaves[cur], ix, iy);
+        }
+    }
+
+    const std::uint32_t *r_, *ir_;
+};
 
 // The last level and the output: with u = a[0, L/2) and w = a[L/2, L) after the halves' top
 // inverse groups (< 2P), coefficient L - 1 - i of the product is (u - w)[L/2 - 1 - i] times the
@@ -133,23 +273,21 @@ public:
         const std::size_t len = length(), q = len / 64;
         build_table(roots_, len / 16, kRoots[0]);
         build_table(inverse_roots_, len / 16, kRoots[1]);
-        // B_u = r^t(L - 1 - u) = r^t(L - 1) r^(-(L - 2) u) r^t(u); A_k = c_k a^k r^-t(k).
-        const std::uint32_t r_inverse = inverse(r);
-        const std::uint32_t b0 = power_of(r, std::uint64_t(len - 1) * (len - 2) / 2);
-        poly::chirp(b0, power(r_inverse, std::uint32_t(len - 2)), r, {b_, len});
-        poly::multiply_chirp(1, a, r_inverse, {a_, n_});
-        // The outputs' factors carry the transform's scale (L / 8)^-1 2^32 and 2^32 for montgomery().
+        // With g = L / 2 - 1 and t(u - g) = t(u) + t(-g) - g u, t(-g) = g (g + 1) / 2:
+        // B_u = K_u = r^t(-g) (r^-g)^u r^t(u) for u < L / 2, A_k = c_k r^-t(-g) (a r^g)^k r^-t(k).
+        const std::uint64_t g = len / 2 - 1, tg = g * (g + 1) / 2;
+        const std::uint32_t r_inverse = inverse(r), r_g = power(r, std::uint32_t(g));
+        poly::chirp(power_of(r, tg), power(r_inverse, std::uint32_t(g)), r, {b_, len / 2});
+        poly::multiply_chirp(power_of(r_inverse, tg), multiply_mod(a, r_g), r_inverse, {a_, n_});
+        // The outputs' factors r^(g i - t(i)) carry the transform's scale (L / 8)^-1 2^32 and 2^32
+        // for montgomery().
         const std::uint32_t scale = multiply_mod(multiply_mod(inverse(std::uint32_t(len / 8)), kR), kR);
         auto* av = reinterpret_cast<Vec*>(a_);
         auto* bv = reinterpret_cast<Vec*>(b_);
         forward_radix8(av, q, roots_);
-        forward_radix8_full(bv, q, roots_);
-        const Subtrees subtrees(roots_, inverse_roots_);
-        for (std::size_t c = 0; c < 4; ++c) subtrees.visit(av + c * q, bv + c * q, q, c);
-        ntt::kernels::inverse_identity(av, q, inverse_roots_);
-        for (std::size_t c = 4; c < 8; ++c) subtrees.visit(av + c * q, bv + c * q, q, c);
-        ntt::kernels::inverse(av + 4 * q, q, inverse_roots_ + slot(1), inverse_roots_ + slot(2));
-        output(a_, len / 2, b_, m_, Chirp(scale, 1, r_inverse));
+        forward_radix8_palindrome(bv, q, roots_);
+        Subtrees(roots_, inverse_roots_).visit_top(av, bv, q);
+        output(a_, len / 2, b_, m_, Chirp(scale, r_g, r_inverse));
         return b_;
     }
 
@@ -209,17 +347,6 @@ void solve() {
     fields::write(out, y, m, chirp_z.text());
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here). _exit skips their teardown too.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

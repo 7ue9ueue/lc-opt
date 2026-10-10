@@ -48,7 +48,13 @@ and 16 1.88; division by index 0.16; power at N - 1 4.56.
   levels 0 and 1 2.01 -> 1.75, levels T - 3 .. T - 1 ~4.2 -> 2.7 (columns 0.06, 14 forwards at
   m/4 0.38, Q' products 0.26, P' products 0.59; then 6 forwards at m/2 0.37, products at m/2
   0.45, the product at m 0.58). `judge.py bench` (21 rounds, against #258): `lc-amd` 0.9466
-  (36.89 -> 34.92 ms), `lc-intel` 0.9607. 28/28 official tests; `stress.py` 400 rounds.
+  (36.89 -> 34.92 ms), `lc-intel` 0.9607. 28/28 official tests; `stress.py` 400 rounds. Merged as
+  #260 (CI 0.9557, 0.9507, 0.9633).
+- lib/poly/projection.hpp, doubling between generic levels (lib/poly/notes.md, Power projection):
+  each level's transforms of length 4m from the previous level's leaves, the first half without
+  y levels. In process (alternating runs): 32.35 -> 30.50 ms (generic levels 23.17 -> 21.27).
+  `judge.py bench` (21 rounds, against the previous change): `lc-amd` 0.9493 (35.28 -> 33.49 ms),
+  `lc-intel` 0.9165. 28/28 official tests; `stress.py` 400 rounds.
 
 ## Sources
 

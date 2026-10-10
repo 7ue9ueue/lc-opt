@@ -8099,6 +8099,195 @@ struct ProjectionBottom {
     }
 };
 
+// The outputs at 0 and h of inverse_h1 on the quarters of h vectors at a (x below L/2 of a block of
+// 4h vectors), to out. Inputs and outputs below 2P.
+inline void inverse_lower(const std::uint32_t* a, std::size_t h, const Group& w, std::uint32_t* out) {
+    for (std::size_t i = 0; i < 8 * h; i += 8) {
+        const Vec f0 = load(a + i), f1 = load(a + i + 8 * h), f2 = load(a + i + 16 * h), f3 = load(a + i + 24 * h);
+        store(out + i, low(add(low(add(f0, f1)), low(add(f2, f3)))));
+        store(out + i + 8 * h, low(add(times(diff(f0, f1), w.y), times(diff(f2, f3), w.z))));
+    }
+}
+
+// forward_h1 on the quarters of h vectors at a from in (quarters 0 and 1; 2 and 3 are zero).
+// Inputs below 4P, outputs below 4P.
+inline void forward_lower(const std::uint32_t* in, std::size_t h, const Group& w, std::uint32_t* a) {
+    for (std::size_t i = 0; i < 8 * h; i += 8) {
+        const Vec u = low(load(in + i)), b = load(in + i + 8 * h), yb = times(b, w.y), zb = times(b, w.z);
+        store(a + i, add(u, yb)), store(a + i + 8 * h, diff(u, yb));
+        store(a + i + 16 * h, add(u, zb)), store(a + i + 24 * h, diff(u, zb));
+    }
+}
+
+// From level s to level s + 1 without the y levels of the first half (lib/poly/notes.md, Power
+// projection). a: 4m words; a[0, 2m) holds the leaves of level s's V (or W), the transform of
+// length 2m at stride L: 2Y blocks of L words, block j the transform of V mod (u^L - w_j) by the
+// levels within the block (group j at that size, in the transforms of length 2m and 4m). Level
+// s + 1 (stride L, 4Y rows) needs the transform of length 4m of Q = V with x below L/2:
+//  - its first half, Q mod (y^2Y - 1): per block, the inverse levels within the block (outputs
+//    x < L/2 only, to a copy at a[2m, 4m)) and the forward levels within the block, with bottom;
+//  - its second half, Q mod (y^2Y + 1): the inverse y levels of the copies (columns x < L/2) give
+//    Q's rows mod (y^2Y - 1); for Q of a denominator, row 0 wraps row 2Y onto the true row 0 = 1, so
+//    row 0 becomes 2 - row 0 (fix); then the forward of the upper half, with bottom.
+// Against an inverse of length 2m and a forward of length 4m, the first half skips its y levels.
+// Factors: the levels within a block multiply by L/8 and the y levels by 2Y (y_scale: (2Y)^-1),
+// so the result is (L/8) c times the true transform when the leaves are c times V's.
+template <class Bottom>
+class Doubling {
+public:
+    // block = L/8 >= 4 vectors.
+    Doubling(std::span<std::uint32_t> a, std::size_t block, const Tables& tables, const Bottom& bottom)
+        : a_(a.data()), half_(a.size() / 2), block_(block), b_(std::size_t(std::countr_zero(block)) - 1),
+          aligned_(std::countr_zero(block) % 2 == 0), tables_(tables), bottom_(bottom),
+          inverse_(tables.roots, tables.inverse_roots, InverseBottom{tables.inverse_roots, a.data()}),
+          forward_(tables.roots, tables.inverse_roots, bottom) {}
+
+    // fix: 2c for a denominator whose true row 0 is c (the transform's factor), 0 for a numerator.
+    void run(std::uint32_t y_scale, std::uint32_t fix) const {
+        std::uint32_t* const copy = a_ + half_;
+        const std::size_t nv = half_ / 8, chunk = std::max<std::size_t>(block_, 16);
+        for (std::size_t c = 0; c < nv; c += chunk) {
+            for (std::size_t j = c / block_; j < (c + chunk) / block_; ++j) {
+                inverse_x(a_ + 8 * block_ * j, j, copy + 8 * block_ * j);
+                forward_x(copy + 8 * block_ * j, j, a_ + 8 * block_ * j);
+            }
+            if (block_ < 16) bottom_(a_ + 8 * c, chunk / 4, c / 4);  // blocks of one or two groups of h = 1
+        }
+        inverse_y(copy, y_scale);
+        if (fix) {
+            for (std::size_t i = 0; i < 4 * block_; i += 8) store(copy + i, negate(load(copy + i)));
+            copy[0] = fix >= kP - copy[0] ? fix - (kP - copy[0]) : fix + copy[0];
+        }
+        forward_upper();
+    }
+
+private:
+    // Block j at a: its inverse levels, the outputs x < L/2 to out (below 2P).
+    void inverse_x(std::uint32_t* a, std::size_t j, std::uint32_t* out) const {
+        if (block_ == 4) {  // one group of h = 1
+            inverse_.visit(a, 4, j);
+            std::copy_n(a, 16, out);
+        } else if (aligned_) {  // a radix-4 group
+            const std::size_t h = block_ / 4;
+            for (std::size_t t = 0; t < 4; ++t) inverse_.visit(a + 8 * t * h, h, 4 * j + t);
+            inverse_lower(a, h, Group(tables_.inverse_roots, j), out);
+        } else {  // half of radix-4 group j / 2: a radix-2 level (the lower output needs no twiddle)
+            const std::size_t h = block_ / 2;
+            inverse_.visit(a, h, 2 * j);
+            inverse_.visit(a + 8 * h, h, 2 * j + 1);
+            for (std::size_t i = 0; i < 8 * h; i += 8) store(out + i, low(add(load(a + i), load(a + i + 8 * h))));
+        }
+    }
+
+    // Block j at a: its forward levels from in (x < L/2; the rest zero), with the bottom unless
+    // the block holds fewer than 4 groups of h = 1 (run() calls it for 16 vectors).
+    void forward_x(const std::uint32_t* in, std::size_t j, std::uint32_t* a) const {
+        if (block_ == 4) {
+            std::copy_n(in, 16, a);
+            std::fill_n(a + 16, 16, 0);
+        } else if (aligned_) {
+            const std::size_t h = block_ / 4;
+            forward_lower(in, h, Group(tables_.roots, j), a);
+            if (h == 4) return bottom_(a, 4, 4 * j);
+            for (std::size_t t = 0; t < 4; ++t) forward_.visit(a + 8 * t * h, h, 4 * j + t);
+        } else {  // radix 2 with a zero upper input: both outputs are the lower input
+            const std::size_t h = block_ / 2;
+            for (std::size_t i = 0; i < 8 * h; i += 8) {
+                const Vec x = load(in + i);
+                store(a + i, x), store(a + i + 8 * h, x);
+            }
+            if (h == 4) return;
+            forward_.visit(a, h, 2 * j);
+            forward_.visit(a + 8 * h, h, 2 * j + 1);
+        }
+    }
+
+    // The inverse levels of group k (nv vectors at a) above the blocks, columns x < L/2.
+    void above(std::uint32_t* a, std::size_t nv, std::size_t k) const {
+        if (nv == block_) return;
+        if (nv == 2 * block_) {  // the radix-2 level of radix-4 group k: (u + v, (u - v) x)
+            const Factor x = entry(tables_.inverse_roots, k);
+            for (std::size_t i = 0; i < 4 * block_; i += 8) {
+                const Vec u = load(a + i), v = load(a + i + 8 * block_);
+                store(a + i, low(add(u, v))), store(a + i + 8 * block_, times(diff(u, v), x));
+            }
+            return;
+        }
+        const std::size_t h = nv / 4;
+        for (std::size_t t = 0; t < 4; ++t) above(a + 8 * t * h, h, 4 * k + t);
+        inverse_columns(a, h, b_, tables_.inverse_roots, k);
+    }
+
+    // The inverse y levels of the transform of length 2m at a (canonical output times scale, as
+    // inverse_pruned's top). Pruned forwards run groups of at most 64 vectors unpruned, so for
+    // b <= 5 the level holding b (h = 16 or less) reads the other columns too: they are zeroed.
+    void inverse_y(std::uint32_t* a, std::uint32_t scale) const {
+        const std::size_t nv = half_ / 8, width = std::size_t(1) << b_;
+        const bool zero = b_ <= 5;
+        Vec* const v = reinterpret_cast<Vec*>(a);
+        const Factor s(scale);
+        const auto scaled = [&s](Vec x) { return reduce(times(x, s), kP); };
+        const Vec z0 = _mm256_setzero_si256();
+        if (std::countr_zero(nv) % 2 == 0) {
+            const std::size_t h = nv / 4;
+            for (std::size_t t = 0; t < 4; ++t) above(a + 8 * t * h, h, t);
+            const Factor z(tables_.inverse_roots[1], tables_.inverse_roots[9]);
+            for (std::size_t c = 0; c < h; c += 2 * width) {
+                for (std::size_t j = c; j < c + width; ++j) {
+                    const Vec x0 = v[j], x1 = v[j + h], x2 = v[j + 2 * h], x3 = v[j + 3 * h];
+                    const Vec ab = low(add(x0, x1)), cd = low(add(x2, x3));
+                    const Vec amb = low(diff(x0, x1)), cmd = times(diff(x2, x3), z);
+                    v[j] = scaled(add(ab, cd)), v[j + h] = scaled(add(amb, cmd));
+                    v[j + 2 * h] = scaled(diff(ab, cd)), v[j + 3 * h] = scaled(diff(amb, cmd));
+                }
+                if (zero)
+                    for (std::size_t j = c + width; j < c + 2 * width; ++j) v[j] = v[j + h] = v[j + 2 * h] = v[j + 3 * h] = z0;
+            }
+        } else {
+            const std::size_t h = nv / 2;
+            above(a, h, 0);
+            above(a + 8 * h, h, 1);
+            for (std::size_t c = 0; c < h; c += 2 * width) {
+                for (std::size_t j = c; j < c + width; ++j) {
+                    const Vec x0 = v[j], x1 = v[j + h];
+                    v[j] = scaled(add(x0, x1)), v[j + h] = scaled(diff(x0, x1));
+                }
+                if (zero)
+                    for (std::size_t j = c + width; j < c + 2 * width; ++j) v[j] = v[j + h] = z0;
+            }
+        }
+    }
+
+    // The second half of the transform of length 4m from the rows mod (y^2Y + 1) at a[2m, 4m):
+    // the top level's outputs of that half (as forward_pruned's top), then pruned forwards.
+    void forward_upper() const {
+        const std::size_t nv = half_ / 4, width = std::size_t(1) << b_;  // vectors of length 4m
+        const Pruned<Bottom> pruned(tables_, bottom_, b_);
+        if (std::countr_zero(nv) % 2 == 0) {  // radix-4 identity group: outputs 2, 3 = r0 +- z r1
+            const std::size_t h = nv / 4;
+            Vec* const v = reinterpret_cast<Vec*>(a_);
+            const Factor z(tables_.roots[1], tables_.roots[9]);
+            for (std::size_t c = 0; c < h; c += 2 * width)
+                for (std::size_t j = c; j < c + width; ++j) {
+                    const Vec x = v[2 * h + j], y = times(v[3 * h + j], z);
+                    v[2 * h + j] = add(x, y), v[3 * h + j] = diff(x, y);
+                }
+            pruned.forward(a_ + 16 * h, h, 2);
+            pruned.forward(a_ + 24 * h, h, 3);
+        } else {  // radix 2: the upper output is the input
+            pruned.forward(a_ + 4 * nv, nv / 2, 1);
+        }
+    }
+
+    std::uint32_t* a_;
+    std::size_t half_, block_, b_;
+    bool aligned_;
+    const Tables& tables_;
+    Bottom bottom_;
+    Recursion<InverseBottom> inverse_;
+    Recursion<Bottom> forward_;
+};
+
 // Levels 0 and 1, one-dimensional in x, into q and p (length 4m each), ending in level 2's
 // layout (stride m/2: Q_2 rows 0 .. 4, P_2 rows 0 .. 3, x below m/4; the rest of each row is not
 // read by the pruned forward transforms).
@@ -8352,16 +8541,31 @@ inline void power_projection(const Transform& t, std::span<const std::uint32_t> 
     Carve carve(scratch.subspan(Arena::footprint(Tables::words(m))));
     const std::span<std::uint32_t> q = carve.take(4 * m), p = carve.take(4 * m), w = carve.take(projection_work(m));
     projection_first_levels(t, tables, g, n, q, p);
-    const std::uint32_t scale = graeffe_scale(lg + 1);  // inverses at 2m of ProjectionBottom's output
+    const ProjectionBottom bottom{&tables, p.data(), q.data(), p.data()};
+    const std::uint32_t half_scale = ntt::detail::power(kP / 2 + 1, 31);  // 2^-31: ProjectionBottom's factor
+    std::uint32_t c = 1;  // level s's transforms are c times the true ones
     for (int s = 2; s + 3 < lg; ++s) {
         const std::size_t stride = 2 * (m >> s), rows = std::size_t(1) << s;  // Q_s: rows 0 .. Y; P_s: 0 .. Y - 1
         const std::size_t pad = std::size_t(std::countr_zero(stride / 16));  // vector bit of x = L
-        forward_pruned(p, rows * stride, pad, tables, ForwardBottom{tables.roots});
-        forward_pruned(q, (rows + 1) * stride, pad, tables, ProjectionBottom{&tables, p.data(), q.data(), p.data()});
-        // Only x < L/2 is kept: the next forwards do not read the rest of each row.
-        inverse_pruned(q.first(2 * m), pad - 1, tables, InverseBottom{tables.inverse_roots, q.data()}, scale);
-        inverse_pruned(p.first(2 * m), pad - 1, tables, InverseBottom{tables.inverse_roots, p.data()}, scale);
-        next_level(q, stride / 2, 2 * rows);
+        if (s == 2) {
+            forward_pruned(p, rows * stride, pad, tables, ForwardBottom{tables.roots});
+            forward_pruned(q, (rows + 1) * stride, pad, tables, bottom);
+        }
+        if (s + 4 < lg) {  // level s + 1 <= T - 4: its transforms by doubling
+            const std::size_t block = stride / 16;
+            const std::uint32_t next =
+                ntt::detail::multiply_mod(ntt::detail::multiply_mod(ntt::detail::multiply_mod(c, c), half_scale), std::uint32_t(block));
+            const std::uint32_t y_scale = kInverseScales[0][s + 4];  // (2^(s+1))^-1
+            Doubling<ForwardBottom>(p, block, tables, ForwardBottom{tables.roots}).run(y_scale, 0);
+            Doubling<ProjectionBottom>(q, block, tables, bottom).run(y_scale, next + next >= kP ? next + next - kP : next + next);
+            c = next;
+        } else {  // level T - 4: only x < L/2 is kept, the next forwards do not read the rest of each row
+            const std::uint32_t inverse_c = ntt::detail::power(c, kP - 2);
+            const std::uint32_t scale = ntt::detail::multiply_mod(graeffe_scale(lg + 1), ntt::detail::multiply_mod(inverse_c, inverse_c));
+            inverse_pruned(q.first(2 * m), pad - 1, tables, InverseBottom{tables.inverse_roots, q.data()}, scale);
+            inverse_pruned(p.first(2 * m), pad - 1, tables, InverseBottom{tables.inverse_roots, p.data()}, scale);
+            next_level(q, stride / 2, 2 * rows);
+        }
     }
     projection_last_levels(t, tables, q, p, w, a);
 }

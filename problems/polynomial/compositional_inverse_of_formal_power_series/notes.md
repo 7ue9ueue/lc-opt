@@ -110,7 +110,9 @@ g = f) 1.22 ms. main.cpp 2.70 ms (#174's 2.76).
   composition and owner lanes): projection.hpp's level T - 3 one-dimensional in y, level 1's
   loops in AVX2, no zero fills of row halves the pruned forwards skip; m >= 512 (lib/poly/notes.md).
   `judge.py bench` (21 rounds): `lc-amd` 0.9591 (2.67 -> 2.56 ms), `lc-intel` 0.9537. 23/23
-  official tests; `stress.py` 1000 rounds.
+  official tests; `stress.py` 1000 rounds. Merged as #260 (CI 0.9541, 0.9612, 0.9557).
+  Then the doubling between generic levels: in process 1273 -> 1211 µs; `judge.py bench` (21
+  rounds): `lc-amd` 0.9768 (2.56 -> 2.50 ms), `lc-intel` 0.9673.
 - Next: `power` at N - 1 = 7999 (229 us; its steps are near their transform count); the last levels
   (100 us: 7 strided column copies, 6 forwards at m/2, 3 products, one cyclic product at m).
   Counted, not built: level 2 one-dimensional (Q_3 and P_3 from 35 row products at m/2: ~57m

@@ -397,9 +397,31 @@ with P_0 = x^(m-n), Q_0 = 1 - y g, m = 2^T >= max(n, 512); n <= 32 from the powe
   the wrapped terms use t c_j (6 Shoup products per leaf set, shared with the Graeffe), so each
   output is one sum of 8 products and one reduction. The CRT is (A + B) + u^4 (A - B) / s with
   s^-1 from the inverse table; the factor 2 and the products' 2^-32 go into the inverses' scale.
-  V and W are written over the leaves already read (Q's and P's arrays), then inverse transforms
-  at 2m and the next layout (unwrap row 2Y for Q). The x >= L/2 halves of the rows are left as
-  the pruned inverses leave them: the next pruned forwards do not read them.
+  V and W are written over the leaves already read (Q's and P's arrays). Level 2's transforms
+  are forwards of level 1's rows; level s + 1 <= T - 4 gets its transforms from V and W by
+  doubling (below); level T - 4 inverts V and W at 2m (x < L/2 kept; the rest of each row is
+  left as the pruned inverse leaves it) and unwraps row 2Y for level T - 3.
+- Doubling (`Doubling`): V's leaves are its transform of length 2m at stride L: 2Y blocks of L
+  words, block j the transform of V mod (u^L - w_j) by the levels within the block (group j at
+  that size, the same in the transforms of length 2m and 4m). Level s + 1's transform of length
+  4m: its first half (Q mod y^2Y - 1), per block: the inverse levels within the block (outputs
+  x < L/2 only, to a copy in the upper half), then the forward levels within the block with the
+  bottom; its second half (Q mod y^2Y + 1): the inverse y levels of the copies (columns x < L/2)
+  give the rows mod y^2Y - 1, Q's row 0 becomes 2 - row 0 (row 2Y wraps onto the true row 0 = 1
+  with the opposite sign there), then the upper half's top level and a pruned forward with the
+  bottom. Against an inverse at 2m and a forward at 4m, the first half skips its y levels:
+  (s + 2) m word-levels less per array and level.
+  - Blocks of L/8 vectors are radix-4 groups when log2(L/8) is even; otherwise a block is half of
+    one, and its top level is radix 2 (the lower output of the inverse needs no twiddle; the
+    forward with a zero upper input copies). Blocks below 16 vectors call the bottom per 16
+    vectors (ProjectionBottom takes 4 groups at a time).
+  - Factors: the levels within a block multiply by L/8 and the y levels by 2Y (undone by their
+    scale), so level s + 1's transforms are c' = (L/8) 2^-31 c^2 times the true ones (2^-31:
+    ProjectionBottom's output); Q's fixed row 0 uses 2c', and level T - 4's inverses take c^-2 in
+    their scale. No pass rescales anything.
+  - Pruned forwards run groups of at most 64 vectors unpruned: for b <= 5 the level holding b
+    reads the columns x >= L/2 too, so the y inverse zeroes them (the copies' garbage failed the
+    tests at L = 256 and 512 before).
 - Leaf sums in transposed form (one leaf per lane) as 64-bit products of the even lanes, then of
   the odd lanes after a shift: one function per leaf kind; `[[gnu::flatten]]` keeps the
   transposes inline (GCC called them, spilling every vector around the calls).
@@ -429,8 +451,10 @@ with P_0 = x^(m-n), Q_0 = 1 - y g, m = 2^T >= max(n, 512); n <= 32 from the powe
 - Costs at m = 8192 (`lc-amd`, in process, µs, before level T - 3 was one-dimensional):
   power_projection ~1180; per generic level P forward 26, Q forward with the bottom 58 (bottom
   ~33), two inverses 22; last levels 100.
-- Costs at m = 2^17 (`lc-amd`, in process, ms): power_projection 27.6. Levels 0, 1: 1.75;
-  generic levels 2 .. 13: P forward 5.65, Q forward with the bottom 12.24, inverses 5.26; level
+- Costs at m = 2^17 (`lc-amd`, in process, ms): power_projection 25.8. Levels 0, 1: 1.78;
+  generic levels 2 .. 13: forwards of level 2 1.61, doubling 11 times: P 6.66, Q with the bottom
+  12.58, level 13's inverses 0.42 (before the doubling: P forward 5.71, Q forward with the
+  bottom 12.18, inverses 5.28); level
   T - 3: columns 0.06, 14 forwards 0.38, Q' products 0.26, P' products 0.59; levels T - 2 and
   T - 1: 6 forwards 0.37, products at m/2 0.45, the product at m 0.58.
 
@@ -1229,6 +1253,19 @@ owner lanes): projection.hpp (Power projection above).
 - `judge.py bench` (21 rounds, new/main), `lc-amd` (`lc-intel`):
   compositional_inverse_of_formal_power_series_large 0.9466 (0.9607), 36.89 -> 34.92 ms;
   compositional_inverse_of_formal_power_series 0.9591 (0.9537).
+- Merged as #260. CI: compositional_inverse_of_formal_power_series 0.9541, 0.9612, 0.9557,
+  _large 0.9557, 0.9507, 0.9633; all 2 0.9568.
+
+2026-10-10, claude (issue #87, second change): projection.hpp, doubling between the generic levels
+(Power projection above). In process at N = 131072 (`lc-amd`, alternating runs of the two
+algorithms against the same library): 32.35 -> 30.50 ms; generic levels 23.17 -> 21.27 ms. At
+N = 8000: 1273 -> 1211 µs. Tests: a unit test of `Doubling` against inverse + forward for
+m = 512 .. 2^15 and every level, numerator and denominator (scratch `dtest.cpp`); it found the
+missing zero fill at b = 4, 5. `test.cpp`'s projection and compositional inverse suites at -O2
+and ASan/UBSan (`lc-intel`); both `stress.py` (400, 1000 rounds); all official tests (`lc-amd`,
+`lc-intel`). `judge.py bench` (21 rounds, against #260), `lc-amd` (`lc-intel`):
+compositional_inverse_of_formal_power_series_large 0.9493 (0.9165), 35.28 -> 33.49 ms;
+compositional_inverse_of_formal_power_series 0.9768 (0.9673).
 
 ## Sources
 

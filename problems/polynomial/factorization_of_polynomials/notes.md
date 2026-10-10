@@ -95,6 +95,13 @@ reaches ~4.5 products per cycle at any size (L1 or L2): its bound is the FP port
     of 30 dependent squarings; batch them across nodes), the dense kernels at ~4.5 of ~6.4
     products per cycle (FP-port bound), x^((p-1)/2) (symmetric squaring), page faults (~30
     pages over the trivial tests).
+- 2026-10-10, audit (claude): submissions not logged before; who submitted them is not recorded.
+  22:05-22:13 UTC, after the issue closed; the folder last changed in #326, so #323's `main.cpp`
+  (guess). [409699](https://judge.yosupo.jp/submission/409699) 9 ms,
+  [409700](https://judge.yosupo.jp/submission/409700) 10, [409701](https://judge.yosupo.jp/submission/409701) 11,
+  [409702](https://judge.yosupo.jp/submission/409702) 9, [409703](https://judge.yosupo.jp/submission/409703) 10,
+  [409704](https://judge.yosupo.jp/submission/409704) 10; all AC, all clean 1 ms (`tools/spikes.py`).
+  Best judged stays 9 ms.
 
 ## Sources
 

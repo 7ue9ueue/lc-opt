@@ -14,11 +14,18 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
   `solution.cpp` replaces the top level: one radix-8 pass per factor reads its lower half once
   and writes the first radix-4 group of both halves (no copy of the lower half, no separate
   pass for the upper half's group). Below it, `lib/ntt`'s recursion and kernels (copied as
-  `Subtrees`) except the bottom stage, which comes from `bottom.hpp` (`gen_bottom.py`, built on
+  `Subtrees`) except the bottom stage, which comes from `bottom.hpp` (`gen_asm.py`, built on
   `lib/ntt/gen_kernels.py`): two groups per inlined asm statement, leaf weights taken from the
   group's own twiddles (no weight array), leaf products with each coefficient of B broadcast once.
-- `lib/io` for input: `io::read_bulk` (`lib/io/bulk32.hpp`, the transposed parser on Zen 3)
-  straight into the transform buffers.
+  The inverse top level (identity group of the lower half, group 1 of the upper half, the radix-2
+  level between them and the scale) is one pass, `top.hpp` (`gen_asm.py`): the scale is folded
+  into the twiddles, 9 Shoup products per column instead of 13.
+- Input: 9-digit tokens (fft_killer, all_same_01-03: 13 of the 16 large tests) and 1-digit tokens
+  (all_same_00) take a fixed-width fast path in `solution.cpp`: token i starts at 10i (or 2i),
+  so 8 tokens come from four 32-byte loads with no separator search; each block is checked by its
+  separator mask, and the first block that fails, with everything after it, goes to
+  `io::read_bulk` (`lib/io/bulk32.hpp`, the transposed parser on Zen 3). max_random and
+  max_ans_zero have tokens of mixed lengths and take `io::read_bulk` throughout.
 - Output: `fields.hpp`, every value in a 10-byte field (judge-specific; the checker compares
   tokens), the same bytes as the former `../fixed_width.hpp` (deleted in #198). Per value:
   w = v / 10 as 8 digits, most significant first, in a qword; leading zeros from x ^ (x - 1) and
@@ -206,10 +213,49 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
     [409435](https://judge.yosupo.jp/submission/409435) AC 21 (spikes: random_00, fft_killer_04,
     small_15). `spikes.py`: all five clean 13 ms. Large cases at 13 ms per run: 2, 1, 3, 2, 1, the
     rest 11-12 (409226: 7; 409392 and 409394: 3 and 1). Best judged stays 13 ms.
-- Next: the formatter is at 34 cycles per 16 values whatever the instruction order; `forward` at
-  29.3 cycles per iteration against a 24.5 slot bound; `forward_pair` and `inverse` at h = 4
-  are out-of-line calls of 2-4 iterations (0.31 and 0.15 ms against 0.275 and 0.135 at large h).
-  Page-aligned text with page-multiple blocks (lib/io/notes.md: d = 0 is 1-2.5% faster in
-  `write(2)`) needs a block-size change in the shared `fields.hpp`. `bottom.hpp` would also fit
-  convolution_mod_large and `lib/ntt` itself (every NTT user), once a `lib/` round can afford the
-  re-timing.
+- 2026-10-10, claude (round 5). `lc-amd`, GCC 15.2 image, judge flags unless noted. Exploration
+  files (generators, probes, benches) in `~/Documents/cpp_hpc/lc-opt-explore/convolution_mod/r5/`
+  and on `lc-amd` in `~/explore/convolution_mod/`.
+  - Kept: fixed-width input fast paths (above). 13 of the 16 large inputs are exactly 10 bytes per
+    token (10485774 bytes = 14 + 2^20 * 10). Phases on fft_killer_04, medians of 31 runs (ms):
+    read a + b 0.908 + 0.931 -> 0.687 + 0.728 (an earlier run of 21: 0.887 + 0.898 -> 0.673 +
+    0.710). The 9-digit block is ~37 vector ops per 8 tokens; what remains of the read (~0.5 ms
+    per array) is input page faults, DRAM and the destination's huge-page zeroing.
+  - Kept: the fused inverse top (`top.hpp`), bit-identical to inverse_identity + inverse +
+    scale_radix2. Alone, 4 MiB in cache: 0.87-0.89 of the three passes (718K -> 630-640K TSC
+    ticks); knob sweep of 60 sets, the default list schedule with one column per iteration is
+    among the best. In the program: multiply 4.458 -> 4.412 ms (31 runs), on every case.
+  - Per case, 11 interleaved rounds (median ms, old -> new): fft_killer_00 12.10 -> 11.72,
+    fft_killer_04 12.16 -> 11.50, fft_killer_09 12.23 -> 11.82, all_same_00 11.32 -> 10.28,
+    all_same_01 12.04 -> 11.46, all_same_03 11.96 -> 11.81, max_random_00 11.95 -> 11.99,
+    max_random_01 11.79 -> 11.82, max_ans_zero_00 11.84 -> 11.78, random_00 10.69 -> 10.57.
+    The mixed-length inputs (max_random_00/01, max_ans_zero_00) are now the slowest cases.
+  - `judge.py bench`, 31 rounds, slowest 3 cases (max_random_00, max_ans_zero_00,
+    fft_killer_09): 13.26 -> 13.19 ms, ratio 0.9936.
+  - Checks: 53/53 official tests; `../stress.py` 500 rounds (new kinds: all 9-digit values, and
+    9-digit values with 1% shorter ones); 168 edge inputs (9- and 1-digit tokens with a short or
+    long token at block boundaries, CRLF, tabs, double spaces, one per line, no final newline,
+    lengths not a multiple of the block) with the judge build and ASan/UBSan, file and pipe
+    input; ASan/UBSan on 14 official cases, file and pipe input.
+  - Zen 3 probes (16 independent ops per pattern, cycles): strict alternation of a 2-pipe op
+    (`vpmuludq`, `vpmulld`, `vpsrlq`) with a 4-pipe op (`vpaddd`, `vpminud`, `vpblendd`) costs
+    25-33% (mama 5.23, amam 4.96, sasa 5.32, lama 5.26, mnma 5.28, mbmb 5.30 against 4.0); any
+    other mix runs at the bound (mmaa, maam, amma, msms, masa, mamasasa 4.0; maa 3.75, mmaaaa 3.0).
+  - `forward` and `inverse` (lib/ntt, h = 1024, L2): 29.4 and 29.0 cycles per iteration. The same
+    instructions with every register source replaced by a constant (no dependences): 25.05 and
+    25.8, at the 4-op bound. So the loss is the dependence chains, not the op mix. Tried and lost:
+    pairing same-class 2-pipe ops (register-aware post-pass): 28.9-29.3 (noise); software
+    pipelining through memory (x products of the next iteration stored over f2, f3): 30.4-31.4
+    forward, 29.9-31.9 inverse.
+  - A toy out-of-order model (in-order dispatch into a 32-entry scheduler, load latency 8)
+    matches `forward` and `inverse` (29, 29) but predicts 35-37 for knob variants measured at
+    31.2-31.8 and gave no useful ranking for the pipelined bodies. Not used.
+  - h = 4 levels as straight-line, always-inlined asm (8 forward butterflies of a and b, 4
+    inverse; twiddles broadcast in the statement): 122-128 cycles per group against 119 for lib's
+    out-of-line `forward_pair`, 63.7-66 against 59.7 for `inverse` (9 knob sets each). Not kept:
+    the call is not the cost.
+- Next: the mixed-length parse (max_random) costs 0.88 ms per array against 0.69 for the fixed
+  path; `io::read_bulk` spends ~11 instructions per token and a 3-tokens-per-load or
+  end-aligned variant does not count lower. Formatter at 34 cycles per 16 values; `forward` and
+  `inverse` at 29.3 cycles per iteration, limited by dependence chains (25 without them).
+  `bottom.hpp` and `top.hpp` would also fit convolution_mod_large and `lib/ntt`.

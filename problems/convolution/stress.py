@@ -15,14 +15,18 @@ P = 998244353
 
 
 def coefficients(rng: random.Random, n: int) -> list[int]:
-    kind = rng.randrange(4)
+    kind = rng.randrange(6)
     if kind == 0:
         return [rng.randrange(P) for _ in range(n)]
     if kind == 1:
         return [rng.choice([0, 1, P - 1]) for _ in range(n)]
     if kind == 2:
         return [rng.randrange(10) for _ in range(n)]
-    return [rng.randrange(P) if rng.random() < 0.1 else 0 for _ in range(n)]
+    if kind == 3:
+        return [rng.randrange(P) if rng.random() < 0.1 else 0 for _ in range(n)]
+    # 9 digits each (convolution_mod's input fast path), with rare shorter values for kind 5.
+    short = 0.0 if kind == 4 else 0.01
+    return [rng.randrange(10 ** 8) if rng.random() < short else rng.randrange(10 ** 8, P) for _ in range(n)]
 
 
 def case(rng: random.Random) -> str:

@@ -55,8 +55,8 @@ Open problems: [issues](https://github.com/7ue9ueue/lc-opt/issues).
 The human built the workbench and the agents use it:
 
 - **Rules.** [`AGENTS.md`](AGENTS.md) sets the standards: code style, how to measure, what counts as a win.
-- **Machines.** Two Google Cloud VMs. `lc-amd` has the judge's exact CPU (AMD EPYC 7B13, Zen 3) and gives
-  judge-like timings. `lc-intel` has hardware counters for `perf` profiling.
+- **Machines.** Three Google Cloud VMs. `lc-bench` and `lc-amd` have the judge's exact CPU (AMD EPYC 7B13,
+  Zen 3); `lc-bench` times, `lc-amd` builds and tests. `lc-intel` has hardware counters for `perf` profiling.
 - **A copy of the judge.** [`tools/judge.py`](tools/judge.py) uses the judge's compiler image, flags,
   official tests and checker. Its timings match the judge to within 1 ms.
 - **CI.** Every pull request runs all official tests and times the new code against `main` on 3 GitHub

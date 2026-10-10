@@ -6,7 +6,7 @@ Updated: 2026-10-10
 
 | Task | State | Notes |
 |---|---|---|
-| Machines | Done | GCP `lc-amd` (judge CPU) times, `lc-intel` profiles with `perf`, GitHub Actions times across CPUs. |
+| Machines | Done | GCP `lc-bench` (judge CPU) times, `lc-amd` builds and tests, `lc-intel` profiles with `perf`, GitHub Actions times across CPUs. |
 | Judge harness and CI auto-merge | Done | Matches the judge: QPoly 406478 16.6 ms (judged 16), matrix_product 53.4 ms (judged 53). |
 | Judge submission (`tools/submit.py`) | Done | Submit as Aiyiyi. User logs in once; only a renewable token is kept, in macOS Keychain. Enforces 5 per version. Fallback: user uploads by hand. |
 | Round brief, issue template, `/work` | In use | `tools/prompt.md`, `tools/prompt_lib.md`, `.github/ISSUE_TEMPLATE/problem.md`, `.claude/commands/work.md`. First run 2026-10-09: 17 convolution issues, 2 rounds each. Polynomial issues #62-#89 since. |

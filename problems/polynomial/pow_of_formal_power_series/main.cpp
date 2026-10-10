@@ -3221,6 +3221,7 @@ struct ForwardBottom {
             const Group w(roots, first + j);
             Vec f[4] = {load(a), load(a + 8), load(a + 16), load(a + 24)};
             forward_h1(f, w);
+#pragma GCC unroll 4
             for (int t = 0; t < 4; ++t) store(a + 8 * t, canonical(f[t]));
         }
     }
@@ -3320,12 +3321,14 @@ struct InverseProductSumBottom {
             if (j + 1 < count) prepare(first + j + 1, window[(j + 1) & 1]);
             const std::size_t g = first + j;
             Vec f[4];
+#pragma GCC unroll 4
             for (std::size_t t = 0; t < 4; ++t) {
                 f[t] = leaf_product(window[j & 1][0][t], terms[0].product.b + 8 * (4 * g + t));
                 for (std::size_t k = 1; k < K; ++k)
                     f[t] = low(add(f[t], leaf_product(window[j & 1][k][t], terms[k].product.b + 8 * (4 * g + t))));
             }
             inverse_h1(f, Group(terms[0].product.inverse_roots, g));
+#pragma GCC unroll 4
             for (std::size_t t = 0; t < 4; ++t) store(out + 8 * t, f[t]);
         }
     }

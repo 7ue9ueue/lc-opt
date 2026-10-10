@@ -36,6 +36,13 @@ u32 add(u32 a, u32 b) { return a + b >= kP ? a + b - kP : a + b; }
 u32 inverse(u32 a) { return ntt::detail::power(a, kP - 2); }
 u32 montgomery_form(u32 a) { return u32((u64(a) << 32) % kP); }
 
+// a b / 2^32 mod P.
+u32 mont(u32 a, u32 b) {
+    const u64 t = u64(a) * b, m = u32(t) * u64(ntt::kernels::kNI) % (u64(1) << 32);
+    const u32 r = u32((t + m * kP) >> 32);
+    return r >= kP ? r - kP : r;
+}
+
 // l for degree d: d + 1 <= 8 2^l, so about 8 points of H per root and few collisions.
 int subgroup_log(std::size_t d) { return std::max(0, int(std::bit_width(d)) - 3); }
 
@@ -49,16 +56,14 @@ public:
         const std::size_t n = d_max + 1, m = shift_length(d_max);
         f_ = arena_.take(n), g_ = arena_.take(n), b_ = arena_.take(n), x_ = arena_.take(n), g0_ = arena_.take(n);
         for (auto& level : levels_) level = {arena_.take(n), arena_.take(n)};
-        fact_ = arena_.take(n), inv_fact_ = arena_.take(n);
+        const std::size_t count = (n + 7) / 8 * 8;
+        fact_ = arena_.take(count), inv_fact_ = arena_.take(count);
         work_ = arena_.take(m), work2_ = arena_.take(m);
         tracked_ = arena_.take(n), next_ = arena_.take(n);
         found_x_ = arena_.take(n), found_b_ = arena_.take(n), prefix_ = arena_.take(n);
         const std::size_t z = 8 << zeros_log(d_max);
         zero_q_ = arena_.take(z), zero_mask_ = arena_.take(z);
-        fact_[0] = 1;
-        for (std::size_t i = 1; i < n; ++i) fact_[i] = mul(fact_[i - 1], u32(i));
-        inv_fact_[n - 1] = inverse(fact_[n - 1]);
-        for (std::size_t i = n - 1; i > 0; --i) inv_fact_[i - 1] = mul(inv_fact_[i], u32(i));
+        factorials(count);
         const u32 u = ntt::detail::power(3, 1u << kTwoAdic);  // order 119
         for (u32 c = 0, x = montgomery_form(1); c < 120; ++c, x = mul(x, u)) coset_[c] = x;
         for (int i = 0; i < 30; ++i) power3_[i] = montgomery_form(ntt::detail::power(3, 1u << i));
@@ -152,15 +157,65 @@ private:
 
     // g = f(x + s) by one product: g_k k! = sum_i f_i i! s^(i-k) / (i-k)!. False if g(0) = 0.
     bool shift_by(u32 s) {
-        const std::size_t d = d_, m = shift_length(d);
-        const std::span<u32> x = work_.first(m), y = work2_.first(m);
-        for (std::size_t i = 0; i <= d; ++i) x[i] = mul(f_[i], fact_[i]);
-        u32 power = 1;
-        for (std::size_t j = 0; j <= d; ++j, power = mul(power, s)) y[d - j] = mul(power, inv_fact_[j]);
-        t_.forward(x.first(d + 1), 0, x);
-        t_.cyclic_product(y.first(d + 1), 0, y, x);
-        for (std::size_t k = 0; k <= d; ++k) g_[k] = mul(y[d + k], inv_fact_[k]);
+        using namespace roots::detail;
+        const std::size_t d = d_, m = shift_length(d), full = (d + 1) / 8 * 8;
+        u32* const x = work_.data();
+        u32* const y = work2_.data();
+        const auto product = [](Vec a, const u32* b) { return reduce(montgomery(a, load(b)), kP); };
+        for (std::size_t i = 0; i < full; i += 8) poly::detail::store_unaligned(x + i, product(poly::detail::load_unaligned(f_.data() + i), fact_.data() + i));
+        for (std::size_t i = full; i <= d; ++i) x[i] = mont(f_[i], fact_[i]);
+        // y[d - j] = s^j / j!, eight powers at a time.
+        alignas(32) u32 powers[8];
+        powers[0] = 1;
+        for (int i = 1; i < 8; ++i) powers[i] = mul(powers[i - 1], s);
+        const Vec step = broadcast(montgomery_form(mul(powers[7], s)));
+        const Vec reverse = _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+        Vec p = load(powers);
+        for (std::size_t j = 0; j < full; j += 8, p = reduce(montgomery(p, step), kP))
+            poly::detail::store_unaligned(y + d - j - 7, _mm256_permutevar8x32_epi32(product(p, inv_fact_.data() + j), reverse));
+        store(powers, p);
+        for (std::size_t j = full; j <= d; ++j) y[d - j] = mont(powers[j - full], inv_fact_[j]);
+        t_.forward(std::span<const u32>(x, d + 1), 0, work_.first(m));
+        t_.cyclic_product(std::span<const u32>(y, d + 1), 0, work2_.first(m), work_.first(m));
+        for (std::size_t k = 0; k < full; k += 8) poly::detail::store_unaligned(g_.data() + k, product(poly::detail::load_unaligned(y + d + k), inv_fact_.data() + k));
+        for (std::size_t k = full; k <= d; ++k) g_[k] = mont(y[d + k], inv_fact_[k]);
         return g_[0] != 0;
+    }
+
+    // fact_[i] = i! 2^32 and inv_fact_[i] = 2^32 / i! for i < count (a multiple of 8): blocks of 8
+    // lanes from in-vector prefix (suffix) products and a scalar chain over the blocks.
+    void factorials(std::size_t count) {
+        using namespace roots::detail;
+        const Vec one = broadcast(kR);
+        // Inclusive prefix products within the lanes (shift by 1, 2, 4 lanes, filling with 1).
+        const auto prefix = [one](Vec x) {
+            x = reduce(montgomery(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6)), one, 0x01)), kP);
+            x = reduce(montgomery(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(0, 0, 0, 1, 2, 3, 4, 5)), one, 0x03)), kP);
+            return reduce(montgomery(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(0, 0, 0, 0, 0, 1, 2, 3)), one, 0x0F)), kP);
+        };
+        const auto suffix = [one](Vec x) {
+            x = reduce(montgomery(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(1, 2, 3, 4, 5, 6, 7, 7)), one, 0x80)), kP);
+            x = reduce(montgomery(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(2, 3, 4, 5, 6, 7, 7, 7)), one, 0xC0)), kP);
+            return reduce(montgomery(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(4, 5, 6, 7, 7, 7, 7, 7)), one, 0xF0)), kP);
+        };
+        // fact[8i + l] = (8i)! (8i + 1) ... (8i + l).
+        u32 carry = kR;  // (8i)! 2^32
+        poly::detail::Indices index(0);
+        for (std::size_t i = 0; i < count; i += 8, index.next()) {
+            const Vec block = reduce(montgomery(prefix(_mm256_blend_epi32(index.value(), one, 0x01)), broadcast(carry)), kP);
+            store(fact_.data() + i, block);
+            carry = mont(fact_[i + 7], montgomery_form(u32(i + 8)));
+        }
+        // inv_fact[8i + l] = inv_fact[8i + 7] (8i + l + 1) ... (8i + 7).
+        u32 top = montgomery_form(inverse(mont(fact_[count - 1], 1)));
+        Vec up = poly::detail::Indices(count - 7).value();  // (i + 1, ..., i + 8) 2^32
+        const Vec down = broadcast(kP - montgomery_form(8));
+        for (std::size_t i = count - 8;; i -= 8, up = reduce(roots::detail::add(up, down), kP)) {
+            const Vec block = reduce(montgomery(suffix(_mm256_blend_epi32(up, one, 0x80)), broadcast(top)), kP);
+            store(inv_fact_.data() + i, block);
+            if (i == 0) break;
+            top = mont(inv_fact_[i], montgomery_form(u32(i)));
+        }
     }
 
     // Zeros of A_k (in g_, B in b_) on H, in 15 groups of 8 of its 119 cosets u^c W.

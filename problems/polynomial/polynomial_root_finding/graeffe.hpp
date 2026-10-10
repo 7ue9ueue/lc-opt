@@ -68,21 +68,25 @@ inline Sum operator+(const Sum& s, const Sum& t) {
     return {_mm256_add_epi64(s.even, t.even), _mm256_add_epi64(s.odd, t.odd)};
 }
 
-// s / 2^32 mod P, canonical, for sums below 8 P^2 (the Montgomery term keeps them below 2^64).
-inline Vec reduce(const Sum& s) {
+// (s + m P) / 2^32 for the Montgomery multiple m: s / 2^32 mod P, below s / 2^32 + P. Each
+// lane's s + 2^32 P must stay below 2^64.
+inline Vec montgomery_sum(const Sum& s) {
     const Vec ni = broadcast(ntt::kernels::kNI), p = broadcast(kP);
     const Vec even = _mm256_add_epi64(s.even, _mm256_mul_epu32(_mm256_mul_epu32(s.even, ni), p));
     const Vec odd = _mm256_add_epi64(s.odd, _mm256_mul_epu32(_mm256_mul_epu32(s.odd, ni), p));
-    return canonical(_mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA));  // < 3P
+    return _mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA);
 }
 
-// s / 2^32 mod P, canonical, for any sums: 2^32 h + l -> h (2^32 mod P) + l first.
-inline Vec reduce_long(const Sum& s) {
+// s / 2^32 mod P, canonical, for sums below 8 P^2 (then below 3P before the reduction).
+inline Vec reduce(const Sum& s) { return canonical(montgomery_sum(s)); }
+
+// 2^32 h + l -> h (2^32 mod P) + l: the same residue, below 2^61.
+inline Sum folded(const Sum& s) {
     const Vec r = broadcast(kR), zero = _mm256_setzero_si256();
     const auto fold = [&](Vec x) {
         return _mm256_add_epi64(_mm256_mul_epu32(_mm256_srli_epi64(x, 32), r), _mm256_blend_epi32(x, zero, 0xAA));
     };
-    return reduce(Sum{fold(s.even), fold(s.odd)});
+    return {fold(s.even), fold(s.odd)};
 }
 
 // Leaves l of a and b mod (x^8 - w_l), lane l of a[j] and b[j] holding coefficient j. With
@@ -275,32 +279,69 @@ private:
         }
     }
 
+    // K polynomials (which[0, K)), J outputs j at a time: K J sums in registers, sharing the
+    // loads of V^t.
     template <int K>
+    void evaluate(const int (&which)[K], detail::Vec v) {
+        constexpr int J = K == 1 ? 2 : 1;
+        if (points() >= J) return evaluate<K, J>(which, v);
+        evaluate<K, 1>(which, v);
+    }
+
+    // Sums of up to 16 products below P^2 stay below 2^64; past 8, each is folded (below 2^61)
+    // before they are added: terms <= 32 here (two folded sums and the Montgomery term).
+    template <int K, int J>
     void evaluate(const int (&which)[K], detail::Vec v) {
         using namespace detail;
         const std::size_t n = points(), terms = terms_;
-        Vec f = broadcast(kR);  // v^j 2^32
-        for (std::size_t j = 0; j < n; ++j) {
-            Vec total[K];
-            for (int i = 0; i < K; ++i) total[i] = _mm256_setzero_si256();
-            for (std::size_t t0 = 0; t0 < terms; t0 += 16) {  // 64-bit sums below 16 P^2
-                const std::size_t t1 = std::min(terms, t0 + 16);
-                Sum s[K];
-                for (int i = 0; i < K; ++i) s[i] = {_mm256_setzero_si256(), _mm256_setzero_si256()};
-#pragma GCC unroll 4
-                for (std::size_t t = t0; t < t1; ++t) {
+        const u32* rows[K];
+        u32* out[K];
+#pragma GCC unroll 3
+        for (int i = 0; i < K; ++i) rows[i] = rows_[which[i]], out[i] = values_[which[i]];
+        const Vec zero = _mm256_setzero_si256();
+        const bool fold = terms > 8;
+        Vec f[J], step = v;  // f[b] = v^(j + b) 2^32, J chains stepped by v^J
+        f[0] = broadcast(kR);
+#pragma GCC unroll 2
+        for (int b = 1; b < J; ++b) f[b] = reduce(montgomery(f[b - 1], v), kP), step = reduce(montgomery(step, v), kP);
+        for (std::size_t j = 0; j < n; j += J) {
+            Sum total[K][J];
+#pragma GCC unroll 3
+            for (int i = 0; i < K; ++i)
+#pragma GCC unroll 2
+                for (int b = 0; b < J; ++b) total[i][b] = {zero, zero};
+            for (std::size_t first = 0; first < terms; first += 16) {
+                const std::size_t last = std::min(terms, first + 16);
+                Sum s[K][J];
+#pragma GCC unroll 3
+                for (int i = 0; i < K; ++i)
+#pragma GCC unroll 2
+                    for (int b = 0; b < J; ++b) s[i][b] = {zero, zero};
+                for (std::size_t t = first; t < last; ++t) {
                     const Operand power{load(powers_ + 16 * t), load(powers_ + 16 * t + 8)};
-                    for (int i = 0; i < K; ++i) {
-                        const Vec c = broadcast(rows_[which[i]][j * terms + t]);
-                        s[i] = s[i] + Operand{c, c} * power;
-                    }
+#pragma GCC unroll 3
+                    for (int i = 0; i < K; ++i)
+#pragma GCC unroll 2
+                        for (int b = 0; b < J; ++b) {
+                            const Vec c = broadcast(rows[i][(j + b) * terms + t]);
+                            s[i][b] = s[i][b] + Operand{c, c} * power;
+                        }
                 }
-                for (int i = 0; i < K; ++i) total[i] = reduce(add(total[i], reduce_long(s[i])), kP);
+#pragma GCC unroll 3
+                for (int i = 0; i < K; ++i)
+#pragma GCC unroll 2
+                    for (int b = 0; b < J; ++b) total[i][b] = total[i][b] + (fold ? folded(s[i][b]) : s[i][b]);
             }
-            for (int i = 0; i < K; ++i) store(values_[which[i]] + 8 * j, reduce(montgomery(total[i], f), kP));
-            f = reduce(montgomery(f, v), kP);
+#pragma GCC unroll 2
+            for (int b = 0; b < J; ++b) {
+#pragma GCC unroll 3
+                for (int i = 0; i < K; ++i)
+                    store(out[i] + 8 * (j + b), reduce(montgomery(montgomery_sum(total[i][b]), f[b]), kP));
+                f[b] = reduce(montgomery(f[b], step), kP);
+            }
         }
-        for (int i = 0; i < K; ++i) transform(values_[which[i]]);
+#pragma GCC unroll 3
+        for (int i = 0; i < K; ++i) transform(out[i]);
     }
 
     // In place: the transform of length n of the lanes (outputs in bit-reversed order).

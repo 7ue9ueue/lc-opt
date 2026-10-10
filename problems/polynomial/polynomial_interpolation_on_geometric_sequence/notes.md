@@ -5,7 +5,8 @@ f of degree < N through them. 5 s. Slowest tests: max_random_00..02 and y0_00 (N
 random_00/01 and pow_rN_equal_1_01 (N > 2^18). near_pow2 (N = 2^18 - 2 .. 2^18 + 2) takes the
 same transform length, 2^20. nar_0 has N <= 1 (a, r may be 0), small N <= 5.
 
-Best judged: none yet.
+Best judged: ours, 15 ms: [409510](https://judge.yosupo.jp/submission/409510) (`main.cpp` of #239),
+clean (`tools/spikes.py`).
 Record when opened (issue #78): 90 ms.
 
 ## Design
@@ -82,11 +83,27 @@ busier VM).
   - Rebased onto #230 (`lib/ntt/product.hpp`, convolution_mod's transform as `ntt::Product`):
     the forward radix-8 pass and the bottom kernels now come from `lib/ntt`; 28/28 official
     tests (`lc-amd`, `lc-intel`), stress 500 rounds (`lc-intel`), ASan/UBSan as above.
-- Next: the products are 6.9 of the 9.6 ms above the floor and are `ntt::Product`'s. Storing
-  K's bottom-level leaves would skip their recomputation in the second product (guess: 0.2 ms;
-  needs a bottom kernel variant). Page faults of the three 4 MiB buffers and the tables (7 huge
-  pages, 0.04-0.11 ms each per convolution_mod's notes). Fusing the radix-8 passes into the
-  scans needs C = L / 64 and saves at most their non-fault part (~0.2 ms in all).
+  - Merged as #239 (new problem: CI checks only).
+  - No gain after #239 (whole process, interleaved, 21 rounds, 3 slowest cases, against #239):
+    - No totals scan: the 1/Q scan starts each lane at 1 and yields the lane products; the K
+      scan then fixes Y by each lane's 1/Q at its end. Totals -0.13 ms, K scan +0.10 (load,
+      Shoup product, store of Y): ratio 0.9993.
+    - Second product in a[L/2, 3L/2) instead of a third buffer: `product_kernels::inverse_top`
+      leaves E = (u + w) s in a's lower half, so D can go to the upper half and the scans read
+      one stream. In process -0.1 ms (D scan 0.51 -> 0.38, c scan 0.42 -> 0.37, one huge page
+      fewer; `inverse_top` +0.08 per product against the two separate top groups); whole
+      process ratio 1.0034.
+  - Submitted the merged `main.cpp` twice (2 of 5 this session):
+    [409509](https://judge.yosupo.jp/submission/409509) AC 21 ms, from launch spikes on
+    pow_rN_equal_1_01 (21 ms; 13 in 409510) and small_01 (10); `spikes.py`: clean 15, and
+    [409510](https://judge.yosupo.jp/submission/409510) AC 15 ms, clean: max_random_00/01 15,
+    max_random_02 14, random_01, y0_00 and pow_rN_equal_1_01 13, the rest at most 12.
+- Next: the products are 6.9 of the 9.6 ms above the floor and are `ntt::Product`'s; the local
+  `Subtrees` copy goes once `lib/ntt` offers its option (backlog line in #95). Storing K's
+  bottom-level leaves would skip their recomputation in the second product (guess: 0.2 ms;
+  needs a bottom kernel variant). Fusing the radix-8 passes into the scans needs C = L / 64 and
+  saves at most their non-fault part (~0.2 ms in all). Five scans of one chain each are the
+  minimum for this form (four output sequences, and the lane totals for their starts).
 
 ## Sources
 

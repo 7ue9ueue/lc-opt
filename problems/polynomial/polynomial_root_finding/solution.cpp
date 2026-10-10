@@ -159,12 +159,13 @@ private:
     // g = f(x + s) by one product: g_k k! = sum_i f_i i! s^(i-k) / (i-k)!. False if g(0) = 0.
     bool shift_by(u32 s) {
         using namespace roots::detail;
+        using poly::detail::load_unaligned, poly::detail::store_unaligned;
         const std::size_t d = d_, m = shift_length(d), full = (d + 1) / 8 * 8;
-        u32* const x = work_.data();
-        u32* const y = work2_.data();
-        const auto product = [](Vec a, const u32* b) { return reduce(montgomery(a, load(b)), kP); };
-        for (std::size_t i = 0; i < full; i += 8) poly::detail::store_unaligned(x + i, product(poly::detail::load_unaligned(f_.data() + i), fact_.data() + i));
-        for (std::size_t i = full; i <= d; ++i) x[i] = mont(f_[i], fact_[i]);
+        const u32 *const f = f_.data(), *const fact = fact_.data(), *const inv = inv_fact_.data();
+        u32 *const x = work_.data(), *const y = work2_.data(), *const g = g_.data();
+        const auto times = [](Vec a, const u32* b) { return reduce(montgomery(a, load(b)), kP); };
+        for (std::size_t i = 0; i < full; i += 8) store_unaligned(x + i, times(load_unaligned(f + i), fact + i));
+        for (std::size_t i = full; i <= d; ++i) x[i] = mont(f[i], fact[i]);
         // y[d - j] = s^j / j!, eight powers at a time.
         alignas(32) u32 powers[8];
         powers[0] = 1;
@@ -173,38 +174,41 @@ private:
         const Vec reverse = _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0);
         Vec p = load(powers);
         for (std::size_t j = 0; j < full; j += 8, p = reduce(montgomery(p, step), kP))
-            poly::detail::store_unaligned(y + d - j - 7, _mm256_permutevar8x32_epi32(product(p, inv_fact_.data() + j), reverse));
+            store_unaligned(y + d - j - 7, _mm256_permutevar8x32_epi32(times(p, inv + j), reverse));
         store(powers, p);
-        for (std::size_t j = full; j <= d; ++j) y[d - j] = mont(powers[j - full], inv_fact_[j]);
+        for (std::size_t j = full; j <= d; ++j) y[d - j] = mont(powers[j - full], inv[j]);
         t_.forward(std::span<const u32>(x, d + 1), 0, work_.first(m));
         t_.cyclic_product(std::span<const u32>(y, d + 1), 0, work2_.first(m), work_.first(m));
-        for (std::size_t k = 0; k < full; k += 8) poly::detail::store_unaligned(g_.data() + k, product(poly::detail::load_unaligned(y + d + k), inv_fact_.data() + k));
-        for (std::size_t k = full; k <= d; ++k) g_[k] = mont(y[d + k], inv_fact_[k]);
-        return g_[0] != 0;
+        for (std::size_t k = 0; k < full; k += 8) store_unaligned(g + k, times(load_unaligned(y + d + k), inv + k));
+        for (std::size_t k = full; k <= d; ++k) g[k] = mont(y[d + k], inv[k]);
+        return g[0] != 0;
     }
 
     // fact_[i] = i! 2^32 and inv_fact_[i] = 2^32 / i! for i < count (a multiple of 8): blocks of 8
     // lanes from in-vector prefix (suffix) products and a scalar chain over the blocks.
     void factorials(std::size_t count) {
         using namespace roots::detail;
-        const Vec one = broadcast(kR);
-        // Inclusive prefix products within the lanes (shift by 1, 2, 4 lanes, filling with 1).
-        const auto prefix = [one](Vec x) {
-            x = reduce(montgomery(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6)), one, 0x01)), kP);
-            x = reduce(montgomery(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(0, 0, 0, 1, 2, 3, 4, 5)), one, 0x03)), kP);
-            return reduce(montgomery(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(0, 0, 0, 0, 0, 1, 2, 3)), one, 0x0F)), kP);
+        const Vec one = broadcast(kR), all = broadcast(~0u), none = _mm256_setzero_si256();
+        // x times x with its lanes moved by index, the lanes in mask taken as 1.
+        const auto times_moved = [one](Vec x, Vec index, Vec mask) {
+            return reduce(montgomery(x, _mm256_blendv_epi8(_mm256_permutevar8x32_epi32(x, index), one, mask)), kP);
         };
-        const auto suffix = [one](Vec x) {
-            x = reduce(montgomery(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(1, 2, 3, 4, 5, 6, 7, 7)), one, 0x80)), kP);
-            x = reduce(montgomery(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(2, 3, 4, 5, 6, 7, 7, 7)), one, 0xC0)), kP);
-            return reduce(montgomery(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(4, 5, 6, 7, 7, 7, 7, 7)), one, 0xF0)), kP);
+        const auto prefix = [&](Vec x) {
+            x = times_moved(x, _mm256_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6), _mm256_setr_epi32(~0, 0, 0, 0, 0, 0, 0, 0));
+            x = times_moved(x, _mm256_setr_epi32(0, 0, 0, 1, 2, 3, 4, 5), _mm256_blend_epi32(none, all, 0x03));
+            return times_moved(x, _mm256_setr_epi32(0, 0, 0, 0, 0, 1, 2, 3), _mm256_blend_epi32(none, all, 0x0F));
+        };
+        const auto suffix = [&](Vec x) {
+            x = times_moved(x, _mm256_setr_epi32(1, 2, 3, 4, 5, 6, 7, 7), _mm256_blend_epi32(none, all, 0x80));
+            x = times_moved(x, _mm256_setr_epi32(2, 3, 4, 5, 6, 7, 7, 7), _mm256_blend_epi32(none, all, 0xC0));
+            return times_moved(x, _mm256_setr_epi32(4, 5, 6, 7, 7, 7, 7, 7), _mm256_blend_epi32(none, all, 0xF0));
         };
         // fact[8i + l] = (8i)! (8i + 1) ... (8i + l).
         u32 carry = kR;  // (8i)! 2^32
         poly::detail::Indices index(0);
         for (std::size_t i = 0; i < count; i += 8, index.next()) {
-            const Vec block = reduce(montgomery(prefix(_mm256_blend_epi32(index.value(), one, 0x01)), broadcast(carry)), kP);
-            store(fact_.data() + i, block);
+            const Vec block = prefix(_mm256_blend_epi32(index.value(), one, 0x01));
+            store(fact_.data() + i, reduce(montgomery(block, broadcast(carry)), kP));
             carry = mont(fact_[i + 7], montgomery_form(u32(i + 8)));
         }
         // inv_fact[8i + l] = inv_fact[8i + 7] (8i + l + 1) ... (8i + 7).
@@ -212,8 +216,8 @@ private:
         Vec up = poly::detail::Indices(count - 7).value();  // (i + 1, ..., i + 8) 2^32
         const Vec down = broadcast(kP - montgomery_form(8));
         for (std::size_t i = count - 8;; i -= 8, up = reduce(roots::detail::add(up, down), kP)) {
-            const Vec block = reduce(montgomery(suffix(_mm256_blend_epi32(up, one, 0x80)), broadcast(top)), kP);
-            store(inv_fact_.data() + i, block);
+            const Vec block = suffix(_mm256_blend_epi32(up, one, 0x80));
+            store(inv_fact_.data() + i, reduce(montgomery(block, broadcast(top)), kP));
             if (i == 0) break;
             top = mont(inv_fact_[i], montgomery_form(u32(i)));
         }

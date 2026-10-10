@@ -23,13 +23,12 @@
 #include <span>
 
 #include "lib/poly/calculus.hpp"
-#include "lib/poly/product_tree.hpp"
+#include "lib/poly/product_tree.hpp"  // transpose8
 #include "lib/poly/transform.hpp"
 
 namespace roots {
 
 using u32 = std::uint32_t;
-using u64 = std::uint64_t;
 
 namespace detail {
 
@@ -141,11 +140,13 @@ inline void pair_step(const poly::Transform& t, u32* a, u32* b, std::size_t leng
         Vec c[2][16];
         even_parts(x[0], y[0], c[0]);
         even_parts(x[1], y[1], c[1]);
-        const Factors r = poly::detail::entries(t.roots(), 8 * g), r_inv = poly::detail::entries(t.inverse_roots(), 8 * g);
+        const Factors r = poly::detail::entries(t.roots(), 8 * g);
+        const Factors r_inv = poly::detail::entries(t.inverse_roots(), 8 * g);
         Vec out[2][8];
         for (int f = 0; f < 2; ++f)
             for (int k = 0; k < 4; ++k) {
-                const Vec u0 = c[0][8 * f + k], v0 = c[0][8 * f + 4 + k], u1 = c[1][8 * f + k], v1 = c[1][8 * f + 4 + k];
+                const Vec u0 = c[0][8 * f + k], v0 = c[0][8 * f + 4 + k];
+                const Vec u1 = c[1][8 * f + k], v1 = c[1][8 * f + 4 + k];
                 const Vec lo = add(add(u0, u1), times(add(_mm256_sub_epi32(v0, v1), p), r));
                 const Vec hi = add(times(add(_mm256_sub_epi32(u0, u1), p), r_inv), add(v0, v1));
                 out[f][k] = canonical(lo), out[f][4 + k] = canonical(hi);
@@ -234,7 +235,8 @@ public:
             const std::span<const u32> a = polys[i];
             u32* const rows = rows_[i];
             for (std::size_t j = 0; j < n; ++j)
-                for (std::size_t t = 0, at = j; t < terms; ++t, at += n) rows[j * terms + t] = at < a.size() ? a[at] : 0;
+                for (std::size_t t = 0, at = j; t < terms; ++t, at += n)
+                    rows[j * terms + t] = at < a.size() ? a[at] : 0;
         }
     }
 

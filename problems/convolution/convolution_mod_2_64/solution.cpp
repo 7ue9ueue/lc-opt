@@ -1,6 +1,6 @@
-// a * b mod 2^64: the product modulo five NTT primes (product.hpp, or lib/multimod when a factor
-// fills more than half of the transform), the Chinese remainder theorem in 64-bit arithmetic,
-// fixed-width output (fields64.hpp).
+// a * b mod 2^64: the product modulo five NTT primes (multimod::WideProduct, or
+// multimod::Transform when a factor fills more than half of the transform), the Chinese remainder
+// theorem in 64-bit arithmetic, fixed-width output (fields64.hpp).
 #include <array>
 
 #include "fields64.hpp"
@@ -8,8 +8,8 @@
 #include "lib/io/io.hpp"
 #include "lib/mem/huge.hpp"
 #include "lib/multimod/transform.hpp"
+#include "lib/multimod/wide_product.hpp"
 #include "lib/run/early.hpp"
-#include "product.hpp"
 
 namespace {
 
@@ -129,8 +129,8 @@ void solve() {
 
     auto* tables = arena.take<std::uint32_t>(multimod::Transform::table_words(lg));
     const multimod::Transform transform(lg, tables);
-    const wide::Product product(lg, tables);
-    const bool fits = wide::Product::fits(lg, n, m);
+    const multimod::WideProduct product(lg, tables);
+    const bool fits = multimod::WideProduct::fits(lg, n, m);
     // The last prime's residues go to the work words, and its work to a: no fresh pages for it.
     auto* work = arena.take<std::uint32_t>(words);
     Residues residues;

@@ -9,10 +9,11 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
 
 - Five NTT primes below 2^30 with 2^20 | p - 1: 998244353, 985661441, 976224257, 975175681,
   972029953. Product 2^149.35 > 2^19 (2^64 - 1)^2. One cyclic transform of length 2^lg per prime.
-- `product.hpp` (both factors at most half the transform, lg >= 9: all large tests): lib/multimod's
+- `multimod::WideProduct` (`lib/multimod/wide_product.hpp`; this folder's `product.hpp` until
+  #156 round 3; both factors at most half the transform, lg >= 9: all large tests): lib/multimod's
   transform (`Wide` 64-bit input, modulus a run-time value) with ntt::Product's bottom stage (two
   groups per kernel, no leaf weight array) and fused inverse top level. Its kernels
-  (`kernels.hpp`) come from `gen_kernels.py`: ntt::Product's asm with lib/multimod's modulus
+  (`lib/multimod/wide_kernels.hpp`) come from `gen_wide_kernels.py`: ntt::Product's asm with lib/multimod's modulus
   variables, and `forward_radix8_wide`, the first level for 2^lg = 2 * 4^j as a list-scheduled
   asm loop (lib/ntt's generator): it reads the 64-bit input and reduces it mod p on the fly
   (hi (2^32 mod p) + lo; lo < 8p brought below 2p by two halvings). Other sizes: lib/multimod.
@@ -145,6 +146,12 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
 - Next: the CRT as a scheduled asm loop (23 -> ~21 cycles per 8 values, a guess: 0.1 ms). The
   subtrees run lib/ntt's kernels at ~3 vector ops per cycle; `write()` (7.3 ms), start and exit
   (2.5 ms) and parsing (3.3 ms, lib/io) are the rest of the 40 ms.
+- 2026-10-10, claude (lib, issue #156 round 3): `product.hpp`, `kernels.hpp` and `gen_kernels.py`
+  moved to lib/multimod (`WideProduct`, one kernel set of `multimod::Product`; tests in
+  `lib/multimod/test.cpp`). Same instructions but in `Product::multiply` (other registers and
+  stack slots around the calls); `judge.py bench`, `lc-bench`, 61 rounds: 40.83 -> 40.80 ms
+  (1.0013, noise). 44/44 official tests, stress 200 rounds, ASan/UBSan on 7 official cases.
+  Details: `lib/multimod/notes.md`.
 
 ## Sources
 

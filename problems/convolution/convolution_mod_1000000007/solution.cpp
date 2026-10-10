@@ -1,7 +1,7 @@
-// a * b mod 1000000007: the product modulo three NTT primes below 2^28 (product.hpp: lazy
-// reductions), the Chinese remainder theorem straight to residues mod 10^9 + 7 by one Montgomery
-// reduction, fixed-width output: 10 bytes per value (fields10.hpp), or 11 in the rare blocks with
-// a value >= 10^9 (fields11.hpp).
+// a * b mod 1000000007: the product modulo three NTT primes below 2^28 (multimod::LazyProduct:
+// lazy reductions), the Chinese remainder theorem straight to residues mod 10^9 + 7 by one
+// Montgomery reduction, fixed-width output: 10 bytes per value (fields10.hpp), or 11 in the rare
+// blocks with a value >= 10^9 (fields11.hpp).
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -12,7 +12,7 @@
 #include "fields10.hpp"
 #include "fields11.hpp"
 #include "lib/run/early.hpp"
-#include "product.hpp"
+#include "lib/multimod/lazy_product.hpp"
 
 namespace {
 
@@ -125,12 +125,12 @@ bool reconstruct(const Residues& y, std::size_t begin, std::size_t count, std::u
 void solve() {
     io::Reader in;
     const std::size_t n = in.read<std::uint32_t>(), m = in.read<std::uint32_t>(), count = n + m - 1;
-    // Each factor fills at most half of the transform (product.hpp).
+    // Each factor fills at most half of the transform (LazyProduct).
     const int lg = std::max({9, int(std::bit_width(count - 1)), int(std::bit_width(std::max(n, m) - 1)) + 1});
-    const std::size_t len = std::size_t(1) << lg, words = len + lazy::kPadding;
+    const std::size_t len = std::size_t(1) << lg, words = len + multimod::LazyProduct::kPadding;
     const auto padded = [](std::size_t k) { return (k + 7) & ~std::size_t(7); };
 
-    mem::Arena arena(4 * (lazy::Product::table_words(lg) + (kPrimes + 1) * words + fields11::kBlock) +
+    mem::Arena arena(4 * (multimod::LazyProduct::table_words(lg) + (kPrimes + 1) * words + fields11::kBlock) +
                      fields11::kTextBytes + 64 * 16);
     // a and b, each zero up to half the length, in one array that becomes the last prime's
     // residues: the last product runs in place.
@@ -139,7 +139,7 @@ void solve() {
     io::read_bulk(in, a, n);
     io::read_bulk(in, b, m);
 
-    const lazy::Product product(lg, arena.take<std::uint32_t>(lazy::Product::table_words(lg)));
+    const multimod::LazyProduct product(lg, arena.take<std::uint32_t>(multimod::LazyProduct::table_words(lg)));
     auto* work = arena.take<std::uint32_t>(words);
     Residues residues;
     for (int k = 0; k < kPrimes; ++k) {

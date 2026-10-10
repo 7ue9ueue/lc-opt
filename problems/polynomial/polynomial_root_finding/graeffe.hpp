@@ -213,6 +213,7 @@ public:
         for (auto& r : rows_) r = arena.take(d_max + 1 + n).data();  // terms * n <= d + n
         for (auto& v : values_) v = arena.take(std::max<std::size_t>(64, 8 * n)).data();
         powers_ = arena.take(16 * (d_max + 2)).data();  // V^t, both operands, t <= d_max + 1
+        partial_ = arena.take(16 * kPolys * n).data();
         twiddles_ = arena.take(n).data(), quotients_ = arena.take(n).data();
         // twiddles_[h + j] = w_2h^j for j < h: the butterflies of half-length h.
         for (std::size_t h = 1; h < n; h *= 2) {
@@ -283,13 +284,15 @@ private:
     // loads of V^t.
     template <int K>
     void evaluate(const int (&which)[K], detail::Vec v) {
-        constexpr int J = K == 1 ? 2 : 1;
+        constexpr int J = K == 1 ? 4 : K == 2 ? 2 : 1;
         if (points() >= J) return evaluate<K, J>(which, v);
         evaluate<K, 1>(which, v);
     }
 
-    // Sums of up to 16 products below P^2 stay below 2^64; past 8, each is folded (below 2^61)
-    // before they are added: terms <= 32 here (two folded sums and the Montgomery term).
+    // Terms in chunks of 16: a sum of up to 16 products below P^2 stays below 2^64. With one
+    // chunk of up to 8 terms the sums are reduced as they are; otherwise each chunk's sums are
+    // folded (below 2^61) and added in partial_ (64-bit, two vectors per output and polynomial);
+    // terms <= 64 here, so four folded sums and the Montgomery term stay below 2^64.
     template <int K, int J>
     void evaluate(const int (&which)[K], detail::Vec v) {
         using namespace detail;
@@ -302,42 +305,42 @@ private:
         const bool fold = terms > 8;
         Vec f[J], step = v;  // f[b] = v^(j + b) 2^32, J chains stepped by v^J
         f[0] = broadcast(kR);
-#pragma GCC unroll 2
+#pragma GCC unroll 4
         for (int b = 1; b < J; ++b) f[b] = reduce(montgomery(f[b - 1], v), kP), step = reduce(montgomery(step, v), kP);
-        for (std::size_t j = 0; j < n; j += J) {
-            Sum total[K][J];
-#pragma GCC unroll 3
-            for (int i = 0; i < K; ++i)
-#pragma GCC unroll 2
-                for (int b = 0; b < J; ++b) total[i][b] = {zero, zero};
-            for (std::size_t first = 0; first < terms; first += 16) {
-                const std::size_t last = std::min(terms, first + 16);
+        for (std::size_t first = 0; first < terms; first += 16) {
+            const std::size_t last = std::min(terms, first + 16);
+            const bool initial = first == 0, final = last == terms;
+            for (std::size_t j = 0; j < n; j += J) {
                 Sum s[K][J];
 #pragma GCC unroll 3
                 for (int i = 0; i < K; ++i)
-#pragma GCC unroll 2
+#pragma GCC unroll 4
                     for (int b = 0; b < J; ++b) s[i][b] = {zero, zero};
                 for (std::size_t t = first; t < last; ++t) {
                     const Operand power{load(powers_ + 16 * t), load(powers_ + 16 * t + 8)};
 #pragma GCC unroll 3
                     for (int i = 0; i < K; ++i)
-#pragma GCC unroll 2
+#pragma GCC unroll 4
                         for (int b = 0; b < J; ++b) {
                             const Vec c = broadcast(rows[i][(j + b) * terms + t]);
                             s[i][b] = s[i][b] + Operand{c, c} * power;
                         }
                 }
+#pragma GCC unroll 4
+                for (int b = 0; b < J; ++b) {
 #pragma GCC unroll 3
-                for (int i = 0; i < K; ++i)
-#pragma GCC unroll 2
-                    for (int b = 0; b < J; ++b) total[i][b] = total[i][b] + (fold ? folded(s[i][b]) : s[i][b]);
-            }
-#pragma GCC unroll 2
-            for (int b = 0; b < J; ++b) {
-#pragma GCC unroll 3
-                for (int i = 0; i < K; ++i)
-                    store(out[i] + 8 * (j + b), reduce(montgomery(montgomery_sum(total[i][b]), f[b]), kP));
-                f[b] = reduce(montgomery(f[b], step), kP);
+                    for (int i = 0; i < K; ++i) {
+                        u32* const partial = partial_ + 16 * (K * (j + b) + i);
+                        Sum total = fold ? folded(s[i][b]) : s[i][b];
+                        if (!initial) total = total + Sum{load(partial), load(partial + 8)};
+                        if (!final) {
+                            store(partial, total.even), store(partial + 8, total.odd);
+                            continue;
+                        }
+                        store(out[i] + 8 * (j + b), reduce(montgomery(montgomery_sum(total), f[b]), kP));
+                    }
+                    if (final) f[b] = reduce(montgomery(f[b], step), kP);
+                }
             }
         }
 #pragma GCC unroll 3
@@ -364,7 +367,7 @@ private:
     const poly::Transform& t_;
     u32* rows_[kPolys];
     u32* values_[kPolys];
-    u32 *powers_, *twiddles_, *quotients_;
+    u32 *powers_, *partial_, *twiddles_, *quotients_;
     int log_n_ = 0;
     std::size_t terms_ = 0;
 };

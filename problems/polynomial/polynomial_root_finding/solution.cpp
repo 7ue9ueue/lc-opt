@@ -66,7 +66,8 @@ public:
         factorials(count);
         const u32 u = ntt::detail::power(3, 1u << kTwoAdic);  // order 119
         for (u32 c = 0, x = montgomery_form(1); c < 120; ++c, x = mul(x, u)) coset_[c] = x;
-        for (int i = 0; i < 30; ++i) power3_[i] = montgomery_form(ntt::detail::power(3, 1u << i));
+        power3_[0] = montgomery_form(3);
+        for (int i = 1; i < 30; ++i) power3_[i] = mont(power3_[i - 1], power3_[i - 1]);
     }
 
     // Appends the distinct roots of f: d + 1 coefficients, f[0] != 0, f[d] != 0, d >= 2.
@@ -129,7 +130,7 @@ private:
         std::size_t w = Transform::words(log_max(d_max));
         w += 2 * Arena::footprint(2 * len) + 2 * Arena::footprint(len);  // Graeffe
         w += 3 * Arena::footprint(n + z) + 3 * Arena::footprint(std::max<std::size_t>(64, 8 * z)) +
-             Arena::footprint(16 * (n + 1)) + 2 * Arena::footprint(z);  // CosetZeros
+             Arena::footprint(16 * (n + 1)) + Arena::footprint(48 * z) + 2 * Arena::footprint(z);  // CosetZeros
         w += 16 * Arena::footprint(n) + 2 * Arena::footprint(shift_length(d_max)) + 2 * Arena::footprint(8 * z);
         return w + 4096;
     }

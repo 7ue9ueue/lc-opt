@@ -557,6 +557,12 @@ products 1.77 and 1.69).
   1.0134 (1.0127). All official tests pass (`lc-amd`); `test.cpp` passes at -O2 and ASan/UBSan,
   `-march=native` and `-march=x86-64-v3` (`lc-intel`). Mutations of the generator (y, z block
   entries rotated in their block, the h = 4 slot of 2k, no canonical bottom outputs) fail the tests.
+- Merged as #170. CI: exp 0.9834, inv 0.9881, log 0.9894, pow 0.9823, sqrt 0.9881, composition
+  1.0224; all 6 0.9922.
+- composition after #170, `perf stat -r 200` on `lc-intel` (static builds, max_random_00, two
+  alternations): cycles 10.12M / 10.37M before, 10.16M / 10.19M after; instructions 23.38M ->
+  23.06M; L1i misses, iTLB misses, page faults equal. The whole-process slowdown measured by
+  `judge.py bench` and CI (dynamic builds) is not explained; left for composition's round.
 
 2026-10-09, claude (issue #70, exp_of_formal_power_series_sparse):
 - New `holonomic.hpp` (`Holonomic`, `inverses`, design under Sparse); `sparse.hpp` unchanged, so

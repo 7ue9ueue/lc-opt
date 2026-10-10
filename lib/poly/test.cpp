@@ -482,7 +482,8 @@ void test_exp(Fixture& fx) {
     }
     for (int lg = 7; lg <= kLgMax; ++lg) {
         const std::size_t n = std::size_t(1) << lg;
-        for (std::size_t m : {n - 1, n, n + 1, n / 2 + pick(n / 2) + 1}) {
+        // the last step with and without its upper parts: n - m = m/2 and m/2 + 1
+        for (std::size_t m : {n - 1, n, n + 1, 3 * n / 4, 3 * n / 4 + 1, n / 2 + pick(n / 2) + 1}) {
             if (m > (std::size_t(1) << kLgMax)) continue;
             auto f = random_poly(m, int(pick(3)));
             f[0] = 0;

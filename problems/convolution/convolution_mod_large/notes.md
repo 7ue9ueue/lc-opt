@@ -13,7 +13,8 @@ twin, 454 ms): parse 71, NTT 205, output 156 (`write()` ~120), ~12-15 outside `m
 
 ## Design
 
-`lib/ntt` (transform length 2^25 at the maximum), `lib/io` input, output by
+`lib/ntt` (transform length 2^25 at the maximum): `ntt::Product` when both factors fit half the
+transform (all large tests), else `ntt::Convolution`. `lib/io` input, output by
 `../convolution_mod/fields.hpp` (10-byte fixed-width fields), start from `.preinit_array` and
 `_exit` as in `../convolution_mod`.
 
@@ -117,3 +118,10 @@ twin, 454 ms): parse 71, NTT 205, output 156 (`write()` ~120), ~12-15 outside `m
   (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
   values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
   412.06 → 406.55 ms (0.987). 54/54 official tests.
+- 2026-10-10, claude (lib, issue #156 round 2): `ntt::Product` (`lib/ntt/product.hpp`, moved
+  from `../convolution_mod`) instead of `ntt::Convolution` when both factors fit half the
+  transform (all large tests). At lg 25 (nv = 4^11) it keeps the radix-4 top level and gains
+  convolution_mod's bottom stage (two groups per asm statement, no weight array; -13% per group
+  on Zen 3). The text buffer moved into the product's mapping. `judge.py bench`, `lc-bench`
+  (EPYC 7B13), 15 rounds, slowest 3 cases: 413.44 -> 405.62 ms, ratio 0.9794. 54/54 official
+  tests, stress 200 rounds, ASan/UBSan on 5 official cases (file and pipe input).

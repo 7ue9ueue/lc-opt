@@ -18,8 +18,8 @@ Record when opened (issue #76): 34 ms.
 - Chirps: `lib/poly/chirp.hpp` (new): x_k = c s^k q^t(k), 32 per step, x_(k+32) = x_k g_k with
   g_(k+32) = g_k q^1024, one Montgomery and one Shoup product per vector.
   B_u = r^t(L-1) (r^-(L-2))^u r^t(u).
-- The convolution is convolution_mod's (`problems/convolution/convolution_mod`: `Subtrees`, its
-  `forward_radix8` and `bottom.hpp`; bottom.hpp is included, the rest copied) with two
+- The convolution is convolution_mod's (`ntt::detail::Subtrees` and `forward_radix8` from
+  `lib/ntt/product.hpp`, moved there from convolution_mod by issue #156) with two
   changes: B fills the whole length, so its first pass is a full radix-8 one (u = f_lo + f_hi,
   v = f_lo - f_hi, then the two radix-4 groups); and the last radix-2 level computes only the
   upper half, (u - w) [L/2 - 1 - i], times r^-t(i) and the transform's scale, reversed.
@@ -81,6 +81,12 @@ write M values with `fields.hpp`, nothing else (`floor.cpp`): 4.92-4.99 ms media
   steps by x_(32v+l) = D_v E_l(v) (per-lane geometric E by a Shoup product, scalar D_v with its
   quotient computed on the scalar side): 8 multiplies per vector instead of 10, ~0.08 ms.
   Odd lg (radix-4 top) for mid sizes, which only helps cases below the score.
+- 2026-10-10, claude (lib, issue #156 round 2): convolution_mod's `Subtrees`, `forward_radix8` and
+  `bottom.hpp` moved to `lib/ntt/product.hpp`; the copies here are gone and the problem uses
+  `ntt::detail::Subtrees` and `forward_radix8`. Same asm kernels; GCC now keeps `visit` and the
+  radix-8 pass out of line (they were partly inlined). `judge.py bench`, `lc-bench`, 31 rounds,
+  slowest 3 cases: 9.87 -> 9.82 ms, ratio 0.9965 (noise). 25/25 official tests, `stress.py` 300
+  rounds, ASan/UBSan on all 25 official cases (file and pipe input).
 
 ## Sources
 
@@ -90,4 +96,4 @@ write M values with `fields.hpp`, nothing else (`floor.cpp`): 4.92-4.99 ms media
   i j = t(i + j) - t(i) - t(j) avoids square roots of r (standard; derived here).
 - Middle product: G. Hanrot, M. Quercia, P. Zimmermann, "The middle product algorithm I",
   AAECC 14 (2004) (the idea; no code read).
-- Transform: our `lib/ntt` and `problems/convolution/convolution_mod` (copied and adapted).
+- Transform: our `lib/ntt` (`product.hpp`, from `problems/convolution/convolution_mod`).

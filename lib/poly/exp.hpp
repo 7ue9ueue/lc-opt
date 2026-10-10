@@ -92,9 +92,7 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
         }
     } else {
         const std::size_t h = nv / 2;
-        if constexpr (Bottom::kForward) forward_top2(in, v, h);
-        recursion.visit(out.data(), h, 0);
-        recursion.visit(out.data() + 8 * h, h, 1);
+        radix2_halves(recursion, in, out.data(), nv, t.roots());
         for (std::size_t j = 0; j < h; ++j) put(j, lower ? add(v[j], v[j + h]) : diff(v[j], v[j + h]));
     }
 }

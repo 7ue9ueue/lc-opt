@@ -63,6 +63,11 @@ powers of two and their neighbours up to 2^20, random sizes; also run under ASan
   coefficients outside are zero and not read. Outputs: `Half` computes one half only;
   `cyclic_product` multiplies its output by a constant c at no cost (c is folded into the
   inverse's final scale), so a negated product needs no pass of its own.
+- Radix 8: for n / 8 = 2 * 4^j with halves larger than a tile (n >= 2^14) and a source in place
+  and in one half, the forward radix-2 level and both halves' first radix-4 levels are one pass
+  (`kernels::forward_top8_lower`, `_upper`, generated; that half is zeroed outside the source
+  first): 25 against 45 us at 2^18. Other sources keep `forward_top2`: out of place, the pass's
+  12 streams 2^k vectors apart ran up to 10 times slower at some source offsets.
 - Leaf product: a window [w a, a] (words <= P) gives x^i a mod (x^8 - w) as words [8 - i, 16 - i);
   16 `vpmuludq` into 64-bit sums (8 products < P^2 plus the Montgomery term stay below 2^64), one
   Montgomery reduction per lane. The factor 2^-32 is undone by the inverse's scale in
@@ -1670,6 +1675,33 @@ product-tree lanes):
 - Counted, not built: fusing an inverse's top level with the next forward's (inv's `step.hpp`)
   at block 2's T(r_lo), block 3's T(g_2) and T(v): one pass over m words each, about 0.01 ms
   at m = 2^18 (T of a half-zero source 0.288 against 0.299 ms for a full one).
+
+2026-10-10, claude (issue #64, log round 3; owner lane):
+- `transform.hpp`, `gen_kernels.py`/`kernels.hpp`: the radix-8 forward top level (Transform
+  layer above). `run()` and exp's `product_to` share `radix2_halves`: for n / 8 = 2 * 4^j with
+  halves above a tile, a source in place and in one half has that half zeroed outside it, then
+  `kernels::forward_top8_lower` or `_upper` (two columns per iteration, inputs loaded into
+  registers before any store; knobs: window 28), then each half's subtrees and its inverse level
+  (`Recursion::below`). Other sources and smaller transforms as before. `exp.hpp`: `product_to`
+  calls `radix2_halves`. No public signature changed.
+- Top levels at 2^18 (`lc-bench`, medians of 201, in place unless noted): forward_top2 and the
+  two first levels 45-48 us; the radix-8 pass in intrinsics 35 us (79 before its columns were
+  plain variables and the source's edge vectors went to a loop of their own: GCC kept the
+  columns on the stack and spilled around the call to `Source::edge`); the generated kernel
+  24.8 us (windows 8 to 28: 26.5 to 24.8). Out of place (source n words + d
+  bytes after out): 45 us at d = +-1024, 99-128 at d = 64..256 or 2048, 457-586 at d = -128..-32:
+  12 streams 2^k vectors apart conflict in the 8-way L1 and L2; a copy into place first costs
+  47 us at every d. Only in-place sources take it.
+- Radix-8 inverse (generated; group 0, group 1, the radix-2 level and the scale s folded into the
+  twiddles: s, s x, s y, s z, x; 8 Shoup products per column for one output half, 9 for both):
+  one half 43.7 against 45.8 us, both halves 53.3 against 60.5 (knobs: window 40). Not kept:
+  ~0.15% of log for 3 kernels of 300 lines in every bundle. Files: `r3/gen_kernels_with_inverse_top8.py`
+  in the exploration folder.
+- In process (A/B against main, 31 calls, N = 500000 / 262144): log 0.9800 / 0.9991, exp 0.9958 /
+  1.0012, inverse 0.9953 / 0.9925, sqrt 0.9902 / 0.9956, power 0.9893 / 0.9989.
+- `.text` (judge flags, `lc-amd`): +2.7 to +6 KB in 16 bundles (the two kernels, `below`,
+  `forward_top8`); polynomial_root_finding's `solve()` 17930 -> 15655 bytes (inlining); 5 bundles
+  identical (no `Transform::run`).
 
 ## Sources
 

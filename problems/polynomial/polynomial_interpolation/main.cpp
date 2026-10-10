@@ -1060,6 +1060,7 @@ inline void read_bulk(Reader& in, std::uint32_t* dst, std::size_t count) {
 #include <immintrin.h>
 #include <sys/mman.h>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -5516,6 +5517,398 @@ inline constexpr std::uint32_t kP = 998244353, k2P = 2 * kP;
         : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
 }
 
+// Forward radix-8 top level of a transform of 8q vectors, in place, for a source in the lower half (a[j + t q], t < 4),
+// canonical; the other half is not read. The radix-2 level and the first radix-4 group of each
+// half: group 0 of the lower, group 1 of the upper. Outputs a[j + t q], t < 8, < 4P. q even;
+// table: the twiddle table.
+[[gnu::noinline]] inline void forward_top8_lower(Vec* a, std::size_t q, const std::uint32_t* table) {
+    alignas(32) Vec w[3];  // twiddle values of entries 1, 2, 3; their quotients stay in ymm11-13
+    Vec* b = a + 4 * q;
+    Vec* const end = a + q;
+    asm volatile(
+        "vpbroadcastd %[P], %%ymm15\n\t"
+        "vpbroadcastd %[P2], %%ymm14\n\t"
+        "vbroadcastss 4(%[t]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 0(%[w])\n\t"
+        "vbroadcastss 36(%[t]), %%ymm11\n\t"
+        "vbroadcastss 8(%[t]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 32(%[w])\n\t"
+        "vbroadcastss 40(%[t]), %%ymm12\n\t"
+        "vbroadcastss 12(%[t]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 64(%[w])\n\t"
+        "vbroadcastss 44(%[t]), %%ymm13\n\t"
+        ".p2align 5\n\t"
+        "1:\n\t"
+        "vmovdqa (%[a],%[h3]), %%ymm0\n\t"
+        "vmovdqa (%[a],%[h],2), %%ymm1\n\t"
+        "vmovdqa (%[a],%[h]), %%ymm2\n\t"
+        "vmovdqa (%[a]), %%ymm3\n\t"
+        "vpsrlq $32, %%ymm1, %%ymm4\n\t"
+        "vpmuludq %%ymm11, %%ymm1, %%ymm5\n\t"
+        "vpmuludq %%ymm11, %%ymm4, %%ymm4\n\t"
+        "vpaddd %%ymm15, %%ymm2, %%ymm6\n\t"
+        "vpmulld (%[w]), %%ymm1, %%ymm7\n\t"
+        "vpaddd %%ymm0, %%ymm2, %%ymm8\n\t"
+        "vpsrlq $32, %%ymm0, %%ymm9\n\t"
+        "vpmuludq %%ymm11, %%ymm0, %%ymm10\n\t"
+        "vpsubd %%ymm0, %%ymm6, %%ymm6\n\t"
+        "vpmuludq %%ymm11, %%ymm9, %%ymm9\n\t"
+        "vpsrlq $32, %%ymm5, %%ymm5\n\t"
+        "vpmulld (%[w]), %%ymm0, %%ymm0\n\t"
+        "vpblendd $170, %%ymm4, %%ymm5, %%ymm4\n\t"
+        "vpsrlq $32, %%ymm6, %%ymm5\n\t"
+        "vpsrlq $32, %%ymm10, %%ymm10\n\t"
+        "vpmuludq %%ymm11, %%ymm5, %%ymm5\n\t"
+        "vpmulld %%ymm15, %%ymm4, %%ymm4\n\t"
+        "vpblendd $170, %%ymm9, %%ymm10, %%ymm9\n\t"
+        "vpmuludq %%ymm11, %%ymm6, %%ymm10\n\t"
+        "vpmulld (%[w]), %%ymm6, %%ymm6\n\t"
+        "vpmulld %%ymm15, %%ymm9, %%ymm9\n\t"
+        "vpsubd %%ymm4, %%ymm7, %%ymm4\n\t"
+        "vpaddd %%ymm14, %%ymm3, %%ymm7\n\t"
+        "vpsrlq $32, %%ymm10, %%ymm10\n\t"
+        "vpsubd %%ymm4, %%ymm7, %%ymm7\n\t"
+        "vpaddd %%ymm4, %%ymm3, %%ymm4\n\t"
+        "vpsubd %%ymm9, %%ymm0, %%ymm9\n\t"
+        "vpblendd $170, %%ymm5, %%ymm10, %%ymm5\n\t"
+        "vpaddd %%ymm15, %%ymm3, %%ymm10\n\t"
+        "vpsubd %%ymm14, %%ymm4, %%ymm0\n\t"
+        "vpmulld %%ymm15, %%ymm5, %%ymm5\n\t"
+        "vpaddd %%ymm1, %%ymm3, %%ymm3\n\t"
+        "vpsubd %%ymm1, %%ymm10, %%ymm1\n\t"
+        "vpminud %%ymm0, %%ymm4, %%ymm0\n\t"
+        "vpaddd %%ymm14, %%ymm2, %%ymm4\n\t"
+        "vpaddd %%ymm9, %%ymm2, %%ymm2\n\t"
+        "vpsubd %%ymm14, %%ymm7, %%ymm10\n\t"
+        "vpsubd %%ymm9, %%ymm4, %%ymm9\n\t"
+        "vpminud %%ymm10, %%ymm7, %%ymm10\n\t"
+        "vpsrlq $32, %%ymm2, %%ymm7\n\t"
+        "vpmuludq %%ymm12, %%ymm2, %%ymm4\n\t"
+        "vpmuludq %%ymm12, %%ymm7, %%ymm7\n\t"
+        "vpmulld 32(%[w]), %%ymm2, %%ymm2\n\t"
+        "vpsubd %%ymm5, %%ymm6, %%ymm5\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm6\n\t"
+        "vpmuludq %%ymm13, %%ymm6, %%ymm6\n\t"
+        "vpsrlq $32, %%ymm4, %%ymm4\n\t"
+        "vpblendd $170, %%ymm7, %%ymm4, %%ymm7\n\t"
+        "vpmuludq %%ymm13, %%ymm9, %%ymm4\n\t"
+        "vpmulld 64(%[w]), %%ymm9, %%ymm9\n\t"
+        "vpmulld %%ymm15, %%ymm7, %%ymm7\n\t"
+        "vpsrlq $32, %%ymm4, %%ymm4\n\t"
+        "vpblendd $170, %%ymm6, %%ymm4, %%ymm6\n\t"
+        "vpsubd %%ymm7, %%ymm2, %%ymm7\n\t"
+        "vmovdqa 32(%[a],%[h3]), %%ymm2\n\t"
+        "vpaddd %%ymm14, %%ymm3, %%ymm4\n\t"
+        "vpaddd %%ymm8, %%ymm3, %%ymm3\n\t"
+        "vpmulld %%ymm15, %%ymm6, %%ymm6\n\t"
+        "vpsubd %%ymm8, %%ymm4, %%ymm8\n\t"
+        "vmovdqa %%ymm3, (%[a])\n\t"
+        "vmovdqa 32(%[a],%[h],2), %%ymm3\n\t"
+        "vpaddd %%ymm14, %%ymm1, %%ymm4\n\t"
+        "vpaddd %%ymm5, %%ymm1, %%ymm1\n\t"
+        "vpsubd %%ymm5, %%ymm4, %%ymm5\n\t"
+        "vmovdqa %%ymm8, (%[a],%[h])\n\t"
+        "vmovdqa 32(%[a],%[h]), %%ymm8\n\t"
+        "vpaddd %%ymm14, %%ymm0, %%ymm4\n\t"
+        "vpaddd %%ymm7, %%ymm0, %%ymm0\n\t"
+        "vpsubd %%ymm7, %%ymm4, %%ymm7\n\t"
+        "vmovdqa %%ymm1, (%[a],%[h],2)\n\t"
+        "vmovdqa 32(%[a]), %%ymm1\n\t"
+        "vpaddd %%ymm14, %%ymm10, %%ymm4\n\t"
+        "vpsubd %%ymm6, %%ymm9, %%ymm6\n\t"
+        "vmovdqa %%ymm5, (%[a],%[h3])\n\t"
+        "vpaddd %%ymm6, %%ymm10, %%ymm10\n\t"
+        "vpsubd %%ymm6, %%ymm4, %%ymm6\n\t"
+        "vmovdqa %%ymm0, (%[b])\n\t"
+        "vmovdqa %%ymm7, (%[b],%[h])\n\t"
+        "vmovdqa %%ymm10, (%[b],%[h],2)\n\t"
+        "vmovdqa %%ymm6, (%[b],%[h3])\n\t"
+        "vpsrlq $32, %%ymm3, %%ymm6\n\t"
+        "vpmuludq %%ymm11, %%ymm3, %%ymm10\n\t"
+        "vpmuludq %%ymm11, %%ymm6, %%ymm6\n\t"
+        "vpaddd %%ymm15, %%ymm8, %%ymm7\n\t"
+        "vpmulld (%[w]), %%ymm3, %%ymm0\n\t"
+        "vpaddd %%ymm2, %%ymm8, %%ymm4\n\t"
+        "vpsrlq $32, %%ymm2, %%ymm5\n\t"
+        "vpmuludq %%ymm11, %%ymm2, %%ymm9\n\t"
+        "vpsubd %%ymm2, %%ymm7, %%ymm7\n\t"
+        "vpmuludq %%ymm11, %%ymm5, %%ymm5\n\t"
+        "vpsrlq $32, %%ymm10, %%ymm10\n\t"
+        "vpmulld (%[w]), %%ymm2, %%ymm2\n\t"
+        "vpblendd $170, %%ymm6, %%ymm10, %%ymm6\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm10\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm9\n\t"
+        "vpmuludq %%ymm11, %%ymm10, %%ymm10\n\t"
+        "vpmulld %%ymm15, %%ymm6, %%ymm6\n\t"
+        "vpblendd $170, %%ymm5, %%ymm9, %%ymm5\n\t"
+        "vpmuludq %%ymm11, %%ymm7, %%ymm9\n\t"
+        "vpmulld (%[w]), %%ymm7, %%ymm7\n\t"
+        "vpmulld %%ymm15, %%ymm5, %%ymm5\n\t"
+        "vpsubd %%ymm6, %%ymm0, %%ymm6\n\t"
+        "vpaddd %%ymm14, %%ymm1, %%ymm0\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm9\n\t"
+        "vpsubd %%ymm6, %%ymm0, %%ymm0\n\t"
+        "vpaddd %%ymm6, %%ymm1, %%ymm6\n\t"
+        "vpsubd %%ymm5, %%ymm2, %%ymm5\n\t"
+        "vpblendd $170, %%ymm10, %%ymm9, %%ymm10\n\t"
+        "vpaddd %%ymm15, %%ymm1, %%ymm9\n\t"
+        "vpsubd %%ymm14, %%ymm6, %%ymm2\n\t"
+        "vpmulld %%ymm15, %%ymm10, %%ymm10\n\t"
+        "vpaddd %%ymm3, %%ymm1, %%ymm1\n\t"
+        "vpsubd %%ymm3, %%ymm9, %%ymm3\n\t"
+        "vpminud %%ymm2, %%ymm6, %%ymm2\n\t"
+        "vpaddd %%ymm14, %%ymm8, %%ymm6\n\t"
+        "vpaddd %%ymm5, %%ymm8, %%ymm8\n\t"
+        "vpsubd %%ymm14, %%ymm0, %%ymm9\n\t"
+        "vpsubd %%ymm5, %%ymm6, %%ymm5\n\t"
+        "vpminud %%ymm9, %%ymm0, %%ymm9\n\t"
+        "vpsrlq $32, %%ymm8, %%ymm0\n\t"
+        "vpmuludq %%ymm12, %%ymm8, %%ymm6\n\t"
+        "vpmuludq %%ymm12, %%ymm0, %%ymm0\n\t"
+        "vpmulld 32(%[w]), %%ymm8, %%ymm8\n\t"
+        "vpsubd %%ymm10, %%ymm7, %%ymm10\n\t"
+        "vpsrlq $32, %%ymm5, %%ymm7\n\t"
+        "vpmuludq %%ymm13, %%ymm7, %%ymm7\n\t"
+        "vpsrlq $32, %%ymm6, %%ymm6\n\t"
+        "vpblendd $170, %%ymm0, %%ymm6, %%ymm0\n\t"
+        "vpmuludq %%ymm13, %%ymm5, %%ymm6\n\t"
+        "vpmulld 64(%[w]), %%ymm5, %%ymm5\n\t"
+        "vpmulld %%ymm15, %%ymm0, %%ymm0\n\t"
+        "vpsrlq $32, %%ymm6, %%ymm6\n\t"
+        "vpblendd $170, %%ymm7, %%ymm6, %%ymm7\n\t"
+        "vpsubd %%ymm0, %%ymm8, %%ymm0\n\t"
+        "vpaddd %%ymm14, %%ymm1, %%ymm8\n\t"
+        "vpaddd %%ymm14, %%ymm3, %%ymm6\n\t"
+        "vpmulld %%ymm15, %%ymm7, %%ymm7\n\t"
+        "vpaddd %%ymm4, %%ymm1, %%ymm1\n\t"
+        "vpsubd %%ymm4, %%ymm8, %%ymm4\n\t"
+        "vpaddd %%ymm10, %%ymm3, %%ymm3\n\t"
+        "vpaddd %%ymm14, %%ymm2, %%ymm8\n\t"
+        "vpsubd %%ymm10, %%ymm6, %%ymm10\n\t"
+        "vpaddd %%ymm0, %%ymm2, %%ymm2\n\t"
+        "vmovdqa %%ymm1, 32(%[a])\n\t"
+        "vpaddd %%ymm14, %%ymm9, %%ymm1\n\t"
+        "vpsubd %%ymm0, %%ymm8, %%ymm0\n\t"
+        "vmovdqa %%ymm4, 32(%[a],%[h])\n\t"
+        "vpsubd %%ymm7, %%ymm5, %%ymm7\n\t"
+        "vmovdqa %%ymm3, 32(%[a],%[h],2)\n\t"
+        "vpaddd %%ymm7, %%ymm9, %%ymm9\n\t"
+        "vpsubd %%ymm7, %%ymm1, %%ymm7\n\t"
+        "vmovdqa %%ymm10, 32(%[a],%[h3])\n\t"
+        "vmovdqa %%ymm2, 32(%[b])\n\t"
+        "vmovdqa %%ymm0, 32(%[b],%[h])\n\t"
+        "vmovdqa %%ymm9, 32(%[b],%[h],2)\n\t"
+        "vmovdqa %%ymm7, 32(%[b],%[h3])\n\t"
+        "add $64, %[a]\n\t"
+        "add $64, %[b]\n\t"
+        "cmp %[end], %[a]\n\t"
+        "jne 1b\n\t"
+        : [a] "+r"(a), [b] "+r"(b)
+        : [end] "r"(end), [h] "r"(32 * q), [h3] "r"(96 * q), [t] "r"(table), [w] "r"(w), [P] "m"(kP),
+          [P2] "m"(k2P)
+        : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
+}
+
+// Forward radix-8 top level of a transform of 8q vectors, in place, for a source in the upper half (a[j + (4 + t) q], t < 4),
+// canonical; the other half is not read. The radix-2 level and the first radix-4 group of each
+// half: group 0 of the lower, group 1 of the upper. Outputs a[j + t q], t < 8, < 4P. q even;
+// table: the twiddle table.
+[[gnu::noinline]] inline void forward_top8_upper(Vec* a, std::size_t q, const std::uint32_t* table) {
+    alignas(32) Vec w[3];  // twiddle values of entries 1, 2, 3; their quotients stay in ymm11-13
+    Vec* b = a + 4 * q;
+    Vec* const end = a + q;
+    asm volatile(
+        "vpbroadcastd %[P], %%ymm15\n\t"
+        "vpbroadcastd %[P2], %%ymm14\n\t"
+        "vbroadcastss 4(%[t]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 0(%[w])\n\t"
+        "vbroadcastss 36(%[t]), %%ymm11\n\t"
+        "vbroadcastss 8(%[t]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 32(%[w])\n\t"
+        "vbroadcastss 40(%[t]), %%ymm12\n\t"
+        "vbroadcastss 12(%[t]), %%ymm0\n\t"
+        "vmovdqa %%ymm0, 64(%[w])\n\t"
+        "vbroadcastss 44(%[t]), %%ymm13\n\t"
+        ".p2align 5\n\t"
+        "1:\n\t"
+        "vmovdqa (%[b],%[h3]), %%ymm0\n\t"
+        "vmovdqa (%[b],%[h],2), %%ymm1\n\t"
+        "vmovdqa (%[b],%[h]), %%ymm2\n\t"
+        "vmovdqa (%[b]), %%ymm3\n\t"
+        "vpsubd %%ymm0, %%ymm15, %%ymm4\n\t"
+        "vpsubd %%ymm1, %%ymm15, %%ymm5\n\t"
+        "vpsrlq $32, %%ymm5, %%ymm6\n\t"
+        "vpmuludq %%ymm11, %%ymm5, %%ymm7\n\t"
+        "vpsubd %%ymm2, %%ymm15, %%ymm8\n\t"
+        "vpaddd %%ymm15, %%ymm2, %%ymm9\n\t"
+        "vpmuludq %%ymm11, %%ymm6, %%ymm6\n\t"
+        "vpsubd %%ymm0, %%ymm9, %%ymm9\n\t"
+        "vpmulld (%[w]), %%ymm5, %%ymm5\n\t"
+        "vpsubd %%ymm3, %%ymm15, %%ymm10\n\t"
+        "vpaddd %%ymm0, %%ymm2, %%ymm0\n\t"
+        "vpsrlq $32, %%ymm4, %%ymm2\n\t"
+        "vpmuludq %%ymm11, %%ymm2, %%ymm2\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm7\n\t"
+        "vpblendd $170, %%ymm6, %%ymm7, %%ymm6\n\t"
+        "vpmuludq %%ymm11, %%ymm4, %%ymm7\n\t"
+        "vpmulld (%[w]), %%ymm4, %%ymm4\n\t"
+        "vpmulld %%ymm15, %%ymm6, %%ymm6\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm7\n\t"
+        "vpblendd $170, %%ymm2, %%ymm7, %%ymm2\n\t"
+        "vpsubd %%ymm6, %%ymm5, %%ymm6\n\t"
+        "vpsrlq $32, %%ymm9, %%ymm5\n\t"
+        "vpmuludq %%ymm11, %%ymm9, %%ymm7\n\t"
+        "vpmulld %%ymm15, %%ymm2, %%ymm2\n\t"
+        "vpmuludq %%ymm11, %%ymm5, %%ymm5\n\t"
+        "vpmulld (%[w]), %%ymm9, %%ymm9\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm7\n\t"
+        "vpsubd %%ymm2, %%ymm4, %%ymm2\n\t"
+        "vpblendd $170, %%ymm5, %%ymm7, %%ymm5\n\t"
+        "vpaddd %%ymm14, %%ymm10, %%ymm7\n\t"
+        "vpaddd %%ymm6, %%ymm10, %%ymm10\n\t"
+        "vpaddd %%ymm2, %%ymm8, %%ymm4\n\t"
+        "vpmulld %%ymm15, %%ymm5, %%ymm5\n\t"
+        "vpsubd %%ymm6, %%ymm7, %%ymm6\n\t"
+        "vpaddd %%ymm15, %%ymm3, %%ymm7\n\t"
+        "vpaddd %%ymm14, %%ymm8, %%ymm8\n\t"
+        "vpaddd %%ymm1, %%ymm3, %%ymm3\n\t"
+        "vpsubd %%ymm1, %%ymm7, %%ymm1\n\t"
+        "vpsrlq $32, %%ymm4, %%ymm7\n\t"
+        "vpsubd %%ymm2, %%ymm8, %%ymm2\n\t"
+        "vpmuludq %%ymm12, %%ymm7, %%ymm7\n\t"
+        "vpmuludq %%ymm12, %%ymm4, %%ymm8\n\t"
+        "vpmulld 32(%[w]), %%ymm4, %%ymm4\n\t"
+        "vpsubd %%ymm5, %%ymm9, %%ymm5\n\t"
+        "vpsrlq $32, %%ymm2, %%ymm9\n\t"
+        "vpmuludq %%ymm13, %%ymm9, %%ymm9\n\t"
+        "vpsrlq $32, %%ymm8, %%ymm8\n\t"
+        "vpblendd $170, %%ymm7, %%ymm8, %%ymm7\n\t"
+        "vpmuludq %%ymm13, %%ymm2, %%ymm8\n\t"
+        "vpmulld 64(%[w]), %%ymm2, %%ymm2\n\t"
+        "vpmulld %%ymm15, %%ymm7, %%ymm7\n\t"
+        "vpsrlq $32, %%ymm8, %%ymm8\n\t"
+        "vpblendd $170, %%ymm9, %%ymm8, %%ymm9\n\t"
+        "vpsubd %%ymm7, %%ymm4, %%ymm7\n\t"
+        "vpsubd %%ymm14, %%ymm10, %%ymm4\n\t"
+        "vpsubd %%ymm14, %%ymm6, %%ymm8\n\t"
+        "vpmulld %%ymm15, %%ymm9, %%ymm9\n\t"
+        "vpminud %%ymm4, %%ymm10, %%ymm4\n\t"
+        "vpminud %%ymm8, %%ymm6, %%ymm8\n\t"
+        "vmovdqa 32(%[b],%[h3]), %%ymm6\n\t"
+        "vpaddd %%ymm14, %%ymm3, %%ymm10\n\t"
+        "vpaddd %%ymm0, %%ymm3, %%ymm3\n\t"
+        "vpsubd %%ymm0, %%ymm10, %%ymm0\n\t"
+        "vmovdqa 32(%[b],%[h],2), %%ymm10\n\t"
+        "vmovdqa %%ymm3, (%[a])\n\t"
+        "vmovdqa 32(%[b],%[h]), %%ymm3\n\t"
+        "vpsubd %%ymm9, %%ymm2, %%ymm9\n\t"
+        "vmovdqa %%ymm0, (%[a],%[h])\n\t"
+        "vmovdqa 32(%[b]), %%ymm0\n\t"
+        "vpaddd %%ymm14, %%ymm1, %%ymm2\n\t"
+        "vpaddd %%ymm5, %%ymm1, %%ymm1\n\t"
+        "vpsubd %%ymm5, %%ymm2, %%ymm5\n\t"
+        "vmovdqa %%ymm1, (%[a],%[h],2)\n\t"
+        "vpaddd %%ymm14, %%ymm4, %%ymm1\n\t"
+        "vpaddd %%ymm14, %%ymm8, %%ymm2\n\t"
+        "vpaddd %%ymm7, %%ymm4, %%ymm4\n\t"
+        "vpsubd %%ymm7, %%ymm1, %%ymm7\n\t"
+        "vpaddd %%ymm9, %%ymm8, %%ymm8\n\t"
+        "vpsubd %%ymm9, %%ymm2, %%ymm9\n\t"
+        "vmovdqa %%ymm5, (%[a],%[h3])\n\t"
+        "vmovdqa %%ymm4, (%[b])\n\t"
+        "vmovdqa %%ymm7, (%[b],%[h])\n\t"
+        "vpsubd %%ymm6, %%ymm15, %%ymm7\n\t"
+        "vmovdqa %%ymm8, (%[b],%[h],2)\n\t"
+        "vpsubd %%ymm10, %%ymm15, %%ymm8\n\t"
+        "vmovdqa %%ymm9, (%[b],%[h3])\n\t"
+        "vpsrlq $32, %%ymm8, %%ymm9\n\t"
+        "vpmuludq %%ymm11, %%ymm8, %%ymm4\n\t"
+        "vpsubd %%ymm3, %%ymm15, %%ymm5\n\t"
+        "vpaddd %%ymm15, %%ymm3, %%ymm2\n\t"
+        "vpmuludq %%ymm11, %%ymm9, %%ymm9\n\t"
+        "vpsubd %%ymm6, %%ymm2, %%ymm2\n\t"
+        "vpmulld (%[w]), %%ymm8, %%ymm8\n\t"
+        "vpsubd %%ymm0, %%ymm15, %%ymm1\n\t"
+        "vpaddd %%ymm6, %%ymm3, %%ymm6\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm3\n\t"
+        "vpmuludq %%ymm11, %%ymm3, %%ymm3\n\t"
+        "vpsrlq $32, %%ymm4, %%ymm4\n\t"
+        "vpblendd $170, %%ymm9, %%ymm4, %%ymm9\n\t"
+        "vpmuludq %%ymm11, %%ymm7, %%ymm4\n\t"
+        "vpmulld (%[w]), %%ymm7, %%ymm7\n\t"
+        "vpmulld %%ymm15, %%ymm9, %%ymm9\n\t"
+        "vpsrlq $32, %%ymm4, %%ymm4\n\t"
+        "vpblendd $170, %%ymm3, %%ymm4, %%ymm3\n\t"
+        "vpsubd %%ymm9, %%ymm8, %%ymm9\n\t"
+        "vpsrlq $32, %%ymm2, %%ymm8\n\t"
+        "vpmuludq %%ymm11, %%ymm2, %%ymm4\n\t"
+        "vpmulld %%ymm15, %%ymm3, %%ymm3\n\t"
+        "vpmuludq %%ymm11, %%ymm8, %%ymm8\n\t"
+        "vpmulld (%[w]), %%ymm2, %%ymm2\n\t"
+        "vpsrlq $32, %%ymm4, %%ymm4\n\t"
+        "vpsubd %%ymm3, %%ymm7, %%ymm3\n\t"
+        "vpblendd $170, %%ymm8, %%ymm4, %%ymm8\n\t"
+        "vpaddd %%ymm14, %%ymm1, %%ymm4\n\t"
+        "vpaddd %%ymm9, %%ymm1, %%ymm1\n\t"
+        "vpaddd %%ymm3, %%ymm5, %%ymm7\n\t"
+        "vpmulld %%ymm15, %%ymm8, %%ymm8\n\t"
+        "vpsubd %%ymm9, %%ymm4, %%ymm9\n\t"
+        "vpaddd %%ymm15, %%ymm0, %%ymm4\n\t"
+        "vpaddd %%ymm14, %%ymm5, %%ymm5\n\t"
+        "vpaddd %%ymm10, %%ymm0, %%ymm0\n\t"
+        "vpsubd %%ymm10, %%ymm4, %%ymm10\n\t"
+        "vpsrlq $32, %%ymm7, %%ymm4\n\t"
+        "vpsubd %%ymm3, %%ymm5, %%ymm3\n\t"
+        "vpmuludq %%ymm12, %%ymm4, %%ymm4\n\t"
+        "vpmuludq %%ymm12, %%ymm7, %%ymm5\n\t"
+        "vpmulld 32(%[w]), %%ymm7, %%ymm7\n\t"
+        "vpsubd %%ymm8, %%ymm2, %%ymm8\n\t"
+        "vpsrlq $32, %%ymm3, %%ymm2\n\t"
+        "vpmuludq %%ymm13, %%ymm2, %%ymm2\n\t"
+        "vpsrlq $32, %%ymm5, %%ymm5\n\t"
+        "vpblendd $170, %%ymm4, %%ymm5, %%ymm4\n\t"
+        "vpmuludq %%ymm13, %%ymm3, %%ymm5\n\t"
+        "vpmulld 64(%[w]), %%ymm3, %%ymm3\n\t"
+        "vpmulld %%ymm15, %%ymm4, %%ymm4\n\t"
+        "vpsrlq $32, %%ymm5, %%ymm5\n\t"
+        "vpblendd $170, %%ymm2, %%ymm5, %%ymm2\n\t"
+        "vpsubd %%ymm4, %%ymm7, %%ymm4\n\t"
+        "vpsubd %%ymm14, %%ymm1, %%ymm7\n\t"
+        "vpsubd %%ymm14, %%ymm9, %%ymm5\n\t"
+        "vpmulld %%ymm15, %%ymm2, %%ymm2\n\t"
+        "vpminud %%ymm7, %%ymm1, %%ymm7\n\t"
+        "vpminud %%ymm5, %%ymm9, %%ymm5\n\t"
+        "vpaddd %%ymm14, %%ymm0, %%ymm9\n\t"
+        "vpaddd %%ymm14, %%ymm10, %%ymm1\n\t"
+        "vpaddd %%ymm6, %%ymm0, %%ymm0\n\t"
+        "vpsubd %%ymm6, %%ymm9, %%ymm6\n\t"
+        "vpaddd %%ymm8, %%ymm10, %%ymm10\n\t"
+        "vpaddd %%ymm14, %%ymm7, %%ymm9\n\t"
+        "vpsubd %%ymm8, %%ymm1, %%ymm8\n\t"
+        "vpaddd %%ymm4, %%ymm7, %%ymm7\n\t"
+        "vmovdqa %%ymm0, 32(%[a])\n\t"
+        "vpsubd %%ymm2, %%ymm3, %%ymm2\n\t"
+        "vpaddd %%ymm14, %%ymm5, %%ymm3\n\t"
+        "vpsubd %%ymm4, %%ymm9, %%ymm4\n\t"
+        "vmovdqa %%ymm6, 32(%[a],%[h])\n\t"
+        "vpaddd %%ymm2, %%ymm5, %%ymm5\n\t"
+        "vpsubd %%ymm2, %%ymm3, %%ymm2\n\t"
+        "vmovdqa %%ymm10, 32(%[a],%[h],2)\n\t"
+        "vmovdqa %%ymm8, 32(%[a],%[h3])\n\t"
+        "vmovdqa %%ymm7, 32(%[b])\n\t"
+        "vmovdqa %%ymm4, 32(%[b],%[h])\n\t"
+        "vmovdqa %%ymm5, 32(%[b],%[h],2)\n\t"
+        "vmovdqa %%ymm2, 32(%[b],%[h3])\n\t"
+        "add $64, %[a]\n\t"
+        "add $64, %[b]\n\t"
+        "cmp %[end], %[a]\n\t"
+        "jne 1b\n\t"
+        : [a] "+r"(a), [b] "+r"(b)
+        : [end] "r"(end), [h] "r"(32 * q), [h3] "r"(96 * q), [t] "r"(table), [w] "r"(w), [P] "m"(kP),
+          [P2] "m"(k2P)
+        : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
+}
+
 }  // namespace poly::kernels
 
 namespace poly {
@@ -5921,6 +6314,17 @@ public:
         if constexpr (Bottom::kInverse) inverse(a, h, k);
     }
 
+    // Whether a transform of nv = 2 * 4^j vectors has halves larger than a tile: its forward top
+    // level may be radix 8 (forward_top8), which also runs the halves' first levels.
+    static constexpr bool radix8(std::size_t nv) { return nv / 2 > kTile; }
+
+    // visit() of group k of nv > kTile vectors without its forward level (forward_top8 ran it).
+    void below(std::uint32_t* a, std::size_t nv, std::size_t k) const {
+        const std::size_t h = nv / 4;
+        for (std::size_t t = 0; t < 4; ++t) visit(a + 8 * t * h, h, 4 * k + t);
+        if constexpr (Bottom::kInverse) inverse(a, h, k);
+    }
+
 private:
     static constexpr std::size_t kTile = 256;
 
@@ -5970,6 +6374,16 @@ public:
         if (v - first_ < count_) return _mm256_loadu_si256(reinterpret_cast<const Vec*>(in_ + (8 * v - shift_)));
         if (v - first_touched_ >= touched_) return _mm256_setzero_si256();
         return edge(in_, shift_, end_, v);
+    }
+
+    // Whether the source lies in out at offset shift.
+    bool in_place(const std::uint32_t* out) const { return in_ == out + shift_; }
+
+    // Zeroes out[lo, hi) outside [shift, shift + size).
+    void zero_outside(std::uint32_t* out, std::size_t lo, std::size_t hi) const {
+        const std::size_t begin = std::clamp(shift_, lo, hi), end = std::clamp(end_, begin, hi);
+        std::fill(out + lo, out + begin, 0);
+        std::fill(out + end, out + hi, 0);
     }
 
     // Whether every vector outside [lo, hi) is zero.
@@ -6044,6 +6458,40 @@ private:
         const Vec u = in(j), v = in(j + h);
         out[j] = add(u, v), out[j + h] = _mm256_sub_epi32(add(u, p), v);
     }
+}
+
+// Radix 8 (kernels::forward_top8_*) on the nv = 2 * 4^j vectors at a, for a source in place and
+// in one half, which is zeroed outside the source first: the radix-2 level and the halves' first
+// levels in one pass instead of three (25 against 45 us at 2^18, lib/poly/notes.md). Returns
+// false (and does nothing) for other sources: out of place, its 12 streams 2^k vectors apart ran
+// up to 10 times slower at some offsets of the source.
+inline bool forward_top8(const Source& in, std::uint32_t* a, std::size_t nv, const std::uint32_t* roots) {
+    const bool lower = in.within(0, nv / 2);
+    if (!in.in_place(a) || !(lower || in.within(nv / 2, nv))) return false;
+    const std::size_t half = 4 * nv;  // words
+    in.zero_outside(a, lower ? 0 : half, lower ? half : 2 * half);
+    auto* v = reinterpret_cast<Vec*>(a);
+    if (lower) kernels::forward_top8_lower(v, nv / 8, roots);
+    else kernels::forward_top8_upper(v, nv / 8, roots);
+    return true;
+}
+
+// The forward top level of a transform of nv = 2 * 4^j vectors at a from in (if the bottom has
+// one) and the subtrees of its halves; the inverse top level is the caller's.
+template <class Bottom>
+void radix2_halves(const Recursion<Bottom>& recursion, const Source& in, std::uint32_t* a, std::size_t nv,
+                   const std::uint32_t* roots) {
+    const std::size_t h = nv / 2;
+    if constexpr (Bottom::kForward) {
+        if (recursion.radix8(nv) && forward_top8(in, a, nv, roots)) {
+            recursion.below(a, h, 0);
+            recursion.below(a + 8 * h, h, 1);
+            return;
+        }
+        forward_top2(in, reinterpret_cast<Vec*>(a), h);
+    }
+    recursion.visit(a, h, 0);
+    recursion.visit(a + 8 * h, h, 1);
 }
 
 inline void inverse_top4(Vec* f, std::size_t h, Half output, const std::uint32_t* inverse_roots, const Factor& s) {
@@ -6235,7 +6683,8 @@ private:
     }
 
     // Top level, the subtrees, the top level's inverse with the scale (canonical output).
-    // n / 8 = 4^j: one radix-4 group; n / 8 = 2 * 4^j: a radix-2 level.
+    // n / 8 = 4^j: one radix-4 group; n / 8 = 2 * 4^j: a radix-2 level, forward in larger
+    // transforms radix 8 with the halves' first levels where it applies (radix2_halves).
     template <class Bottom>
     void run(std::span<std::uint32_t> a, const detail::Source& in, const Bottom& bottom, std::uint32_t scale,
              Half output) const {
@@ -6250,11 +6699,8 @@ private:
             for (std::size_t t = 0; t < 4; ++t) recursion.visit(a.data() + 8 * t * h, h, t);
             if constexpr (Bottom::kInverse) inverse_top4(v, h, output, inverse_roots_, Factor(scale));
         } else {
-            const std::size_t h = nv / 2;
-            if constexpr (Bottom::kForward) forward_top2(in, v, h);
-            recursion.visit(a.data(), h, 0);
-            recursion.visit(a.data() + 8 * h, h, 1);
-            if constexpr (Bottom::kInverse) inverse_top2(v, h, output, scale);
+            radix2_halves(recursion, in, a.data(), nv, roots_);
+            if constexpr (Bottom::kInverse) inverse_top2(v, nv / 2, output, scale);
         }
     }
 

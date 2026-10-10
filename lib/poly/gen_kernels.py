@@ -10,6 +10,9 @@ Uses lib/ntt/gen_kernels.py's dataflow graphs, Zen 3 list scheduler and register
   forward_columns, inverse_columns (and *_even_columns for width 1): lib/ntt's radix-4 loops of one
     group on the columns j < h with (j & width) == 0, for pruned transforms: the same scheduled
     body, the stride h separate from the count.
+  forward_top8_lower, forward_top8_upper: the forward radix-8 top level of transforms of 2 * 4^j
+    vectors (the radix-2 level and each half's first radix-4 group) for a source in one half, in
+    place, two columns per iteration.
 Arithmetic and ranges as lib/ntt's kernels (lib/ntt/notes.md); knobs in lib/poly/notes.md.
 
 Usage: gen_kernels.py [--check]   (--check: exit 1 if kernels.hpp differs from the output)
@@ -213,6 +216,63 @@ def columns_function(kind, even):
     return lines
 
 
+def top8_forward(g, disp, upper):
+    """Column of the radix-8 forward top level, in place: the source (canonical) in the quarters of
+    a (lower half) or b (upper half). Inputs are loaded once into registers before any store."""
+    c = g.c
+    f = [g.materialize(Value('mem', mem=('b' if upper else 'a', t, disp))) for t in range(4)]
+    h = [g.op('vpsubd', c['P'], x) for x in f] if upper else f  # the upper half's source, <= P
+    s0, s1 = g.add(f[0], f[2]), g.add(f[1], f[3])
+    d0 = g.op('vpsubd', g.add(f[0], c['P']), f[2])
+    id1 = g.shoup(g.op('vpsubd', g.add(f[1], c['P']), f[3]), c['WX'], c['QX'])
+    for t, v in enumerate([g.add(s0, s1), g.diff(s0, s1), g.add(d0, id1), g.diff(d0, id1)]):
+        g.store(v, 'a', t, disp)
+    ig2, ig3 = g.shoup(h[2], c['WX'], c['QX']), g.shoup(h[3], c['WX'], c['QX'])
+    u, v = g.low(g.add(h[0], ig2)), g.low(g.diff(h[0], ig2))
+    yu, zv = g.shoup(g.add(h[1], ig3), c['WY'], c['QY']), g.shoup(g.diff(h[1], ig3), c['WZ'], c['QZ'])
+    for t, x in enumerate([g.add(u, yu), g.diff(u, yu), g.add(v, zv), g.diff(v, zv)]):
+        g.store(x, 'b', t, disp)
+
+
+TOP8_KNOBS = Knobs(window=28)
+
+
+def top8_function(variant):
+    """forward_top8_lower or forward_top8_upper: two columns j < q per iteration; a and b point to
+    columns 0 and 4q (the halves), strides q vectors."""
+    consts = {'P': Value('creg', reg=15), '2P': Value('creg', reg=14)}
+    for i, name in enumerate('XYZ'):
+        consts['W' + name] = Value('cmem', mem=32 * i)
+        consts['Q' + name] = Value('creg', reg=11 + i)
+    ops = []
+    for disp in (0, 32):
+        g = Graph(consts)
+        top8_forward(g, disp, variant == 'upper')
+        ops += g.ops
+    seq = ntt.schedule(ops, 11, TOP8_KNOBS)
+    reg = ntt.allocate(seq, {11, 12, 13, 14, 15})
+    head = ['vpbroadcastd %[P], %%ymm15', 'vpbroadcastd %[P2], %%ymm14']
+    for i in range(3):  # entries 1, 2, 3 of the table: values on the stack, quotients in ymm11-13
+        head += [f'vbroadcastss {4 * (i + 1)}(%[t]), %%ymm0', f'vmovdqa %%ymm0, {32 * i}(%[w])',
+                 f'vbroadcastss {4 * (i + 1) + 32}(%[t]), %%ymm{11 + i}']
+    body = head + ['.p2align 5', '1:'] + [ntt.emit(o, reg) for o in seq]
+    body += ['add $64, %[a]', 'add $64, %[b]', 'cmp %[end], %[a]', 'jne 1b']
+    what = {'lower': 'the lower half (a[j + t q], t < 4)', 'upper': 'the upper half (a[j + (4 + t) q], t < 4)'}[variant]
+    lines = [f'// Forward radix-8 top level of a transform of 8q vectors, in place, for a source in {what},',
+             '// canonical; the other half is not read. The radix-2 level and the first radix-4 group of each',
+             '// half: group 0 of the lower, group 1 of the upper. Outputs a[j + t q], t < 8, < 4P. q even;',
+             '// table: the twiddle table.',
+             f'[[gnu::noinline]] inline void forward_top8_{variant}(Vec* a, std::size_t q, const std::uint32_t* table) {{',
+             '    alignas(32) Vec w[3];  // twiddle values of entries 1, 2, 3; their quotients stay in ymm11-13',
+             '    Vec* b = a + 4 * q;', '    Vec* const end = a + q;', '    asm volatile(']
+    lines += ntt.asm_lines(body)
+    lines += ['        : [a] "+r"(a), [b] "+r"(b)',
+              '        : [end] "r"(end), [h] "r"(32 * q), [h3] "r"(96 * q), [t] "r"(table), [w] "r"(w), [P] "m"(kP),',
+              '          [P2] "m"(k2P)',
+              f'        : {CLOBBERS});', '}']
+    return lines
+
+
 def generate():
     lines = HEADER.split('\n')
     for kind in ('forward', 'inverse'):
@@ -222,6 +282,8 @@ def generate():
     for kind in ('forward', 'inverse'):
         for even in (False, True):
             lines += columns_function(kind, even) + ['']
+    for variant in ('lower', 'upper'):
+        lines += top8_function(variant) + ['']
     lines += ['}  // namespace poly::kernels']
     return '\n'.join(lines) + '\n'
 

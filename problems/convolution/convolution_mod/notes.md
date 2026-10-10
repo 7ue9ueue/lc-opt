@@ -2,8 +2,8 @@
 
 N, M <= 2^19 coefficients mod 998244353; print the N + M - 1 coefficients of the product. 5 s.
 
-Best judged: ours, 13 ms: [409226](https://judge.yosupo.jp/submission/409226) (current
-`main.cpp`). Earlier versions: 14 ms, [409184](https://judge.yosupo.jp/submission/409184) and [408716](https://judge.yosupo.jp/submission/408716) (the QPoly exploration-011
+Best judged: ours, 13 ms: [409226](https://judge.yosupo.jp/submission/409226) (#50's version);
+the current `main.cpp` (#197) ties it, [409431](https://judge.yosupo.jp/submission/409431)-[409433](https://judge.yosupo.jp/submission/409433). Earlier versions: 14 ms, [409184](https://judge.yosupo.jp/submission/409184) and [408716](https://judge.yosupo.jp/submission/408716) (the QPoly exploration-011
 program, `../SymPoly/work/ntt/yosupo_convolution_mod_large_io_probe.cpp`, a guess from the
 submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
 
@@ -195,8 +195,19 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
   - `judge.py bench`, 31 rounds, slowest 3 cases: 13.33 -> 13.19 ms, ratio 0.9856.
   - Checks: 53/53 official tests, stress 500 rounds (pipe input), ASan/UBSan on 13 official cases
     (file and pipe input). `bottom.hpp`'s asm equals the benchmarked variant.
+  - CI (#197): geomean 0.9936 (EPYC 9V45 0.9936 and 0.9957, EPYC 7763 0.9915).
+  - Submitted the merged `main.cpp` five times (5 of 5 this session):
+    [409431](https://judge.yosupo.jp/submission/409431) AC 13 ms,
+    [409432](https://judge.yosupo.jp/submission/409432) AC 13,
+    [409433](https://judge.yosupo.jp/submission/409433) AC 13,
+    [409434](https://judge.yosupo.jp/submission/409434) AC 20 (spike: random_00),
+    [409435](https://judge.yosupo.jp/submission/409435) AC 21 (spikes: random_00, fft_killer_04,
+    small_15). `spikes.py`: all five clean 13 ms. Large cases at 13 ms per run: 2, 1, 3, 2, 1, the
+    rest 11-12 (409226: 7; 409392 and 409394: 3 and 1). Best judged stays 13 ms.
 - Next: the formatter is at 34 cycles per 16 values whatever the instruction order; `forward` at
   29.3 cycles per iteration against a 24.5 slot bound; `forward_pair` and `inverse` at h = 4
   are out-of-line calls of 2-4 iterations (0.31 and 0.15 ms against 0.275 and 0.135 at large h).
   Page-aligned text with page-multiple blocks (lib/io/notes.md: d = 0 is 1-2.5% faster in
-  `write(2)`) needs a block-size change in the shared `fields.hpp`.
+  `write(2)`) needs a block-size change in the shared `fields.hpp`. `bottom.hpp` would also fit
+  convolution_mod_large and `lib/ntt` itself (every NTT user), once a `lib/` round can afford the
+  re-timing.

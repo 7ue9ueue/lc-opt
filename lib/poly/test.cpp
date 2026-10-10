@@ -254,11 +254,12 @@ void test_transforms(Fixture& fx) {
             expect(equal(ta, a), "inverse(forward(a)) = a", lg, kind);
 
             // Sources x^shift in: out of place, and in place at offset shift (out's other words
-            // hold garbage); unaligned shifts and sizes. Output halves.
-            for (int trial = 0; trial < 6; ++trial) {
-                const std::size_t shift = trial == 0 ? 0 : trial == 1 || trial == 2 ? n / 2 : pick(n);
-                const std::size_t size = trial == 0 ? n / 2 : trial == 1 ? n / 2 : pick(n - shift + 1);
-                const bool in_place = trial % 2 == 1;
+            // hold garbage); unaligned shifts and sizes. Output halves. Trials 6 and 7: in place
+            // in one half with partial first and last vectors (forward_top8).
+            for (int trial = 0; trial < 8; ++trial) {
+                const std::size_t shift = trial == 0 ? 0 : trial == 1 || trial == 2 ? n / 2 : trial == 6 ? 3 : trial == 7 ? n / 2 + 5 : pick(n);
+                const std::size_t size = trial == 0 || trial == 1 ? n / 2 : trial >= 6 ? n / 2 - 12 : pick(n - shift + 1);
+                const bool in_place = trial % 2 == 1 || trial == 6;
                 std::vector<u32> shifted(n, 0);
                 for (std::size_t i = 0; i < size; ++i) shifted[shift + i] = a[i];
                 auto want = fx.load(1, shifted);

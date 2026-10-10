@@ -19,7 +19,7 @@ Record when opened (issue #64): 32 ms.
   (`problems/convolution/convolution_mod/fields.hpp`, judge-specific: the checker compares
   tokens). One `poly::Arena` (huge pages) for the tables, f (log runs in place) and the scratch
   (6 MB); the text goes page-aligned into the scratch once log is done.
-- The program runs from `.preinit_array` and ends with `_exit` (as inv_of_formal_power_series).
+- The program runs from `.preinit_array` and ends with `_exit` (`RUN_EARLY`, `lib/run/early.hpp`).
 
 ## Floor
 
@@ -102,5 +102,37 @@ blocked division 15.26 ms. So log itself takes ~10.5 ms of 15.3.
     (2 spikes, clean 13), 409451 23 ms (2 spikes, clean 13),
     [409452](https://judge.yosupo.jp/submission/409452) AC 13 ms, 14.8 MiB (5/5, no spike;
     large cases 13 ms, against 13-14 in 409363). New best judged: 13 ms.
-- Next: the transform levels (lib/ntt's kernels) and the leaf products (~0.2 ms each at 2^18,
-  11 of them) are the cost; the fused top levels above (~0.15 ms in all).
+- 2026-10-10, claude (round 3; lib/poly owner lane, issue #95). Exploration files:
+  `lc-opt-explore/log_of_formal_power_series/mac/r3/`.
+  - Phases on main (`lc-bench`, in process, ms, medians of 31): inverse 1.63, T(h) 0.29, T(W)
+    0.90, q products 4 x 0.75, T(q_j) 3 x 0.27, residuals 0.48 / 0.90 / 0.49, subtractions
+    0.11, divisions 0.39; 9.07 warm, 9.47 first use.
+  - Kept (lib/poly, all bundles): a radix-8 forward top level for transforms of 2 * 4^j vectors
+    (2^14 words and up) with a source in place and in one half: the radix-2 level and both
+    halves' first levels in one generated asm pass (`kernels::forward_top8_lower`, `_upper`;
+    lib/poly/notes.md). At 2^18: 25 us against 45 (top2 and the two levels). log has 8 such
+    forwards at 2^18 (T(h), the 4 q products, T(q_0..2)). In process (A/B against main, 31
+    calls, N = 500000): log 0.9800, exp 0.9958, inverse 0.9953, sqrt 0.9902, power 0.9893;
+    N = 262144 (radix-4 sizes) 0.993-1.001. Whole process (runner, max_random_00, 31 rounds,
+    `lc-bench`): 13.89 -> 13.76 ms.
+  - `RUN_EARLY` (`lib/run/early.hpp`) instead of the solution's own copy (backlog of #95).
+  - Not kept: the same pass in intrinsics, 35 us (GCC: arrays on the stack, spills around the
+    source's edge call); out of place, its 12 streams 2^k vectors apart: 45 to 586 us depending
+    on the source's offset (copy into place first: 47 us at every offset, a 3-5 us gain).
+    Radix-8 inverse (generated, scale folded, 8 Shoup products per column): one output half 44
+    against 46 us, both 53 against 60; about 0.15% of log for 600 lines of asm in every bundle.
+    Fusing the residual's inverse top level with the subtraction of d: 1.0002 (A/B, no gain:
+    these passes are compute-bound). A 64 to 1024-word pad between g and the scratch: no change.
+  - Considered, not built: B = 8 with two-level blocks (superblocks of 2^17, residuals at 2^18,
+    h to 2^16): 24.5 U + 12 V against 23 U + 11 V (U, V: a transform and a leaf product at
+    2^18); T(W_t) from four half-zero transforms of f's blocks (4 x 0.26 against 3 x 0.30 ms).
+  - Checks: 25/25 official tests and the 21 other lib/poly bundles' (`lc-amd`); `test.cpp` at
+    -O2 (native, x86-64-v3) and ASan/UBSan; new trials for sources in place in one half with
+    partial edge vectors; 3 mutations (half not zeroed, upper source not negated, y and z
+    swapped in group 1) fail them.
+  - `judge.py bench` (`lc-bench`, 15 rounds, new/main): log 0.9905 (14.15 -> 13.79 ms), exp
+    0.9927, pow 0.9964, sqrt 1.0027, inv 1.0005; `lc-intel`: log 0.9873, exp 0.9992, pow
+    0.9934, sqrt 1.0021. 5 of the 22 bundles build to the same `.text` (bench 0.996-1.0065:
+    noise).
+- Next: the leaf products (~0.2 ms each at 2^18, 11 of them) and the transform levels below
+  the top; the radix-8 inverse above if a kernel with fewer products is found.

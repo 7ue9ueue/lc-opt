@@ -29,6 +29,7 @@
 #include <immintrin.h>
 #include <sys/mman.h>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -442,6 +443,17 @@ public:
         if constexpr (Bottom::kInverse) inverse(a, h, k);
     }
 
+    // Whether a transform of nv = 2 * 4^j vectors has halves larger than a tile: its forward top
+    // level may be radix 8 (forward_top8), which also runs the halves' first levels.
+    static constexpr bool radix8(std::size_t nv) { return nv / 2 > kTile; }
+
+    // visit() of group k of nv > kTile vectors without its forward level (forward_top8 ran it).
+    void below(std::uint32_t* a, std::size_t nv, std::size_t k) const {
+        const std::size_t h = nv / 4;
+        for (std::size_t t = 0; t < 4; ++t) visit(a + 8 * t * h, h, 4 * k + t);
+        if constexpr (Bottom::kInverse) inverse(a, h, k);
+    }
+
 private:
     static constexpr std::size_t kTile = 256;
 
@@ -491,6 +503,16 @@ public:
         if (v - first_ < count_) return _mm256_loadu_si256(reinterpret_cast<const Vec*>(in_ + (8 * v - shift_)));
         if (v - first_touched_ >= touched_) return _mm256_setzero_si256();
         return edge(in_, shift_, end_, v);
+    }
+
+    // Whether the source lies in out at offset shift.
+    bool in_place(const std::uint32_t* out) const { return in_ == out + shift_; }
+
+    // Zeroes out[lo, hi) outside [shift, shift + size).
+    void zero_outside(std::uint32_t* out, std::size_t lo, std::size_t hi) const {
+        const std::size_t begin = std::clamp(shift_, lo, hi), end = std::clamp(end_, begin, hi);
+        std::fill(out + lo, out + begin, 0);
+        std::fill(out + end, out + hi, 0);
     }
 
     // Whether every vector outside [lo, hi) is zero.
@@ -565,6 +587,40 @@ private:
         const Vec u = in(j), v = in(j + h);
         out[j] = add(u, v), out[j + h] = _mm256_sub_epi32(add(u, p), v);
     }
+}
+
+// Radix 8 (kernels::forward_top8_*) on the nv = 2 * 4^j vectors at a, for a source in place and
+// in one half, which is zeroed outside the source first: the radix-2 level and the halves' first
+// levels in one pass instead of three (25 against 45 us at 2^18, lib/poly/notes.md). Returns
+// false (and does nothing) for other sources: out of place, its 12 streams 2^k vectors apart ran
+// up to 10 times slower at some offsets of the source.
+inline bool forward_top8(const Source& in, std::uint32_t* a, std::size_t nv, const std::uint32_t* roots) {
+    const bool lower = in.within(0, nv / 2);
+    if (!in.in_place(a) || !(lower || in.within(nv / 2, nv))) return false;
+    const std::size_t half = 4 * nv;  // words
+    in.zero_outside(a, lower ? 0 : half, lower ? half : 2 * half);
+    auto* v = reinterpret_cast<Vec*>(a);
+    if (lower) kernels::forward_top8_lower(v, nv / 8, roots);
+    else kernels::forward_top8_upper(v, nv / 8, roots);
+    return true;
+}
+
+// The forward top level of a transform of nv = 2 * 4^j vectors at a from in (if the bottom has
+// one) and the subtrees of its halves; the inverse top level is the caller's.
+template <class Bottom>
+void radix2_halves(const Recursion<Bottom>& recursion, const Source& in, std::uint32_t* a, std::size_t nv,
+                   const std::uint32_t* roots) {
+    const std::size_t h = nv / 2;
+    if constexpr (Bottom::kForward) {
+        if (recursion.radix8(nv) && forward_top8(in, a, nv, roots)) {
+            recursion.below(a, h, 0);
+            recursion.below(a + 8 * h, h, 1);
+            return;
+        }
+        forward_top2(in, reinterpret_cast<Vec*>(a), h);
+    }
+    recursion.visit(a, h, 0);
+    recursion.visit(a + 8 * h, h, 1);
 }
 
 inline void inverse_top4(Vec* f, std::size_t h, Half output, const std::uint32_t* inverse_roots, const Factor& s) {
@@ -756,7 +812,8 @@ private:
     }
 
     // Top level, the subtrees, the top level's inverse with the scale (canonical output).
-    // n / 8 = 4^j: one radix-4 group; n / 8 = 2 * 4^j: a radix-2 level.
+    // n / 8 = 4^j: one radix-4 group; n / 8 = 2 * 4^j: a radix-2 level, forward in larger
+    // transforms radix 8 with the halves' first levels where it applies (radix2_halves).
     template <class Bottom>
     void run(std::span<std::uint32_t> a, const detail::Source& in, const Bottom& bottom, std::uint32_t scale,
              Half output) const {
@@ -771,11 +828,8 @@ private:
             for (std::size_t t = 0; t < 4; ++t) recursion.visit(a.data() + 8 * t * h, h, t);
             if constexpr (Bottom::kInverse) inverse_top4(v, h, output, inverse_roots_, Factor(scale));
         } else {
-            const std::size_t h = nv / 2;
-            if constexpr (Bottom::kForward) forward_top2(in, v, h);
-            recursion.visit(a.data(), h, 0);
-            recursion.visit(a.data() + 8 * h, h, 1);
-            if constexpr (Bottom::kInverse) inverse_top2(v, h, output, scale);
+            radix2_halves(recursion, in, a.data(), nv, roots_);
+            if constexpr (Bottom::kInverse) inverse_top2(v, nv / 2, output, scale);
         }
     }
 

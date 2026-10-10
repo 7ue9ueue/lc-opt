@@ -12,7 +12,8 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
   #69-#73); independent of the transform layer. `holonomic.hpp` on top of it: recurrences with
   coefficients linear in n (exp, pow, sqrt of a sparse series) and bulk `inverses`.
 - `composition.hpp`: f(g) mod x^n by Kinoshita and Li's algorithm (issue #67); its own bottoms
-  and tables on top of the transform layer.
+  and tables on top of the transform layer. `projection.hpp`: power projection, the same levels
+  run forward (issue #68); `compositional_inverse.hpp` on top of it and `pow.hpp`.
 
 APIs and usage: the header of each file. Tests: `test.cpp` (O(n^2) references; sizes 1..64,
 powers of two and their neighbours up to 2^20, random sizes; also run under ASan/UBSan in CI).
@@ -279,6 +280,46 @@ m = 2^T >= max(n, 128); n <= 32 by Horner's rule.
   so the same pair structure fits a forward-only pass with P's transform at 4m per level.
 - `ntt::detail::multiply` (`times`) takes one factor for all lanes (the odd lanes reuse the even
   lanes' quotient); per-lane factors need `times_lanes`.
+
+## Power projection
+
+a[k] = [x^(n-1)] g^k for k < n, g[0] = 0 (`projection.hpp`): sum_k a[k] y^k = [x^(m-1)] P_0 / Q_0
+with P_0 = x^(m-n), Q_0 = 1 - y g, m = 2^T >= max(n, 128); n <= 32 from the powers of g.
+- Levels as Composition: Q_(s+1)(x^2) = Q_s(x) Q_s(-x) mod x^L and P_(s+1)(x^2) x = the odd part
+  of P_s(x) Q_s(-x) mod x^L keep [x^(L-1)] P_s / Q_s; P_s has rows 0 .. Y - 1. Forward only: P
+  rides along, no level is stored (2 arrays of 4m instead of T).
+- Generic level (1 .. T - 3): transform of P_s at 4m (plain bottom), then of Q_s with
+  `ProjectionBottom`: per leaf pair (moduli z^8 -+ s) the leaves of V (Graeffe, as LevelBottom)
+  and of W = the odd part of P(z) Q(-z) = Po Qe - Pe Qo mod (u^4 -+ s), 32 products per leaf;
+  the wrapped terms use t c_j (6 Shoup products per leaf set, shared with the Graeffe), so each
+  output is one sum of 8 products and one reduction. The CRT is (A + B) + u^4 (A - B) / s with
+  s^-1 from the inverse table; the factor 2 and the products' 2^-32 go into the inverses' scale.
+  V and W are written over the leaves already read (Q's and P's arrays), then inverse transforms
+  at 2m, the next layout (truncate x, unwrap row 2Y for Q).
+- Leaf sums in transposed form (one leaf per lane) as 64-bit products of the even lanes, then of
+  the odd lanes after a shift: one function per leaf kind; `[[gnu::flatten]]` keeps the
+  transposes inline (GCC called them, spilling every vector around the calls).
+- Pruned transforms: in Q_s and P_s the top x bit (x >= L) is zero, and the levels above it in
+  the index (y) act on columns, so they skip half the columns; the level holding the bit has half
+  its inputs. Inverse: only x < L/2 is kept, so the y levels compute half the columns and the
+  level holding that bit half its outputs. Intrinsics for those levels (a radix-4 level 19% slower
+  than lib/ntt's asm, which has no stride separate from its count); groups below 64 vectors
+  (forward) and 16 (inverse) run unpruned.
+- Level 0: Graeffe of g at 2m (LevelBottom); P_1 = [e odd] u^((e-1)/2) - y W, W[i] = (-1)^j g_j for
+  j = 2i + 1 - e, e = m - n: a shift. Levels T - 2 and T - 1 one-dimensional in y, from level
+  T - 3's V and W at stride 8: a = r3 + r1 (c1^2 - 2 c2), r1 = p1 + p0 c1,
+  r3 = p3 + p2 c1 + p1 c2 + p0 c3 (c_k = (-1)^k q_k): products of length m/2, the last of m.
+- Costs at m = 8192 (`lc-amd`, in process, µs, before #170): power_projection ~1220; per generic
+  level P forward 26, Q forward with the bottom 62 (bottom ~35), two inverses 22; level 0 42;
+  last levels 100.
+
+## Compositional inverse
+
+g with f(g) = x mod x^n, f[0] = 0, f[1] != 0 (`compositional_inverse.hpp`). Lagrange:
+(n - 1) [x^(n-1)] f^k = k [x^(n-1-k)] (x / g)^(n-1), so a = power_projection(f) gives
+H = (x / g)^(n-1) / (n - 1) mod x^(n-1) by one `divide_by_index` (reversed), and
+g / x = (H / H[0])^(-1 / (n-1)) / f[1] by `power` (which divides by H[0]). At n = 8000: power
+251 µs (log_derivative 105, exp 146) of ~1500.
 
 ## Measurements
 
@@ -580,6 +621,24 @@ products 1.77 and 1.69).
 - Not kept: H broadcast by `vpermq` (2.39 against 2.21); H for columns s >= 4 broadcast from a
   store (2.38); two chains of additions for W (2.65, spills).
 
+2026-10-10, claude (issue #68, compositional_inverse_of_formal_power_series):
+- New `projection.hpp` and `compositional_inverse.hpp` (Power projection, Compositional inverse
+  above); no existing header changed. Tests: power_projection against the powers of g for
+  n = 1 .. 160 (four kinds of g, leading zero runs), g shorter and longer than n, g = 0, g = c x;
+  up to 2^17 + 1 by transposition with compose (sum_k f[k] a[k] = (f o g)[n - 1] for random f,
+  and a[k] = (y^k o g)[n - 1]); compositional_inverse against the triangular system of g(f) = x
+  for n = 1 .. 100, f = x, c x, x / (1 - x), f shorter than n, up to 2^17 by f(g) = g(f) = x
+  (compose). Scratch filled with garbage first.
+- Steps and measurements: problems/polynomial/compositional_inverse_of_formal_power_series/notes.md.
+  In process at N = 8000: 1759 -> ~1490 µs; whole process 3.00 -> 2.77 ms (floor 1.22).
+- In-process A/B of two library versions: the same source compiled twice with
+  `-Dpoly=polyA -Dntt=nttA` (and B) against two lib/ copies, linked into one binary, alternating
+  calls; stable where separate processes drifted 1.5x on `lc-amd` (other agents' builds).
+- For the owner lane: composition.hpp's `transpose` is not inlined into callers with many live vectors (composition
+  is neutral either way); a radix-4 asm kernel with a stride separate from its count would let
+  pruned levels (here, and in composition) run at asm speed; `power` at n = 8000 costs 251 µs
+  (log_derivative 105, exp 146; inverse alone 84), a fifth of this problem.
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -608,3 +667,6 @@ products 1.77 and 1.69).
   https://arxiv.org/abs/2404.05177 (power projection by Graeffe steps in x with y as the
   coefficient ring, composition as its transpose). Layout, leaf-level Graeffe and transposed
   steps derived and written here; no code read.
+- Lagrange inversion: n [x^n] f^k = k [x^(n-k)] (x / g)^n for g the compositional inverse of f
+  (standard; R. Stanley, Enumerative Combinatorics vol. 2, section 5.4). Power projection with
+  the numerator carried forward: Kinoshita and Li above; derived and written here, no code read.

@@ -12,11 +12,13 @@
 
 #include "lib/poly/calculus.hpp"
 #include "lib/poly/composition.hpp"
+#include "lib/poly/compositional_inverse.hpp"
 #include "lib/poly/exp.hpp"
 #include "lib/poly/holonomic.hpp"
 #include "lib/poly/inverse.hpp"
 #include "lib/poly/log.hpp"
 #include "lib/poly/pow.hpp"
+#include "lib/poly/projection.hpp"
 #include "lib/poly/sparse.hpp"
 #include "lib/poly/sqrt.hpp"
 #include "lib/poly/transform.hpp"
@@ -1039,6 +1041,145 @@ void test_holonomic() {
     check_holonomic(random_holonomic_taps(range(1, 40), 16, true, true), P - 1, 20000);
 }
 
+// a[k] = [x^(n-1)] g^k from the powers of g.
+std::vector<u32> projection_reference(const std::vector<u32>& g, std::size_t n) {
+    std::vector<u32> a(n), power(n, 0);
+    power[0] = 1;
+    const std::span<const u32> head = std::span<const u32>(g).first(std::min(g.size(), n));
+    for (std::size_t k = 0; k < n; ++k) {
+        a[k] = power[n - 1];
+        std::vector<u32> next(n, 0);
+        for (std::size_t i = 0; i < n; ++i) next[i] = product_coefficient(power, head, i);
+        power = std::move(next);
+    }
+    return a;
+}
+
+// poly::power_projection with its own arena, as compose() above.
+std::vector<u32> power_projection(const std::vector<u32>& g, std::size_t n) {
+    static poly::Arena arena(poly::Transform::words(poly::projection_log(kComposeMax)) + poly::projection_scratch(kComposeMax) + 64);
+    static const poly::Transform t(arena, poly::projection_log(kComposeMax));
+    static const std::span<u32> scratch = arena.take(poly::projection_scratch(kComposeMax));
+    std::vector<u32> a(n, 0xFFFFFFFF);
+    std::fill(scratch.begin(), scratch.end(), 0xFFFFFFFF);
+    poly::power_projection(t, g, a, scratch);
+    return a;
+}
+
+u32 dot(const std::vector<u32>& a, const std::vector<u32>& b) {
+    u64 s = 0;
+    for (std::size_t i = 0; i < std::min(a.size(), b.size()); ++i) s = (s + u64(a[i]) * b[i]) % P;
+    return u32(s);
+}
+
+// Long results by transposition: sum_k f[k] a[k] = (f o g)[n - 1] for random f, and for f = y^k.
+void check_projection_transposed(const std::vector<u32>& g, std::size_t n) {
+    const auto a = power_projection(g, n);
+    for (int trial = 0; trial < 3; ++trial) {
+        const auto f = random_poly(n, trial % 3);
+        expect(dot(f, a) == compose(f, g, n)[n - 1], "power_projection: transpose of compose", n, trial);
+    }
+    for (std::size_t k : {std::size_t(0), std::size_t(1), n / 2, n - 1, pick(n)}) {
+        std::vector<u32> f(k + 1, 0);
+        f[k] = 1;
+        expect(a[k] == compose(f, g, n)[n - 1], "power_projection: a[k]", n, k);
+    }
+}
+
+void test_projection() {
+    for (std::size_t n = 1; n <= 160; ++n)
+        for (int kind = 0; kind < 4; ++kind) {
+            const auto g = random_inner(n, kind);
+            expect(power_projection(g, n) == projection_reference(g, n), "power_projection", n, kind);
+        }
+    // g shorter and longer than n; g = 0 (a = [n == 1]), g = c x (a = c^(n-1) at n - 1).
+    for (std::size_t n : {33, 63, 64, 65, 200, 256, 257}) {
+        for (std::size_t size : {std::size_t(1), std::size_t(2), n / 3 + 1, 2 * n}) {
+            const auto g = random_inner(size, int(pick(4)));
+            expect(power_projection(g, n) == projection_reference(g, n), "power_projection: g size", n, size);
+        }
+        const u32 c = u32(pick(P));
+        std::vector<u32> zero(n, 0), line(n, 0), want(n, 0);
+        line[1] = c, want[n - 1] = power(c, n - 1);
+        expect(power_projection(zero, n) == zero, "power_projection: g = 0", n);
+        expect(power_projection(line, n) == want, "power_projection: g = c x", n);
+    }
+    for (int lg = 6; lg <= 17; ++lg) {
+        const std::size_t n = std::size_t(1) << lg;
+        for (std::size_t m : {n - 1, n, n + 1, n / 2 + 1 + pick(n / 2)})
+            if (m <= kComposeMax) check_projection_transposed(random_inner(m, int(pick(4))), m);
+    }
+}
+
+// g with g(f) = x mod x^n, coefficient by coefficient from the powers of f.
+std::vector<u32> compositional_inverse_reference(const std::vector<u32>& f, std::size_t n) {
+    std::vector<std::vector<u32>> powers(n, std::vector<u32>(n, 0));  // f^j mod x^n
+    powers[0][0] = 1;
+    const std::span<const u32> head = std::span<const u32>(f).first(std::min(f.size(), n));
+    for (std::size_t j = 1; j < n; ++j)
+        for (std::size_t i = 0; i < n; ++i) powers[j][i] = product_coefficient(powers[j - 1], head, i);
+    std::vector<u32> g(n, 0);
+    for (std::size_t k = 1; k < n; ++k) {
+        u32 s = k == 1;
+        for (std::size_t j = 1; j < k; ++j) s = sub(s, mul(g[j], powers[j][k]));
+        g[k] = mul(s, power(powers[k][k], P - 2));
+    }
+    return g;
+}
+
+constexpr std::size_t kInverseMax = std::size_t(1) << 17;
+
+std::vector<u32> compositional_inverse(const std::vector<u32>& f, std::size_t n) {
+    static const std::size_t words = poly::compositional_inverse_scratch(kInverseMax);
+    static poly::Arena arena(poly::Transform::words(poly::compositional_inverse_log(kInverseMax)) + words + 64);
+    static const poly::Transform t(arena, poly::compositional_inverse_log(kInverseMax));
+    static const std::span<u32> scratch = arena.take(words);
+    std::vector<u32> g(n, 0xFFFFFFFF);
+    std::fill(scratch.begin(), scratch.end(), 0xFFFFFFFF);
+    poly::compositional_inverse(t, f, g, scratch);
+    return g;
+}
+
+// f with f[0] = 0 and f[1] != 0.
+std::vector<u32> random_invertible(std::size_t n, int kind) {
+    auto f = random_poly(std::max<std::size_t>(n, 2), kind);
+    f[0] = 0;
+    if (!f[1]) f[1] = 1 + u32(pick(P - 1));
+    return f;
+}
+
+// Long results: f(g) = x and g(f) = x mod x^n, by compose.
+void check_compositional_inverse(const std::vector<u32>& f, std::size_t n) {
+    const auto g = compositional_inverse(f, n);
+    std::vector<u32> x(n, 0);
+    if (n > 1) x[1] = 1;
+    expect(compose(f, g, n) == x, "compositional_inverse: f(g) = x", n);
+    expect(compose(g, f, n) == x, "compositional_inverse: g(f) = x", n);
+}
+
+void test_compositional_inverse() {
+    for (std::size_t n = 1; n <= 100; ++n)
+        for (int kind = 0; kind < 3; ++kind) {
+            const auto f = random_invertible(n, kind);
+            expect(compositional_inverse(f, n) == compositional_inverse_reference(f, n), "compositional_inverse", n, kind);
+        }
+    // f = x (g = x), f = c x (g = x / c), f = x / (1 - x) (g = x / (1 + x)), f shorter than n.
+    for (std::size_t n : {2, 3, 33, 64, 65, 1000, 4097}) {
+        std::vector<u32> x(n, 0), geometric(n, 1), alternating(n, 0);
+        x[1] = 1, geometric[0] = 0;
+        for (std::size_t i = 1; i < n; ++i) alternating[i] = i % 2 ? 1 : P - 1;
+        expect(compositional_inverse(x, n) == x, "compositional_inverse: f = x", n);
+        expect(compositional_inverse(geometric, n) == alternating, "compositional_inverse: x / (1 - x)", n);
+        check_compositional_inverse({0, 5}, n);
+        check_compositional_inverse(random_invertible(n / 3 + 2, 0), n);
+    }
+    for (int lg = 6; lg <= 17; ++lg) {
+        const std::size_t n = std::size_t(1) << lg;
+        for (std::size_t m : {n - 1, n, n + 1})
+            if (m <= kInverseMax) check_compositional_inverse(random_invertible(m, int(pick(3))), m);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1055,6 +1196,8 @@ int main() {
     test_recurrence();
     test_holonomic();
     test_compose();
+    test_projection();
+    test_compositional_inverse();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

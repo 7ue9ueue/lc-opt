@@ -2,14 +2,15 @@
 // a newline at the end. Judge-specific: the checker compares tokens, so the padding is accepted.
 //
 // Eight values per step, AVX2. Value x = top 10^16 + mid 10^8 + low: the quotients come from
-// multiply-shift estimates on the high bits, corrected by one exact step. Mid and low split into 4-digit chunks,
-// then into digit bytes in 16-bit lanes. Each field is two stores: the top's 4 digits (8 bytes,
-// the last 4 overwritten), then mid and low (16 bytes). The separators are never written: the
+// multiply-shift estimates on the high bits, corrected by one exact step. Mid and low split into
+// 4-digit chunks, then into digit bytes in 16-bit lanes. Each field is two stores: the top's 4
+// characters from a table, then mid and low (16 bytes). The separators are never written: the
 // text buffer starts as spaces and every block has the same layout.
 #pragma once
 
 #include <immintrin.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -61,7 +62,9 @@ inline void hundreds(__m256i z, __m256i& high, __m256i& low) {
 // 16-bit z < 100 -> bytes [z / 10, z % 10] = 256 z - 2559 (z / 10).
 inline __m256i two_digits(__m256i z) {
     const __m256i tens = _mm256_mulhi_epu16(z, all16(6554));
-    return _mm256_sub_epi16(_mm256_slli_epi16(z, 8), _mm256_mullo_epi16(tens, all16(2559)));
+    __m256i k = all16(2559);
+    asm("" : "+x"(k));  // keeps vpmullw: GCC's shift-add form would load the two shift pipes
+    return _mm256_sub_epi16(_mm256_slli_epi16(z, 8), _mm256_mullo_epi16(tens, k));
 }
 
 inline __m256i ascii(__m256i digits) { return _mm256_or_si256(digits, all64(0x3030303030303030)); }
@@ -74,14 +77,6 @@ inline __m256i blanked(__m256i digits, __m256i blank) {
 // Leading-zero bytes of qword digits: 0xFF up to the first nonzero byte, < 0x10 at it, 0 after.
 inline __m256i leading(__m256i digits) { return _mm256_xor_si256(digits, _mm256_add_epi64(digits, all64(~0ull))); }
 
-// Qwords top < 10^4 -> text of its 4 digits in the low dword, leading zeros blank.
-inline __m256i top_text(__m256i top) {
-    __m256i high, low;
-    hundreds(top, high, low);
-    const __m256i digits = two_digits(_mm256_or_si256(high, _mm256_slli_epi32(low, 16)));
-    return blanked(digits, leading(digits));
-}
-
 // Text of mid and low, 16 bytes per value: lanes hold [mid digits, low digits]; top_zero: per
 // qword, all ones where the value's top is 0. Leading zeros blank, the last digit always shown.
 inline __m256i rest_text(__m256i digits, __m256i top_zero) {
@@ -92,6 +87,16 @@ inline __m256i rest_text(__m256i digits, __m256i top_zero) {
     return blanked(digits, _mm256_and_si256(leading(stopped), open));
 }
 
+// Text of top < 1845 (x < 2^64): its digits right-aligned in 4 characters, leading zeros blank.
+inline constexpr std::array<std::array<char, 4>, 1845> kTopText = [] {
+    std::array<std::array<char, 4>, 1845> t{};
+    for (std::uint32_t top = 0; top < t.size(); ++top) {
+        t[top] = {' ', ' ', ' ', ' '};
+        for (std::uint32_t x = top, i = 4; x; x /= 10) t[top][--i] = char('0' + x % 10);
+    }
+    return t;
+}();
+
 // Eight values split into groups: top in qword lanes, [mid, low] in dword pairs; values 0-3, 4-7.
 struct Split {
     __m256i top[2], rest[2];
@@ -99,6 +104,7 @@ struct Split {
 
 [[gnu::always_inline]] inline Split split(const std::uint64_t* x) {
     Split s;
+#pragma GCC unroll 2  // as every loop over halves: -O2 kept them as loops, their values on the stack
     for (int h = 0; h < 2; ++h) {
         __m256i rest, mid, low;
         // Losses: 2^32 / 10^16 + 1845 / M < 10^-6, and 2^22 / 10^8 + 10^8 / M < 0.1 (rest < 2^54).
@@ -112,6 +118,7 @@ struct Split {
 // Fields of the split values at p + 21 i + 1 (the separators stay as they are).
 [[gnu::always_inline]] inline void emit(char* p, const Split& s) {
     __m256i rest_digits[2][2];
+#pragma GCC unroll 2
     for (int h = 0; h < 2; ++h) {
         // 16-bit chunks, then [z / 100, z % 100] pairs: unpacklo gives values 0 and 2 (one per
         // 128-bit lane), unpackhi values 1 and 3, as 8 words each.
@@ -124,24 +131,26 @@ struct Split {
     const __m256i zero = _mm256_setzero_si256();
     const __m256i top_zero[2] = {_mm256_cmpeq_epi64(s.top[0], zero), _mm256_cmpeq_epi64(s.top[1], zero)};
     if (_mm256_testz_si256(_mm256_or_si256(top_zero[0], top_zero[1]), _mm256_set1_epi8(-1))) [[likely]] {
+#pragma GCC unroll 2
         for (int h = 0; h < 2; ++h)
+#pragma GCC unroll 2
             for (int j = 0; j < 2; ++j) rest_text_of[h][j] = ascii(rest_digits[h][j]);
     } else {
+#pragma GCC unroll 2
         for (int h = 0; h < 2; ++h) {
             rest_text_of[h][0] = rest_text(rest_digits[h][0], _mm256_unpacklo_epi64(top_zero[h], top_zero[h]));
             rest_text_of[h][1] = rest_text(rest_digits[h][1], _mm256_unpackhi_epi64(top_zero[h], top_zero[h]));
         }
     }
     const auto at = [p](int value, int offset) { return reinterpret_cast<__m128i*>(p + kWidth * value + offset); };
+    alignas(32) std::uint64_t tops[8];
+    _mm256_store_si256(reinterpret_cast<__m256i*>(tops), s.top[0]);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(tops + 4), s.top[1]);
+#pragma GCC unroll 8
+    for (int v = 0; v < 8; ++v) std::memcpy(p + kWidth * v + 1, kTopText[tops[v]].data(), 4);
+#pragma GCC unroll 2
     for (int h = 0; h < 2; ++h) {
         const int v = 4 * h;
-        // The top's 8-byte stores first: their last 4 bytes fall where mid and low go.
-        const __m256i t = top_text(s.top[h]);
-        const __m128i t01 = _mm256_castsi256_si128(t), t23 = _mm256_extracti128_si256(t, 1);
-        _mm_storel_epi64(at(v, 1), t01);
-        _mm_storel_epi64(at(v + 1, 1), _mm_unpackhi_epi64(t01, t01));
-        _mm_storel_epi64(at(v + 2, 1), t23);
-        _mm_storel_epi64(at(v + 3, 1), _mm_unpackhi_epi64(t23, t23));
         const __m256i r02 = rest_text_of[h][0], r13 = rest_text_of[h][1];
         _mm_storeu_si128(at(v, 5), _mm256_castsi256_si128(r02));
         _mm_storeu_si128(at(v + 1, 5), _mm256_castsi256_si128(r13));

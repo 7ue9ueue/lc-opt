@@ -1,14 +1,15 @@
-// a * b mod 2^64: the product modulo five NTT primes (lib/multimod: lib/ntt's transform with the
-// modulus set at run time), the Chinese remainder theorem in 64-bit arithmetic, fixed-width output
-// (fields64.hpp).
+// a * b mod 2^64: the product modulo five NTT primes (product.hpp, or lib/multimod when a factor
+// fills more than half of the transform), the Chinese remainder theorem in 64-bit arithmetic,
+// fixed-width output (fields64.hpp).
 #include <array>
 
+#include "fields64.hpp"
 #include "lib/io/bulk64.hpp"
 #include "lib/io/io.hpp"
 #include "lib/mem/huge.hpp"
-#include "fields64.hpp"
 #include "lib/multimod/transform.hpp"
 #include "lib/run/early.hpp"
+#include "product.hpp"
 
 namespace {
 
@@ -88,6 +89,7 @@ using Residues = std::array<const std::uint32_t*, kPrimes>;
         odd = _mm256_add_epi64(odd, _mm256_mul_epu32(_mm256_srli_epi64(x, 32), lo));
         high = _mm256_add_epi32(high, _mm256_mullo_epi32(x, _mm256_set1_epi32(int(c >> 32))));
     };
+#pragma GCC unroll 5  // -O2 kept the loop, reloading and splitting each constant per step
     for (int k = 0; k < kPrimes; ++k) term(_mm256_load_si256(reinterpret_cast<const Vec*>(y[k] + i)), kCrt.place[k]);
     term(t, 0 - kCrt.modulus);
     even = _mm256_add_epi64(even, _mm256_slli_epi64(high, 32));                                   // coefficients 0 2 4 6
@@ -125,7 +127,10 @@ void solve() {
     io::read_bulk(in, a, n);
     io::read_bulk(in, b, m);
 
-    const multimod::Transform transform(lg, arena.take<std::uint32_t>(multimod::Transform::table_words(lg)));
+    auto* tables = arena.take<std::uint32_t>(multimod::Transform::table_words(lg));
+    const multimod::Transform transform(lg, tables);
+    const wide::Product product(lg, tables);
+    const bool fits = wide::Product::fits(lg, n, m);
     // The last prime's residues go to the work words, and its work to a: no fresh pages for it.
     auto* work = arena.take<std::uint32_t>(words);
     Residues residues;
@@ -133,8 +138,11 @@ void solve() {
         const Modulus mod(kPrimeList[k][0], kPrimeList[k][1]);
         const bool last = k + 1 == kPrimes;
         auto* r = last ? work : arena.take<std::uint32_t>(words);
-        transform.multiply(multimod::Wide{a, n}, multimod::Wide{b, m}, r,
-                           last ? reinterpret_cast<std::uint32_t*>(a) : work, mod, kCrt.scale[k]);
+        auto* w = last ? reinterpret_cast<std::uint32_t*>(a) : work;
+        if (fits)
+            product.multiply(multimod::Wide{a, n}, multimod::Wide{b, m}, r, w, mod, kCrt.scale[k]);
+        else
+            transform.multiply(multimod::Wide{a, n}, multimod::Wide{b, m}, r, w, mod, kCrt.scale[k]);
         residues[k] = r;
     }
 

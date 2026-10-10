@@ -794,9 +794,9 @@ products 1.77 and 1.69).
   recurrences over 3 and 5 windows with long taps at window edges. Mutations (no t Q R1 term,
   V' halved, one subtraction fewer, no 4P subtraction at k = 9, 10, no fold at k > 10, no finish
   of the window's batch, a wrong offset into the odd reciprocals) fail them.
-- `judge.py bench` (`lc-amd`, 21 rounds) against main: exp 0.9627, log 0.9940. Merged as #196;
-  CI: exp 0.9713, log 0.9994. pow judged [409426](https://judge.yosupo.jp/submission/409426)
-  13 ms with a launch spike, clean 7 ms.
+- `judge.py bench` (`lc-amd`, 21 rounds) against main: exp sparse 0.9627, log sparse 0.9940.
+  Merged as #196; CI: exp sparse 0.9713, log sparse 0.9994. pow sparse judged
+  [409426](https://judge.yosupo.jp/submission/409426) 13 ms with a launch spike, clean 7 ms.
 
 2026-10-10, claude (issue #74, product_of_polynomial_sequence):
 - New `product_tree.hpp` (Product tree above); no existing header changed. Tests: TreeTransform

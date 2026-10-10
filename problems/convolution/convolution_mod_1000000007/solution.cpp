@@ -1,16 +1,18 @@
-// a * b mod 1000000007: the product modulo three NTT primes (lib/multimod: lib/ntt's transform
-// with the modulus set at run time), the Chinese remainder theorem straight to residues mod
-// 10^9 + 7 by one Montgomery reduction, fixed-width output: 10 bytes per value (fields10.hpp),
-// or 11 in the rare blocks with a value >= 10^9 (fields11.hpp).
+// a * b mod 1000000007: the product modulo three NTT primes below 2^28 (product.hpp: lazy
+// reductions), the Chinese remainder theorem straight to residues mod 10^9 + 7 by one Montgomery
+// reduction, fixed-width output: 10 bytes per value (fields10.hpp), or 11 in the rare blocks with
+// a value >= 10^9 (fields11.hpp).
+#include <algorithm>
 #include <array>
+#include <bit>
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/mem/huge.hpp"
 #include "fields10.hpp"
 #include "fields11.hpp"
-#include "lib/multimod/transform.hpp"
 #include "lib/run/early.hpp"
+#include "product.hpp"
 
 namespace {
 
@@ -19,10 +21,10 @@ using multimod::Vec;
 
 constexpr std::uint32_t kMod = 1000000007;
 
-// Each coefficient is below 2^19 kMod^2 < 2^79; the primes' product M is about 2^89.6.
+// Each coefficient is below 2^19 kMod^2 < 2^78.8; the primes' product M is about 2^83.96.
 constexpr int kPrimes = 3;
 constexpr std::array<std::array<std::uint32_t, 2>, kPrimes> kPrimeList = {{
-    {998244353, 3}, {985661441, 3}, {976224257, 3}}};  // prime, generator; inputs < kMod < 2 p
+    {268042241, 3}, {265420801, 11}, {264634369, 11}}};  // prime, generator; 2^17 | p - 1, inputs < kMod < 4 p
 
 constexpr std::uint32_t multiply_mod(std::uint64_t x, std::uint64_t y, std::uint32_t p) {
     return std::uint32_t(x % p * (y % p) % p);
@@ -37,8 +39,8 @@ constexpr std::uint32_t inverse_mod(std::uint32_t x, std::uint32_t p) {
 
 // CRT with M_k = M / p_k: the transform for prime k returns y_k = c / M_k mod p_k
 // (scale[k] = 1 / M_k mod p_k). Then c = sum_k y_k M_k - t M with t = floor(sum_k y_k / p_k):
-// the sum's fraction is c / M < 2^-10. Modulo kMod, with R = 2^32:
-// s = sum_k y_k (M_k R mod kMod) + t (-M R mod kMod) < (3 2^30 + 2) kMod < R kMod, and
+// the sum's fraction is c / M < 2^-5. Modulo kMod, with R = 2^32:
+// s = sum_k y_k (M_k R mod kMod) + t (-M R mod kMod) < (3 2^28 + 2) kMod < R kMod, and
 // s / R mod kMod = c mod kMod (Montgomery reduction).
 struct Crt {
     std::array<std::uint32_t, kPrimes> scale{};
@@ -123,28 +125,28 @@ bool reconstruct(const Residues& y, std::size_t begin, std::size_t count, std::u
 void solve() {
     io::Reader in;
     const std::size_t n = in.read<std::uint32_t>(), m = in.read<std::uint32_t>(), count = n + m - 1;
-    const int lg = std::max(6, int(std::bit_width(count - 1)));
-    const std::size_t len = std::size_t(1) << lg, words = len + multimod::Transform::kPadding;
+    // Each factor fills at most half of the transform (product.hpp).
+    const int lg = std::max({9, int(std::bit_width(count - 1)), int(std::bit_width(std::max(n, m) - 1)) + 1});
+    const std::size_t len = std::size_t(1) << lg, words = len + lazy::kPadding;
     const auto padded = [](std::size_t k) { return (k + 7) & ~std::size_t(7); };
 
-    mem::Arena arena(4 * (padded(n) + padded(m) + len + multimod::Transform::table_words(lg) + (kPrimes + 1) * words +
+    mem::Arena arena(4 * (len / 2 + 8 + lazy::Product::table_words(lg) + (kPrimes + 1) * words +
                           fields11::kBlock) +
                      fields11::kTextBytes + 64 * 16);
-    // Zero up to half the length too: the first level reads that far. b holds the last prime's
+    // a: zero up to half the length, plus a word the first level reads. b holds the last prime's
     // transform of b in place.
-    auto* a = arena.take<std::uint32_t>(std::max(padded(n), len / 2));
+    auto* a = arena.take<std::uint32_t>(len / 2 + 8);
     auto* b = arena.take<std::uint32_t>(words);
     io::read_bulk(in, a, n);
     io::read_bulk(in, b, m);
 
-    const multimod::Transform transform(lg, arena.take<std::uint32_t>(multimod::Transform::table_words(lg)));
+    const lazy::Product product(lg, arena.take<std::uint32_t>(lazy::Product::table_words(lg)));
     auto* work = arena.take<std::uint32_t>(words);
     Residues residues;
     for (int k = 0; k < kPrimes; ++k) {
-        const Modulus mod(kPrimeList[k][0], kPrimeList[k][1]);
         const bool last = k + 1 == kPrimes;
         auto* r = last ? work : arena.take<std::uint32_t>(words);
-        transform.multiply(multimod::Padded{a, n}, multimod::Padded{b, m}, r, last ? b : work, mod, kCrt.scale[k]);
+        product.multiply(a, b, r, last ? b : work, Modulus(kPrimeList[k][0], kPrimeList[k][1]), kCrt.scale[k]);
         residues[k] = r;
     }
 

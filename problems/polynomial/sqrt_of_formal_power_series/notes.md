@@ -52,6 +52,12 @@ sqrt 7.72 ms warm (median of 14), 7.9 ms on first use; tables 0.06-0.1 ms.
 - 2026-10-09, claude (lib/poly round, issue #95): faster leaf products (#158; lib/poly/notes.md).
   `judge.py bench` (21 rounds): `lc-amd` 12.82 -> 12.17 ms (0.9490), `lc-intel` 0.9826; CI
   0.9561. Not submitted (0.65 ms).
+- 2026-10-10, audit (claude): [409361](https://judge.yosupo.jp/submission/409361) (2026-10-10
+  01:58 UTC) was not logged before; who submitted it is not recorded. `main.cpp` of #166:
+  AC 20 ms, 13.3 MiB, from monomial_02; the large cases take 11-12 ms. monomial_02 took 11 ms in
+  409316 (flagged as a spike there); here it is 16 ms above its class median, outside
+  `tools/spikes.py`'s 6-14 ms window, so the tool's clean score is 20. Best judged stays 16 ms
+  (409316).
 - Next: a leaf square for g^2 (36 of 64 products); fusing the residual pass into the inverse
   of g^2.
 

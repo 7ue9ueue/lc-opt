@@ -3,10 +3,12 @@
 N, M <= 2^24 coefficients mod 998244353; print the N + M - 1 coefficients of the product. 10 s,
 1 GiB (the output file's tmpfs pages count). Inputs and outputs are ~331 MB at the maximum.
 
-Best judged: ours, [409265](https://judge.yosupo.jp/submission/409265), 439 ms (current `main.cpp`).
+Best judged: ours, [409343](https://judge.yosupo.jp/submission/409343), 430 ms (current `main.cpp`,
+#127; no spike). Same version: [409265](https://judge.yosupo.jp/submission/409265), 439 ms (clean 429).
 Earlier: [409233](https://judge.yosupo.jp/submission/409233), 448 ms.
 Before: [408888](https://judge.yosupo.jp/submission/408888), 452 ms, the QPoly exploration-014
-program (`../SymPoly/work/ntt/yosupo_convolution_mod_large_opt.cpp`, guess from the submission dates). Next other user: 737 ms (403499). Judge phases of 406521 (the exploration-011
+program (`../SymPoly/work/ntt/yosupo_convolution_mod_large_opt.cpp`; the submitted source equals
+that file, checked 2026-10-10). Next other user: 737 ms (403499). Judge phases of 406521 (the exploration-011
 twin, 454 ms): parse 71, NTT 205, output 156 (`write()` ~120), ~12-15 outside `main`.
 
 ## Design
@@ -84,3 +86,30 @@ and `_exit` as in `../convolution_mod`.
   - Next (guesses): a smaller footprint (b's upper half as a reused scratch quarter, inverse
     twiddles from the forward table) saves ~4 ms of page zeroing on `lc-amd`; the judge's 6% offset
     may make it worth more there.
+- 2026-10-10, audit (claude): submissions not logged before. Who submitted them is not recorded.
+  "clean" is the score without launch spikes (`tools/spikes.py`), where it differs.
+  - Before this repo (2026-09-27 to 2026-10-08, UTC), QPoly programs; sources compared with
+    `../SymPoly/work/ntt/`:
+    - [406499](https://judge.yosupo.jp/submission/406499) 09-27 11:31: AC 516 ms, 609.2 MiB,
+      clean 511; `yosupo_convolution_mod_large.cpp`.
+    - [406503](https://judge.yosupo.jp/submission/406503) 09-27 11:43: CE; it includes
+      `io007_sse.hpp` and `large_core.hpp`, not bundled. Version not identified.
+    - [406505](https://judge.yosupo.jp/submission/406505) 09-27 11:44: AC 548 ms, 609.6 MiB;
+      `yosupo_convolution_mod_large_sse.cpp`.
+    - [406506](https://judge.yosupo.jp/submission/406506) 09-27 11:46: CE. Version not identified.
+    - [406507](https://judge.yosupo.jp/submission/406507) 09-27 11:49: CE. Version not identified.
+    - [406508](https://judge.yosupo.jp/submission/406508) 09-27 11:55: AC 524 ms, 609.3 MiB,
+      clean 518; `yosupo_convolution_mod_large_cerr.cpp`.
+    - [406518](https://judge.yosupo.jp/submission/406518) 09-27 13:42: AC 458 ms, 612.9 MiB,
+      clean 452; `yosupo_convolution_mod_large_io.cpp`.
+    - [408717](https://judge.yosupo.jp/submission/408717) 10-07 17:34: AC 460 ms, 612.9 MiB,
+      clean 457; `yosupo_convolution_mod_large_io_probe.cpp` (as 406521).
+    - [408884](https://judge.yosupo.jp/submission/408884) 10-08 13:58: AC 458 ms, 613.0 MiB,
+      clean 451; `yosupo_convolution_mod_large_opt.cpp` (as 408888).
+    - [408886](https://judge.yosupo.jp/submission/408886) 10-08 14:08: AC 461 ms, 613.0 MiB,
+      clean 456; the same file.
+    - [408887](https://judge.yosupo.jp/submission/408887) 10-08 14:08: AC 452 ms, 613.0 MiB;
+      the same file.
+  - [409343](https://judge.yosupo.jp/submission/409343) 2026-10-10 01:47 UTC: AC 430 ms,
+    612.8 MiB, no spike; `main.cpp` of #127 (2/5 with 409265). The 15 slowest cases take
+    426-430 ms (409265: 422-429, plus two spikes at 438-439). New best judged: 430 ms (was 439).

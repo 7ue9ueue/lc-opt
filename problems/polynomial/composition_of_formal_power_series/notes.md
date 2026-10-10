@@ -4,9 +4,9 @@ N <= 8000 coefficients of f and of g (g[0] = 0) mod 998244353; print f(g) mod x^
 Slowest tests: max_random, hack, hack2 and most random (N = 8000 or near; g with a run of
 leading zeros in hack). Small tests N <= 10.
 
-Best judged: ours, 11 ms: [409332](https://judge.yosupo.jp/submission/409332) (`main.cpp` of #164),
-with a +9 ms launch spike on random_02 (11 ms, its peers 2; `tools/spikes.py`): clean score
-3 ms.
+Best judged: ours, 3 ms, no spike: [409336](https://judge.yosupo.jp/submission/409336) (`main.cpp`
+of #164). Its first run, [409332](https://judge.yosupo.jp/submission/409332), took 11 ms from a
++9 ms launch spike on random_02 (11 ms, its peers 2; `tools/spikes.py`): clean score 3 ms.
 Record when opened (issue #67): 9 ms.
 
 ## Design
@@ -67,6 +67,9 @@ score = slowest of max_random_00, max_random_03, hack_02, random_04): read and w
     [409332](https://judge.yosupo.jp/submission/409332) AC 11 ms, 4.8 MiB; clean score 3 ms
     (spikes on random_02 11 ms and small_06 9 ms; P(clean run) 0.24, since all 27 cases lie
     within 9 ms of the slowest).
+- 2026-10-10, audit (claude): [409336](https://judge.yosupo.jp/submission/409336) (2026-10-10
+  01:24 UTC) was not logged before; who submitted it is not recorded. `main.cpp` of #164 (2/5
+  with 409332): AC 3 ms, 4.8 MiB, no spike. New best judged: 3 ms (was 11, 409332).
 - Next: level 1 one-dimensional (Y = 2, ~50 us estimate); pruned y-levels in the transforms of
   generic levels (x-padding bit below the y-bits: y-levels need only half the columns; estimate
   up to 18% of transform time, needs radix-4 kernels whose stride differs from their count).

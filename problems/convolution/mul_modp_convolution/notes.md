@@ -65,6 +65,9 @@ Record when opened (issue #35): 45 ms.
 - 2026-10-10, claude (issue #156): the local `fields.hpp` copy is gone; the solution includes
   `../convolution_mod/fields.hpp` (it was byte-identical). `main.cpp` changes in one comment line; the
   judge's command builds byte-identical executables from main's and this `main.cpp` (`lc-amd`).
+- 2026-10-10, audit (claude): [409350](https://judge.yosupo.jp/submission/409350) (2026-10-10
+  01:54 UTC) was not logged before; who submitted it is not recorded. Current `main.cpp` (#163):
+  AC 12 ms, 15.8 MiB, no spike on the slowest case. Ties best judged (409289).
 - Next: the product (4.46 ms) is `lib/ntt`'s. Gather and scatter (0.78 + 0.66) resisted
   prefetch, fusion and partitioning. No idea left outside `lib/` worth a round (guess).
 

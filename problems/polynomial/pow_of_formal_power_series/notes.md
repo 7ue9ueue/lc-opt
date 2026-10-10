@@ -4,7 +4,8 @@ N <= 500000 coefficients of f mod 998244353 and 0 <= M <= 10^18; print the first
 of f^M. 10 s. Largest tests: max_random, binary_exp_max, lower_deg_zero2_00 (f[0] != 0 or few
 leading zeros, so u^M has close to 500000 coefficients; transforms up to 2^19).
 
-Best judged: ours, 29 ms: [409299](https://judge.yosupo.jp/submission/409299) (`main.cpp` of #137);
+Best judged: ours, 26 ms, no spike: [409358](https://judge.yosupo.jp/submission/409358) (`main.cpp`
+of #166). Earlier: 29 ms, [409299](https://judge.yosupo.jp/submission/409299) (#137);
 #140 also 29 ms ([409311](https://judge.yosupo.jp/submission/409311),
 [409312](https://judge.yosupo.jp/submission/409312)). #158: [409328](https://judge.yosupo.jp/submission/409328)
 32 ms with launch spikes, clean 27 ms.
@@ -71,5 +72,9 @@ unreliable; same-run ratios (`judge.py bench`) still hold.
   0.9402. Submitted the merged `main.cpp`: [409328](https://judge.yosupo.jp/submission/409328)
   AC 32 ms, 19.0 MiB: launch spikes on random_00 and monomial_ans_low_deg_03 (32 ms each); the
   large cases 25-27 ms against 28-29 in 409312, so the clean score is 27 ms.
+- 2026-10-10, audit (claude): [409358](https://judge.yosupo.jp/submission/409358) (2026-10-10
+  01:58 UTC) was not logged before; who submitted it is not recorded. `main.cpp` of #166:
+  AC 26 ms, 19.4 MiB; the large cases 25-26 ms, no spike on them. New best judged: 26 ms (was 29,
+  409299).
 - Next: exp's T_m(x q) at the last two steps from the log's stored T(q_0), T(q_1) (~0.4 ms,
   lib/poly/notes.md); the transform levels (lib/ntt's kernels) are the largest shared cost.

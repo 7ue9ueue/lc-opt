@@ -2,8 +2,10 @@
 
 Prime p <= 10^9, K <= 18 axes, n_i >= 2, n_i | p - 1, N = prod n_i <= 2^18. Print f g mod
 (x_i^n_i - 1) mod p. 10 s.
-Record when opened (issue #37): 117 ms. Best judged: ours, 15 ms:
-[409314](https://judge.yosupo.jp/submission/409314) (current `main.cpp`, #146).
+Record when opened (issue #37): 117 ms. Best judged: ours, 12 ms, no spike:
+[409321](https://judge.yosupo.jp/submission/409321) (`main.cpp` of #150). Earlier: 15 ms,
+[409314](https://judge.yosupo.jp/submission/409314) (#146). Current `main.cpp` (#163): 15 ms,
+[409362](https://judge.yosupo.jp/submission/409362).
 I/O floor (`lib/io/notes.md`): 4.18 ms, 3.88 with fixed-width output.
 
 Official tests: dim1 (one axis, n about 2^18, often with a large prime factor), dim2 (two axes,
@@ -89,6 +91,17 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
 - 2026-10-10, claude (issue #156): the local `fields.hpp` copy is gone; the solution includes
   `../convolution_mod/fields.hpp` (it was byte-identical). `main.cpp` changes in one comment line; the
   judge's command builds byte-identical executables from main's and this `main.cpp` (`lc-amd`).
+- 2026-10-10, audit (claude): submissions not logged before. Who submitted them is not recorded.
+  "clean" is the score without launch spikes (`tools/spikes.py`), where it differs.
+  - `main.cpp` of #150, 2026-10-09 UTC:
+    [409319](https://judge.yosupo.jp/submission/409319) 23:45 AC 19 ms, 16.9 MiB, clean 11
+    (spikes on dim1_02 and dim2_00); [409320](https://judge.yosupo.jp/submission/409320) 23:46
+    AC 15 ms, 16.6 MiB; [409321](https://judge.yosupo.jp/submission/409321) 23:46 AC 12 ms,
+    16.5 MiB (linked from README.md before, not from here). With 409317-409318: 5/5.
+  - Current `main.cpp` (#163), 2026-10-10 UTC:
+    [409352](https://judge.yosupo.jp/submission/409352) 01:56 AC 17 ms, 17.3 MiB;
+    [409362](https://judge.yosupo.jp/submission/409362) 01:58 AC 15 ms, 17.3 MiB.
+  - New best judged: 12 ms (409321); was 15 (409314).
 - Next: dim2_01 still pays ~0.5 ms for gather and scatter over dim1. The transforms (about
   6.5 ms) are the floor of this method; a gain there needs faster lib/ntt kernels.
 

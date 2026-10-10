@@ -13,3 +13,6 @@ Read two integers, print their sum. Baseline only; used to test the CI pipeline.
 - 2026-10-09, claude: submitted the `lib/io` `main.cpp`, [409231](https://judge.yosupo.jp/submission/409231):
   AC, 11 ms (1/5). One case at 11 ms, the rest at most 1 ms; every aplusb submission so far has one
   such case, so the judged time is that judge artifact, not the program (~1.1 ms on `lc-amd`).
+- 2026-10-10, audit (claude): [409341](https://judge.yosupo.jp/submission/409341) (2026-10-10 01:47 UTC)
+  was not logged before; who submitted it is not recorded. The `lib/io` `main.cpp` (#18, as 409231):
+  AC 1 ms, 0.8 MiB; no case above 1 ms.

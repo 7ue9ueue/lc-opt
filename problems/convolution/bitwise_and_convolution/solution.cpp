@@ -9,11 +9,11 @@
 // product and the inverse row-bit levels; each row then gets its inverse low levels, and the
 // band's values are printed as they become ready.
 #include <sys/mman.h>
-#include <unistd.h>
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/io/sequential.hpp"
+#include "lib/run/early.hpp"
 #include "../convolution_mod/fields.hpp"
 #include "../text_buffer.hpp"
 
@@ -247,17 +247,6 @@ void solve() {
         print_band(out, a + row_offset(r, block), band_rows, block, std::min(band_rows * block, total), block_log, text);
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here), and _exit skips their teardown.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

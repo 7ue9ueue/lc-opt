@@ -287,8 +287,8 @@ a[k] = [x^(n-1)] g^k for k < n, g[0] = 0 (`projection.hpp`): sum_k a[k] y^k = [x
 with P_0 = x^(m-n), Q_0 = 1 - y g, m = 2^T >= max(n, 128); n <= 32 from the powers of g.
 - Levels as Composition: Q_(s+1)(x^2) = Q_s(x) Q_s(-x) mod x^L and P_(s+1)(x^2) x = the odd part
   of P_s(x) Q_s(-x) mod x^L keep [x^(L-1)] P_s / Q_s; P_s has rows 0 .. Y - 1. Forward only: P
-  rides along, no level is stored (2 arrays of 4m instead of T).
-- Generic level (1 .. T - 3): transform of P_s at 4m (plain bottom), then of Q_s with
+  rides along, no level is stored: 2 arrays of 4m (the last levels' spans reuse them) and Tables.
+- Generic level (2 .. T - 3): transform of P_s at 4m (plain bottom), then of Q_s with
   `ProjectionBottom`: per leaf pair (moduli z^8 -+ s) the leaves of V (Graeffe, as LevelBottom)
   and of W = the odd part of P(z) Q(-z) = Po Qe - Pe Qo mod (u^4 -+ s), 32 products per leaf;
   the wrapped terms use t c_j (6 Shoup products per leaf set, shared with the Graeffe), so each
@@ -306,12 +306,16 @@ with P_0 = x^(m-n), Q_0 = 1 - y g, m = 2^T >= max(n, 128); n <= 32 from the powe
   than lib/ntt's asm, which has no stride separate from its count); groups below 64 vectors
   (forward) and 16 (inverse) run unpruned.
 - Level 0: Graeffe of g at 2m (LevelBottom); P_1 = [e odd] u^((e-1)/2) - y W, W[i] = (-1)^j g_j for
-  j = 2i + 1 - e, e = m - n: a shift. Levels T - 2 and T - 1 one-dimensional in y, from level
+  j = 2i + 1 - e, e = m - n: a shift. Level 1 one-dimensional too (Q_1 = 1 + y q1 + y^2 q2,
+  P_1 = p0 + y p1, p0 a monomial): 1-D transforms of q1, q2, p1 at m, then per leaf pair
+  (`FirstLevelProducts`) G(q1), G(q2), E(q1, q2), O(p1, q1), O(p1, q2) (G = a(x) a(-x), E and O
+  the even and odd parts of a(x) b(-x)), inverses at m/2 (lower half), and Q_2, P_2 assembled
+  in level 2's layout; ~50 against 101 µs for the generic level. Levels T - 2 and T - 1
+  one-dimensional in y, from level
   T - 3's V and W at stride 8: a = r3 + r1 (c1^2 - 2 c2), r1 = p1 + p0 c1,
   r3 = p3 + p2 c1 + p1 c2 + p0 c3 (c_k = (-1)^k q_k): products of length m/2, the last of m.
-- Costs at m = 8192 (`lc-amd`, in process, µs, before #170): power_projection ~1220; per generic
-  level P forward 26, Q forward with the bottom 62 (bottom ~35), two inverses 22; level 0 42;
-  last levels 100.
+- Costs at m = 8192 (`lc-amd`, in process, µs): power_projection ~1180; per generic level P
+  forward 26, Q forward with the bottom 58 (bottom ~33), two inverses 22; last levels 100.
 
 ## Compositional inverse
 
@@ -636,7 +640,13 @@ products 1.77 and 1.69).
   for n = 1 .. 100, f = x, c x, x / (1 - x), f shorter than n, up to 2^17 by f(g) = g(f) = x
   (compose). Scratch filled with garbage first.
 - Steps and measurements: problems/polynomial/compositional_inverse_of_formal_power_series/notes.md.
-  In process at N = 8000: 1759 -> ~1490 µs; whole process 3.00 -> 2.77 ms (floor 1.22).
+  In process at N = 8000: 1759 -> ~1490 µs; whole process 3.00 -> 2.77 ms (floor 1.22). Merged
+  as #174; judged 409373 AC 9 ms with a launch spike, clean 2 ms (record 14 ms).
+- Then: the last levels' spans inside the two 4m arrays (62K words less; with 4 KiB pages the
+  whole process 3.00 -> 2.89 ms, with huge pages neutral) and level 1 one-dimensional
+  (`FirstLevelProducts`; `product_sums` takes the parity, for E): in process 1492 -> 1438 µs,
+  whole process 2.755 -> 2.697 ms (`lc-amd`), `lc-intel` 0.968. Tests: unchanged suites pass
+  (the projection tests cover n = 33 .. 2^17 + 1, so levels 0 and 1 for odd and even e).
 - In-process A/B of two library versions: the same source compiled twice with
   `-Dpoly=polyA -Dntt=nttA` (and B) against two lib/ copies, linked into one binary, alternating
   calls; stable where separate processes drifted 1.5x on `lc-amd` (other agents' builds).

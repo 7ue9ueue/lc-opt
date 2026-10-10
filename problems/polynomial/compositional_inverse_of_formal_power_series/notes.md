@@ -4,7 +4,9 @@ N <= 8000 coefficients of f (f[0] = 0, f[1] != 0) mod 998244353; print g with f(
 10 s. Slowest tests: max_random, max_identity and most random (N = 8000 or near). Small tests
 N <= 11.
 
-Best judged: none yet.
+Best judged: ours, 9 ms: [409373](https://judge.yosupo.jp/submission/409373) (`main.cpp` of #174),
+with a +9 ms launch spike on small_degree_02 (`tools/spikes.py`): clean score 2 ms; large cases
+2 ms.
 Record when opened (issue #68): 14 ms.
 
 ## Design
@@ -15,9 +17,9 @@ Record when opened (issue #68): 14 ms.
   `lib/poly/compositional_inverse.hpp`.
 - Power projection: Kinoshita and Li, forward direction (`lib/poly/projection.hpp`, design in
   lib/poly/notes.md, Power projection): composition.hpp's levels Q_s, with the numerator P_s
-  carried along, so no level is stored. m = 8192 for N = 8000: level 0 one-dimensional in x,
-  levels 1 .. 10 bivariate (Kronecker layout, transforms of length 4m), levels 11 and 12
-  one-dimensional in y.
+  carried along, so no level is stored. m = 8192 for N = 8000: levels 0 and 1 one-dimensional in
+  x, levels 2 .. 10 bivariate (Kronecker layout, transforms of length 4m), levels 11 and 12
+  one-dimensional in y. Scratch: two arrays of 4m and the tables (~80K words).
 - `lib/io` input and output, one `poly::Arena`, the program runs from `.preinit_array` (as
   composition_of_formal_power_series).
 
@@ -25,7 +27,7 @@ Record when opened (issue #68): 14 ms.
 
 `lc-amd`, whole process (judge's runner and flags; 15 interleaved rounds, score = slowest of
 max_random_00, max_random_03, random_04, max_identity_00): read and write only (main.cpp with
-g = f) 1.22 ms. main.cpp 2.77 ms.
+g = f) 1.22 ms. main.cpp 2.70 ms (#174's 2.76).
 
 ## Log
 
@@ -66,6 +68,22 @@ g = f) 1.22 ms. main.cpp 2.77 ms.
     rounds against `brute.cpp` (N <= 400, g(f) = x solved coefficient by coefficient); lib/poly
     tests at -O2 (native on `lc-intel`, x86-64-v3) and ASan/UBSan. A mutation (sign of W at level
     0) fails 1116 checks.
+  - Merged as #174 (CI: correctness only, no baseline). Submitted its `main.cpp`:
+    [409373](https://judge.yosupo.jp/submission/409373) AC 9 ms, 2.8 MiB, spike on
+    small_degree_02 (clean 2 ms, large cases all 2 ms); same file
+    [409376](https://judge.yosupo.jp/submission/409376) AC 14 ms, spikes on max_random_00 and
+    small_degree_08 (clean 3 ms, large cases 2-3 ms). P(clean run) 0.29.
+  - Not kept (in-process A/B against #174): P's pruned top level skipping its zero upper quarters
+    1.003; with `#pragma GCC unroll 2` on the pruned column loops too 1.011 (slower).
+  - Page faults: with `MADV_NOHUGEPAGE` (4 KiB pages) the whole process is 0.24 ms slower (3.00
+    against 2.76 ms; the floor is not: 1.22 against 1.24). Whether the judge gives huge pages is
+    unknown, so the last levels' 15 spans (62K words, ~60 pages) now live in the two 4m arrays,
+    after V and W are read: with huge pages 0.996, with 4 KiB pages 2.89 against 3.00 ms.
+  - Level 1 one-dimensional (from level 0's g and v, 1-D transforms of q1, q2, p1 at m, five
+    leaf-pair products G(q1), G(q2), E(q1, q2), O(p1, q1), O(p1, q2), inverses at m/2, lower
+    half; straight into level 2's layout): generic level 1 cost 101 us. Both steps against #174:
+    in process 1492 -> 1438 us (0.963); whole process 2.755 -> 2.697 ms (0.976), with 4 KiB pages
+    2.995 -> 2.831; `lc-intel` (`judge.py bench`, 21 rounds) 0.968.
 
 ## Sources
 

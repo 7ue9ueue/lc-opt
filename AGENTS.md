@@ -32,7 +32,7 @@ Solve every [Library Checker](https://judge.yosupo.jp) problem, then make each s
 - `lib/` modules have a small, documented API and their own tests.
 - Comments are short and rare: invariants, value ranges, overflow bounds, memory layout.
   No banner or essay comments.
-- Delete losing variants once they are logged. Git keeps the history.
+- Delete losing variants from the repo once they are logged. Their files stay in the exploration folder.
 
 ## Target
 
@@ -157,6 +157,11 @@ measurements in `notes.md`.
 
 - One agent per problem at a time. Each agent uses its own git worktree and branch: `<agent>/<problem>`.
 - Read `notes.md` first. Do not repeat a logged attempt without a new reason.
+- Keep every exploration file (variants, probes, scripts, results). Never put one in `/tmp`: VMs wipe it.
+  On a VM, work in `~/explore/<problem>/`. On the Mac, the folder is
+  `~/Documents/cpp_hpc/lc-opt-explore/<problem>/`. Before a round ends, copy each VM folder there,
+  into `<vm>/`. A VM can be lost; the Mac copy is the record. Only throwaway files (binaries,
+  generated inputs, `perf` data) may go to `/tmp`.
 - Log every attempt, win or loss: date, agent, idea, result, evidence.
 - `main.cpp` must stay a standalone file that can be submitted as is. It may be generated
   (e.g. by a Python script or from several files); commit the generator and the generated file.

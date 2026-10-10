@@ -94,17 +94,6 @@ template <std::size_t K, std::size_t C, std::size_t B>
     }
 }
 
-// r[i] = word i of each of r[0 .. 8): an 8 x 8 transpose.
-inline void transpose8(Vec (&r)[8]) {
-    Vec t[8], u[8];
-    for (int i = 0; i < 8; i += 2) t[i] = _mm256_unpacklo_epi32(r[i], r[i + 1]), t[i + 1] = _mm256_unpackhi_epi32(r[i], r[i + 1]);
-    for (int i = 0; i < 8; i += 4)
-        for (int k = 0; k < 2; ++k)
-            u[i + 2 * k] = _mm256_unpacklo_epi64(t[i + k], t[i + k + 2]), u[i + 2 * k + 1] = _mm256_unpackhi_epi64(t[i + k], t[i + k + 2]);
-    for (int i = 0; i < 4; ++i)
-        r[i] = _mm256_permute2x128_si256(u[i], u[i + 4], 0x20), r[i + 4] = _mm256_permute2x128_si256(u[i], u[i + 4], 0x31);
-}
-
 // Lanes: slot k holds the factors 1 - a x of points[8k .. 8k + 8) (canonical), Montgomery form.
 struct PointSlots {
     const std::uint32_t* points;
@@ -302,7 +291,7 @@ private:
 }  // namespace detail
 
 // The product tree of Q = prod (1 - a_i x) over points a_i, padded with zeros to a multiple of 8,
-// with every node's transform kept for descend().
+// with every node's transform kept for descend() and for derived trees (interpolation.hpp).
 class PointTree {
 public:
     // Arena words a PointTree for m >= 1 points takes, with its tables.
@@ -368,27 +357,14 @@ public:
     void descend(std::span<const std::uint32_t> w, std::span<std::uint32_t> values, std::uint32_t c, std::span<std::uint32_t> scratch) {
         using namespace detail;
         Stack stack(scratch);
-        const std::size_t lane_length = LaneLayout::length(std::uint32_t(count_)), stride = std::max<std::size_t>(8, lane_length);
-        std::uint32_t* const columns = stack.take(8 * stride);  // the lane products' windows, lane l at l stride
-        std::fill_n(columns, 8 * stride, 0);
-        const std::size_t length = StandardLayout::length(std::uint32_t(m8_));
-        std::uint32_t* const root = stack.take(length);
-        t_.forward(w, length - m8_, {root, length});
-        descend_top(0, 8, root, c, stack, columns, lane_length, stride);  // c as the inverse of a factor
-        std::uint32_t* const lanes = stack.take(8 * stride);  // word 8 i + l = coefficient i of lane l
-        for (std::size_t j = 0; j < stride; j += 8) {
-            Vec r[8];
-            for (std::size_t l = 0; l < 8; ++l) r[l] = load(columns + l * stride + j);
-            transpose8(r);
-            for (std::size_t i = 0; i < 8; ++i) store(lanes + 8 * (j + i), r[i]);
-        }
+        const std::size_t lane_length = LaneLayout::length(std::uint32_t(count_));
+        const LaneState root = lane_state(w, c, stack);
         BaseDescent base(slots_, values.data());
-        if (count_ <= LaneLayout::kBase) return base.run(0, count_, lanes + 8 * (lane_length - count_));
-        t_.forward({lanes, 8 * lane_length}, 0, {lanes, 8 * lane_length});
-        descend_lanes(0, count_, lanes, 1, stack, base);
+        if (count_ <= LaneLayout::kBase) return base.run(0, count_, root.state + 8 * (lane_length - count_));
+        descend_lanes(0, count_, root.state, root.u, stack, base);
     }
 
-private:
+protected:
     using LaneTree = ProductTree<LaneLayout, detail::PointSlots, detail::TransformStore::Keeper>;
     using TopTree = ProductTree<StandardLayout, detail::LaneProducts, detail::TransformStore::Keeper>;
 
@@ -430,10 +406,48 @@ private:
         }
     }
 
+    // The lane tree's root from the root's window w (m8 coefficients) times c, by the descent
+    // through the top tree, in 8 max(8, lane_length) words from the stack (the rest of the
+    // descent's scratch is released). Above kBase slots: its state (a lanes transform: the top
+    // leaves' windows halved, then converted) and u. Else the windows' coefficients, lane l's
+    // right-aligned in lane_length, word 8 i + l (lanes layout), and u = 1.
+    struct LaneState {
+        std::uint32_t* state;
+        std::uint32_t u;
+    };
+
+    LaneState lane_state(std::span<const std::uint32_t> w, std::uint32_t c, detail::Stack& stack) {
+        using namespace detail;
+        const std::size_t lane_length = LaneLayout::length(std::uint32_t(count_)), stride = std::max<std::size_t>(8, lane_length);
+        const bool transform = count_ > LaneLayout::kBase;  // then the leaves' parents have length 2 lane_length
+        std::uint32_t* const lanes = stack.take(8 * stride);
+        const std::size_t mark = stack.mark();
+        std::uint32_t* const columns = stack.take(8 * stride);  // the leaves' windows or transforms, leaf l at l stride
+        if (!transform) std::fill_n(columns, 8 * stride, 0);
+        const std::size_t length = StandardLayout::length(std::uint32_t(m8_));
+        std::uint32_t* const root = stack.take(length);
+        t_.forward(w, length - m8_, {root, length});
+        std::uint32_t u = 1;
+        descend_top(0, 8, root, c, stack, columns, lane_length, stride, transform ? &u : nullptr);  // c as the inverse of a factor
+        if (transform) {
+            t_.standard_to_lanes(columns, stride, lane_length, lanes);
+        } else {
+            for (std::size_t j = 0; j < stride; j += 8) {
+                Vec r[8];
+                for (std::size_t l = 0; l < 8; ++l) r[l] = load(columns + l * stride + j);
+                transpose8(r);
+                for (std::size_t i = 0; i < 8; ++i) store(lanes + 8 * (j + i), r[i]);
+            }
+        }
+        stack.release(mark);
+        return {lanes, u};
+    }
+
     // Node [lo, hi) of the top tree with state s and u = 1 / f_v; the leaves' windows,
-    // right-aligned in lane_length coefficients, into columns.
+    // right-aligned in lane_length coefficients, into columns; or with leaf_u, the transforms of
+    // length lane_length of the leaves' halved states, their u into leaf_u (the same for all).
     void descend_top(std::size_t lo, std::size_t hi, const std::uint32_t* s, std::uint32_t u, detail::Stack& stack,
-                     std::uint32_t* columns, std::size_t lane_length, std::size_t stride) {
+                     std::uint32_t* columns, std::size_t lane_length, std::size_t stride, std::uint32_t* leaf_u) {
         const TopTree& tree = *top_;
         const std::size_t length = StandardLayout::length(tree.degree(lo, hi)), mid = tree.split(lo, hi);
         const std::size_t sides[2][2] = {{lo, mid}, {mid, hi}};
@@ -442,17 +456,21 @@ private:
             const std::size_t mark = stack.mark();
             std::uint32_t* const p = stack.take(length);
             t_.leaf_products(s, top_store_.pair(mid) + (1 - side) * Arena::footprint(length), {p, length});
-            if (xhi - xlo == 1) {
+            if (xhi - xlo == 1 && leaf_u) {
+                halve(p, length);
+                std::copy_n(p, lane_length, columns + xlo * stride);
+                *leaf_u = half(u);
+            } else if (xhi - xlo == 1) {
                 coefficients(p, length, u);
                 std::copy_n(p + length - lane_length, lane_length, columns + xlo * stride);
             } else if (2 * inner == length) {
                 halve(p, length);
-                descend_top(xlo, xhi, p, half(u), stack, columns, lane_length, stride);
+                descend_top(xlo, xhi, p, half(u), stack, columns, lane_length, stride, leaf_u);
             } else {
                 coefficients(p, length, u);
                 std::uint32_t* const q = stack.take(inner);
                 t_.forward({p + length - inner, inner}, 0, {q, inner});
-                descend_top(xlo, xhi, q, 1, stack, columns, lane_length, stride);
+                descend_top(xlo, xhi, q, 1, stack, columns, lane_length, stride, leaf_u);
             }
             stack.release(mark);
         }

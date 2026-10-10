@@ -58,3 +58,11 @@ issue_1287_cpp_00, random_02.
     2^17-2^18 words, ~0.3-0.5 ms, estimate); the halving's combine pass fused into the next
     products (~0.08 ms). Considered: log.hpp's blocked division (B = 4) saves ~1.5 transforms
     of 2^17 against 1 more leaf product pass, ~0.1 ms.
+- 2026-10-10, claude (issue #77, polynomial_interpolation round 1; lib/poly/evaluation.hpp):
+  the descent through the top tree moved into `PointTree::lane_state`, which takes its output
+  first and releases its scratch, then halves the top leaves and turns their standard transforms
+  into the lane root's state in the transform domain (`TreeTransform::standard_to_lanes`: 8 x 8
+  transposes and 3 radix-2 levels per 8 vectors) instead of coefficients, transposes and a lanes
+  forward. `judge.py bench` against main 0.9928 (14.61 -> 14.50 ms) and 0.9960 (15.17 -> 15.07
+  ms), 21 rounds each, `lc-amd`. 11/11 official tests; ASan/UBSan on all 11, file and pipe input
+  (`lc-intel`).

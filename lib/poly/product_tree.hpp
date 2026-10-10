@@ -79,6 +79,17 @@ inline void inverse_small(Vec* f, std::size_t m, std::size_t k, const std::uint3
     }
 }
 
+// r[i] = word i of each of r[0 .. 8): an 8 x 8 transpose.
+inline void transpose8(Vec (&r)[8]) {
+    Vec t[8], u[8];
+    for (int i = 0; i < 8; i += 2) t[i] = _mm256_unpacklo_epi32(r[i], r[i + 1]), t[i + 1] = _mm256_unpackhi_epi32(r[i], r[i + 1]);
+    for (int i = 0; i < 8; i += 4)
+        for (int k = 0; k < 2; ++k)
+            u[i + 2 * k] = _mm256_unpacklo_epi64(t[i + k], t[i + k + 2]), u[i + 2 * k + 1] = _mm256_unpackhi_epi64(t[i + k], t[i + k + 2]);
+    for (int i = 0; i < 4; ++i)
+        r[i] = _mm256_permute2x128_si256(u[i], u[i + 4], 0x20), r[i + 4] = _mm256_permute2x128_si256(u[i], u[i + 4], 0x31);
+}
+
 // Montgomery product of scalars: x y / 2^32 mod P.
 inline std::uint32_t montgomery_scalar(std::uint32_t x, std::uint32_t y) {
     constexpr std::uint32_t kInverseR = ntt::detail::power(kR, kP - 2);
@@ -274,10 +285,71 @@ public:
         }
     }
 
+    // out (8 n words) = the lanes transform of the 8 polynomials whose standard transforms (n words
+    // each, 8 <= n <= 2^(lg_max - 3)) are at in + l stride. Leaf p of a standard transform is the
+    // polynomial mod (x^8 - w_p), whose roots are w_(8p) .. w_(8p+7); word 8 q + l of a lanes
+    // transform is polynomial l at w_q. Per 8 vectors: an 8 x 8 transpose, the radix-2 step from
+    // x^8 - w_p to x^4 - w_(2p), x^4 - w_(2p+1) (w_(2p) = r[p] = -w_(2p+1)), then the radix-4
+    // groups 2p and 2p + 1 at h = 1, as the transforms' bottoms.
+    void standard_to_lanes(const std::uint32_t* in, std::size_t stride, std::size_t n, std::uint32_t* out) const {
+        using namespace detail;
+        for (std::size_t p = 0; p < n / 8; ++p) {
+            Vec f[8];
+            for (std::size_t l = 0; l < 8; ++l) f[l] = load(in + l * stride + 8 * p);
+            transpose8(f);
+            const Factor z = entry(roots_, p);
+            Vec lo[4], hi[4];
+            for (std::size_t t = 0; t < 4; ++t) {
+                const Vec zb = times(f[t + 4], z);
+                lo[t] = add(f[t], zb), hi[t] = diff(f[t], zb);  // < 3P
+            }
+            forward_h1(lo, Group(roots_, 2 * p));  // < 4P
+            forward_h1(hi, Group(roots_, 2 * p + 1));
+            for (std::size_t t = 0; t < 4; ++t) store(out + 64 * p + 8 * t, canonical(lo[t])), store(out + 64 * p + 32 + 8 * t, canonical(hi[t]));
+        }
+    }
+
+    // Standard layout: out = a b + c d leaf by leaf (canonical, times 2^-32), n = out.size()
+    // words. out may be an operand.
+    void leaf_product_sums(const std::uint32_t* a, const std::uint32_t* b, const std::uint32_t* c, const std::uint32_t* d,
+                           std::span<std::uint32_t> out) const {
+        using namespace detail;
+        const std::size_t leaves = out.size() / 8;
+        Window window[2][2];
+        fill_window(window[0][0], load(a), leaf_weight(roots_, 0));
+        fill_window(window[0][1], load(c), leaf_weight(roots_, 0));
+        for (std::size_t p = 0; p < leaves; ++p) {
+            if (p + 1 < leaves) {
+                const Factor w = leaf_weight(roots_, p + 1);
+                fill_window(window[(p + 1) & 1][0], load(a + 8 * p + 8), w);
+                fill_window(window[(p + 1) & 1][1], load(c + 8 * p + 8), w);
+            }
+            const Vec ab = leaf_product(window[p & 1][0], b + 8 * p), cd = leaf_product(window[p & 1][1], d + 8 * p);  // < 2P each
+            store(out.data() + 8 * p, canonical(add(ab, cd)));
+        }
+    }
+
     // Lanes: out = a b / 2^32 word by word (canonical). out may be a or b.
     static void pointwise_products(const std::uint32_t* a, const std::uint32_t* b, std::span<std::uint32_t> out) {
         using namespace detail;
         for (std::size_t i = 0; i < out.size(); i += 8) store(out.data() + i, reduce(montgomery(load(a + i), load(b + i)), kP));
+    }
+
+    // Lanes: out = (a b + c d) / 2^32 word by word (canonical), operands canonical: a b + c d +
+    // (Montgomery term) < 2 P^2 + 2^32 P, so the quotient is below 1.47 P. out may be an operand.
+    static void pointwise_product_sums(const std::uint32_t* a, const std::uint32_t* b, const std::uint32_t* c, const std::uint32_t* d,
+                                       std::span<std::uint32_t> out) {
+        using namespace detail;
+        const Vec ni = broadcast(ntt::kernels::kNI), p = broadcast(kP);
+        for (std::size_t i = 0; i < out.size(); i += 8) {
+            const Vec x = load(a + i), y = load(b + i), z = load(c + i), w = load(d + i);
+            Vec even = _mm256_add_epi64(_mm256_mul_epu32(x, y), _mm256_mul_epu32(z, w));
+            Vec odd = _mm256_add_epi64(_mm256_mul_epu32(_mm256_srli_epi64(x, 32), _mm256_srli_epi64(y, 32)),
+                                       _mm256_mul_epu32(_mm256_srli_epi64(z, 32), _mm256_srli_epi64(w, 32)));
+            even = _mm256_add_epi64(even, _mm256_mul_epu32(_mm256_mul_epu32(even, ni), p));
+            odd = _mm256_add_epi64(odd, _mm256_mul_epu32(_mm256_mul_epu32(odd, ni), p));
+            store(out.data() + i, reduce(_mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA), kP));
+        }
     }
 
 private:
@@ -566,14 +638,7 @@ inline void lane_columns(const std::uint32_t* c, std::size_t count, const std::u
     for (std::size_t j = 0; j < longest; j += 8) {
         Vec r[8];
         for (std::size_t i = 0; i < 8; ++i) r[i] = j + i < count ? load(c + 8 * (j + i)) : _mm256_setzero_si256();
-        // 8 x 8 transpose: r[l] = lane l of the vectors j .. j + 7.
-        Vec t[8], u[8];
-        for (int i = 0; i < 8; i += 2) t[i] = _mm256_unpacklo_epi32(r[i], r[i + 1]), t[i + 1] = _mm256_unpackhi_epi32(r[i], r[i + 1]);
-        for (int i = 0; i < 8; i += 4)
-            for (int k = 0; k < 2; ++k)
-                u[i + 2 * k] = _mm256_unpacklo_epi64(t[i + k], t[i + k + 2]), u[i + 2 * k + 1] = _mm256_unpackhi_epi64(t[i + k], t[i + k + 2]);
-        for (int i = 0; i < 4; ++i)
-            r[i] = _mm256_permute2x128_si256(u[i], u[i + 4], 0x20), r[i + 4] = _mm256_permute2x128_si256(u[i], u[i + 4], 0x31);
+        transpose8(r);  // r[l] = lane l of the vectors j .. j + 7
         for (int l = 0; l < 8; ++l)
             if (j < size[l]) store_unaligned(out[l] + j, r[l]);
     }

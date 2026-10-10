@@ -1,7 +1,7 @@
 // Tests for lib/poly against O(n^2) references: transforms leaf by leaf against their definition,
 // products against schoolbook multiplication, the inverse, exp, log, power and sqrt against their recurrences,
 // composition against Horner's rule and identities, product trees against naive products, chirps
-// against their recurrence, multipoint evaluation against Horner's rule, coefficient-wise
+// against their recurrence, multipoint evaluation and interpolation against Horner's rule, coefficient-wise
 // operations against scalar code. Long results are checked at random coefficients (each an O(n)
 // sum).
 #include <algorithm>
@@ -20,6 +20,7 @@
 #include "lib/poly/evaluation.hpp"
 #include "lib/poly/exp.hpp"
 #include "lib/poly/holonomic.hpp"
+#include "lib/poly/interpolation.hpp"
 #include "lib/poly/inverse.hpp"
 #include "lib/poly/log.hpp"
 #include "lib/poly/pow.hpp"
@@ -1781,6 +1782,141 @@ void test_evaluation() {
     for (int trial = 0; trial < 40; ++trial) check_evaluation(1 + pick(20000), 1 + pick(20000), trial % 4);
 }
 
+// Interpolation (interpolation.hpp).
+
+// TreeTransform's layout conversion and sums of products, 8 .. 2^13 words per polynomial:
+// standard_to_lanes of the standard transforms of 8 polynomials against their lanes transform;
+// leaf_product_sums and pointwise_product_sums against the sums of the products (Montgomery form).
+void test_tree_layouts() {
+    constexpr std::size_t kWords = (1 << 16) + 128;  // 8 columns of 2^13 words, 16 apart
+    static poly::Arena arena(poly::TreeTransform::words(16) + 8 * poly::Arena::footprint(kWords));
+    static const poly::TreeTransform t(arena, 16);
+    static std::span<u32> buf[8] = {arena.take(kWords), arena.take(kWords), arena.take(kWords), arena.take(kWords),
+                                    arena.take(kWords), arena.take(kWords), arena.take(kWords), arena.take(kWords)};
+    for (int lg = 3; lg <= 13; ++lg) {
+        const std::size_t n = std::size_t(1) << lg;
+        for (int kind = 0; kind < 3; ++kind) {
+            const auto lanes = buf[0].first(8 * n), standard = buf[1].first(8 * n + 16 * 7), out = buf[3].first(8 * n);
+            const std::size_t stride = n + 16 * (kind == 1);
+            for (std::size_t l = 0; l < 8; ++l) {
+                const auto f = random_poly(n, kind);
+                for (std::size_t i = 0; i < n; ++i) lanes[8 * i + l] = f[i];
+                const auto single = standard.subspan(l * stride, n);
+                std::copy(f.begin(), f.end(), single.begin());
+                t.forward(single, 0, single);
+            }
+            t.forward(lanes, 0, lanes);
+            t.standard_to_lanes(standard.data(), stride, n, out.data());
+            expect(std::equal(out.begin(), out.end(), lanes.begin()), "standard_to_lanes", lg, kind);
+
+            std::vector<u32> x[4];
+            std::span<u32> tx[4];
+            for (int k = 0; k < 4; ++k) {
+                x[k] = random_poly(n, (kind + k) % 3);
+                tx[k] = buf[4 + k].first(n);
+                for (std::size_t i = 0; i < n; ++i) tx[k][i] = to_m(x[k][i]);
+            }
+            poly::TreeTransform::pointwise_product_sums(tx[0].data(), tx[1].data(), tx[2].data(), tx[3].data(), out.first(n));
+            bool ok = true;
+            for (std::size_t i = 0; i < n; ++i) ok &= out[i] == to_m(add(mul(x[0][i], x[1][i]), mul(x[2][i], x[3][i])));
+            expect(ok, "pointwise_product_sums", lg, kind);
+            for (int k = 0; k < 4; ++k) t.forward(tx[k], 0, tx[k]);
+            t.leaf_product_sums(tx[0].data(), tx[1].data(), tx[2].data(), tx[3].data(), out.first(n));
+            t.inverse(out.first(n), out.first(n));
+            ok = true;
+            for (std::size_t i : {std::size_t(0), n - 1, pick(n), pick(n)})
+                ok &= from_m(out[i]) == add(cyclic_coefficient(x[0], x[1], i), cyclic_coefficient(x[2], x[3], i));
+            expect(ok, "leaf_product_sums", lg, kind);
+        }
+    }
+}
+
+// cross_lanes against scalar sums: every n, k <= 16 (loops), and the unrolled and blocked versions
+// for n = k = 1 .. 16; coefficients random, 0 or near P - 1.
+void test_cross_lanes() {
+    alignas(32) static u32 a[8 * 16], b[8 * 16], c[8 * 17], d[8 * 17], out[8 * 32];
+    const u32 inverse_r = power(to_m(1), P - 2);
+    namespace pd = poly::detail;
+    for (int kind = 0; kind < 3; ++kind) {
+        const auto value = [kind] { return kind == 2 ? P - 1 - u32(rng() % 1024) : kind == 1 && rng() % 2 ? 0 : u32(rng() % P); };
+        for (auto* v : {a, b}) std::generate_n(v, 8 * 16, value);
+        for (auto* v : {c, d}) std::generate_n(v, 8 * 17, value);
+        const auto check = [&](std::size_t n, std::size_t k, const char* what) {
+            bool ok = true;
+            for (std::size_t l = 0; l < 8; ++l)
+                for (std::size_t t = 0; t < n + k; ++t) {
+                    u32 s = 0;
+                    for (std::size_t i = 0; i < n; ++i)
+                        if (t >= i && t - i <= k) s = add(s, mul(a[8 * i + l], d[8 * (t - i) + l]));
+                    for (std::size_t i = 0; i < k; ++i)
+                        if (t >= i && t - i <= n) s = add(s, mul(b[8 * i + l], c[8 * (t - i) + l]));
+                    ok &= out[8 * t + l] == mul(s, inverse_r);
+                }
+            expect(ok, what, n, k);
+        };
+        for (std::size_t n = 1; n <= 16; ++n)
+            for (std::size_t k = 1; k <= 16; ++k) {
+                pd::cross_lanes(a, n, b, k, c, d, out);
+                check(n, k, "cross_lanes");
+            }
+        pd::cross_lanes<1>(a, b, c, d, out), check(1, 1, "cross_lanes<D>");
+        pd::cross_lanes<2>(a, b, c, d, out), check(2, 2, "cross_lanes<D>");
+        pd::cross_lanes<4>(a, b, c, d, out), check(4, 4, "cross_lanes<D>");
+        pd::cross_lanes<8>(a, b, c, d, out), check(8, 8, "cross_lanes<D>");
+        pd::cross_lanes<5, 3>(a, b, c, d, out), check(5, 5, "cross_lanes<D, B>");
+        pd::cross_lanes<16, 2>(a, b, c, d, out), check(16, 16, "cross_lanes<D, B>");
+    }
+}
+
+// m distinct points of a kind: random, 0 .. m - 1 shuffled, near P - 1, 0 and random.
+std::vector<u32> distinct_points(std::size_t m, int kind) {
+    std::vector<u32> a;
+    if (kind == 1 || kind == 2) {
+        for (std::size_t i = 0; i < m; ++i) a.push_back(kind == 1 ? u32(i) : P - 1 - u32(i));
+        std::shuffle(a.begin(), a.end(), rng);
+        return a;
+    }
+    while (a.size() < m) {
+        for (std::size_t i = a.size(); i < m; ++i) a.push_back(u32(rng() % P));
+        std::sort(a.begin(), a.end());
+        a.erase(std::unique(a.begin(), a.end()), a.end());
+    }
+    std::shuffle(a.begin(), a.end(), rng);
+    if (kind == 3) a[pick(m)] = 0, std::sort(a.begin(), a.end()), a.erase(std::unique(a.begin(), a.end()), a.end());
+    return a;
+}
+
+// interpolate() against the points' values by Horner's rule (all of them, or 42 when m is large).
+void check_interpolation(std::size_t m, int kind) {
+    const auto points = distinct_points(m, kind);
+    m = points.size();
+    const auto values = random_poly(m, kind % 3);
+    std::vector<u32> c(m);
+    poly::Arena arena(poly::interpolate_words(m));
+    poly::interpolate(arena, points, values, c);
+    std::vector<std::size_t> at;
+    if (m <= 2048) {
+        for (std::size_t i = 0; i < m; ++i) at.push_back(i);
+    } else {
+        at = {0, m - 1};
+        for (int i = 0; i < 40; ++i) at.push_back(pick(m));
+    }
+    bool ok = true;
+    for (std::size_t i : at) ok &= evaluate(c, points[i]) == values[i];
+    expect(ok, "interpolate", m, kind);
+}
+
+void test_interpolation() {
+    test_tree_layouts();
+    test_cross_lanes();
+    for (std::size_t m = 1; m <= 80; ++m) check_interpolation(m, int(m % 4));
+    for (std::size_t m : {255, 256, 257, 263, 264, 265, 511, 512, 513, 520, 1000, 1024, 1025, 2047, 2048, 2049, 4095, 4096, 4097})
+        for (int kind = 0; kind < 4; ++kind) check_interpolation(m, kind);
+    for (std::size_t m : {65537, 100000, (1 << 17) - 1, 1 << 17})
+        for (int kind = 0; kind < 4; ++kind) check_interpolation(m, kind);
+    for (int trial = 0; trial < 30; ++trial) check_interpolation(1 + pick(20000), trial % 4);
+}
+
 int main() {
     static Fixture fx;
     test_leaf_kernels(fx);
@@ -1804,6 +1940,7 @@ int main() {
     test_product_tree(fx);
     test_chirp();
     test_evaluation();
+    test_interpolation();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

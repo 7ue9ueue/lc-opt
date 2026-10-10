@@ -1703,6 +1703,9 @@ product-tree lanes):
 - `.text` (judge flags, `lc-amd`): +2.7 to +6 KB in 16 bundles (the two kernels, `below`,
   `forward_top8`); polynomial_root_finding's `solve()` 17930 -> 15655 bytes (inlining); 5 bundles
   identical (no `Transform::run`).
+- Merged as #334. CI (each problem the geomean over 3 machines): log 0.9867, pow 0.9931,
+  division 0.9931, exp 0.9942, sqrt 0.9963, composition 0.9967, newton 0.9967, multipoint
+  0.9968; the other 14 0.9973-1.0049 (identical `.text`: 0.9991-1.0049); all 22 0.9980.
 
 ## Sources
 

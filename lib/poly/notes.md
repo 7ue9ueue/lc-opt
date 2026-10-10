@@ -146,42 +146,50 @@ length n per step.
 ## Exp
 
 Newton from m to 2m, with g = exp(f) mod x^m, h = 1 / g mod x^(m/2) and H = T_m(h) (the previous
-step's transform of length 2m' = m), d = f', q = d mod x^(m-1):
+step's transform of length 2m' = m), q = x f' (so x g' = q g), Q = q mod x^m:
 - G_lo = T_m(g); e = (g h)[m/2, m) by `inverse_product` of G_lo and H, upper half;
   h[m/2, m) = -(x^(m/2) e h mod (x^m - 1))[m/2, m) by `cyclic_product` with H.
-- r = x q g mod (x^m - 1): T_m(r) = `forward_product` of x q with G_lo, then r by an
-  out-of-place `inverse`. As polynomials of degree < m, r = (g q - g') / x^(m-1) + x g', since
-  g' = g q mod x^(m-1).
+- r = Q g mod (x^m - 1): T_m(r) = `forward_product` of Q with G_lo, then r by an out-of-place
+  `inverse`. As polynomials of degree < m, r = (Q g)[m, 2m) + x g', since x g' = Q g mod x^m.
 - H = T_2m(h); T_2m(r) = [T_m(r), `forward_upper` of r]; t = h r mod x^m by `inverse_product`,
-  lower half. Then t exceeds h (g q - g') / x^(m-1) mod x^m by x h g' = x q mod x^m.
-- log g = integral of g'/g, g'/g = q - h (g q - g') mod x^(2m-1), so
-  s = (f - log g)[m, 2m) = (d[m-1+i] + t_i - d[i-1]) / (m + i): `divide_by_index` with a loader.
+  lower half. Then t exceeds h (Q g)[m, 2m) mod x^m by h x g' = Q mod x^m.
+- x g'/g = Q - x^m h (Q g)[m, 2m) mod x^(2m), so s = (f - log g)[m, 2m) =
+  (q[m + i] + t_i - Q_i) / (m + i): `divide_by_index` with a loader (aligned loads of q).
 - g[m, 2m) = g s mod x^m: G = T_2m(g) by `forward_upper`, `cyclic_product` of x^m s (in place at
   w[m, 2m)), upper half.
 - Per step 8 transforms of length 2m (in halves: T_m(g) 1, e 1, h 2, T_m(r) 1, r 1, T_2m(h) 2,
   upper half of T_2m(r) 1, t 2, upper half of T_2m(g) 1, g s 4) and 3.5 leaf products of that
   length.
-- Last step (m < n <= 2m, `detail::exp_last_step`): transforms of length m only, and h is not
-  extended. With h0 = h mod x^(m/2) (H from the previous step), G0 = T_m(g mod x^(m/2)) (the
-  previous step's G) and halves r0, r1, s0, s1:
-  - t = h r mod x^m = h0 r0 + x^(m/2) (h0 (r1 - e r0) mod x^(m/2)), since h = 1/g mod x^m =
-    h0 - x^(m/2) (h0 e mod x^(m/2)). Products: e (upper half of g h0), e r0 (lower half, after
-    T_m(e)), h0 (r1 - e r0) (lower half), h0 r0 (both halves); the division's loader adds the two
-    parts of t.
-  - (g s)[0, m/2) = (g0 s0)[0, m/2); (g s)[m/2, m) = upper half of the cyclic product
-    g s0 + g0 x^(m/2) s1 (one `inverse_product_sum` of T_m(g) T_m(s0) and G0 T_m(x^(m/2) s1)):
-    every product has degree < 3m/2, so nothing wraps into that half.
-  - 14 transforms and 8 leaf products of length m against 16 and 7 for a full step. When
-    n - m <= m/2 only the lower parts are computed (6 transforms, 3 leaf products).
-  - Transforms have length at most 2^(lg-1), so `exp_log` is one less than before and the
-    tables half as large.
-- In all about 15 T(n) + 7.5 LP(n) for n = 2^19 (inverse: 10 T + 4 LP).
-- Below 64 coefficients: the recurrence n g_n = sum_k k f_k g_(n-k); h mod x^32 by
+- Last step (m < n <= 2m, `detail::exp_last_step`): transforms of length m only, h not extended,
+  g in two blocks of B = m/2: g_k = g[kB, kB + B), q_k likewise, k = 2, 3. With h0 = h mod x^B
+  (H from the previous step) and G0 = T_m(g0) (the previous step's G):
+  - For G = g mod x^(kB), g = G exp(f - log G), so g_k = g0 (f - log G)[kB, kB + B) mod x^B.
+    x (f - log G)' = (q G - x G') / G, and x G' = q G mod x^(kB), so from kB on its coefficients
+    are those of (q G) h0: t = ((q mod x^(kB)) G)[kB, kB + B) h0 mod x^B + q_k (the part of q
+    from kB on contributes q_k G h0 = q_k mod x^B), and g_k = g0 (t / (kB + i)) mod x^B. Only
+    h0 is needed, at precision B.
+  - Block 2: r = Q G_lo mod (x^m - 1) as in a full step (both halves), t = r[0, B) h0 mod x^B -
+    q_0 + q_2 (x G' h0 = q mod x^B).
+  - Block 3: (q G)[3B, 4B) = r[B, 2B) - x G'[B, 2B) + the upper half of (T_m(g_2) T_m(Q) +
+    T_m(q_2) G_lo) mod (x^m - 1), one `inverse_product_sum`: the pairs of blocks whose product
+    reaches [3B, 4B) are (q_1, g_1) (in r), (q_0, g_2), (q_1, g_2) and (q_2, g_0), (q_2, g_1).
+  - 14 transforms and 7 leaf products of length m (a full step: 16 and 7; the previous last
+    step, with h extended to x^m inside t: 14 and 8). When n - m <= m/2 only block 2 runs
+    (7 transforms, 3 leaf products).
+  - Transforms have length at most 2^(lg-1), so `exp_log` is one less than the full length and
+    the tables half as large.
+- In all about 15 T(n) + 7 LP(n) for n = 2^19 (inverse: 10 T + 4 LP).
+- Below 64 coefficients: the recurrence n g_n = sum_k q[k] g[n - k]; h mod x^32 by
   `inverse_direct`.
-- f is only read by the first pass (into d = f'), so g may be f.
-- Scratch: d, G, w (2^lg words each), H, h (2^(lg-1)); `detail::exp_length(n)` is 2^lg.
-- Code: `exp` = `derivative` into d, `exp_direct`, then `detail::exp_newton` (the steps, from any
-  d and any g[0] != 0; `power` reuses it).
+- q = x f' (not f'): its blocks start at multiples of 8, so every load of q is aligned, a source
+  of a transform has no shift, and T_m(q_2) can be written over q mod x^m.
+- Memory: q below m = 2^(lg-1) in the scratch, from m on in g's own buffer (in place, f is read
+  first, so g may be f): the steps write g below m only, and the last step reads q_2, q_3 before
+  g_2, g_3 replace them. Scratch: q (2^(lg-1) words), G, w (2^lg each), H, h (2^(lg-1));
+  `detail::exp_length(n)` is 2^lg. 7 MB at N = 500000 (was 8): the problem's arena fits in 5
+  huge pages instead of 6.
+- Code: `exp` = `multiply_by_index` into q and g, `exp_direct`, then `detail::exp_newton` (the
+  steps, from any q and any g[0] != 0; `power` reuses it).
 
 ## Log
 
@@ -225,16 +233,18 @@ g = c (f / f[0])^e = c exp(e log(f / f[0])) mod x^n for residues e, c and f[0] !
 integer M >= 0 and n <= P, f^M = power(f, M mod P, f[0]^M): (f / f[0])^M has constant term 1,
 so only M mod P matters. Callers handle leading zeros (f = x^k u gives x^(kM) u^M). A square
 root is power(f, 1/2, sqrt(f[0])).
-- g solves g' = d g with g[0] = c and d = e f'/f. `detail::log_derivative` (log's blocked
-  division, any f[0] != 0) hands q = f'/f to a sink block by block; the sink stores e q into d.
-  Then `exp_direct` (times c) gives g mod x^64 and `detail::exp_newton` (exp's steps) the rest.
+- g solves x g' = q g with g[0] = c and q = e x f'/f. `detail::log_derivative` (log's blocked
+  division, any f[0] != 0) hands f'/f to a sink block by block; the sink stores e x f'/f as
+  exp_newton takes q: below exp_length(n) / 2 in the scratch, from there on in g (in place:
+  log_derivative no longer reads f there). Then `exp_direct` (times c) gives g mod x^64 and
+  `detail::exp_newton` (exp's steps) the rest.
   Every exp step is invariant under scaling g (h = 1 / g and g'/g follow), so g[0] = c costs
   nothing.
 - Against log then exp, this skips the integral of q (`divide_by_index`), exp's derivative and
   the passes f / f[0], times e, times c.
-- In place: log_derivative reads all of f before g is written.
-- Scratch: d (2^exp_log(n) words), then the larger of log_derivative's 2B buffers and
-  exp_newton's 3.5 buffers of length 2^exp_log(n). log_derivative_scratch counts at least 3
+- In place: the sink writes g only where log_derivative no longer reads f.
+- Scratch: q's lower part (2^exp_log(n) words), then the larger of log_derivative's 2B buffers
+  and exp_newton's 6 buffers of 2^exp_log(n) words. log_derivative_scratch counts at least 3
   buffers: for B = 1 (n <= 33, only power) the inverse's scratch follows T(h).
 - In process at N = 500000 (`lc-amd`, warm, medians of 11): log_derivative 9.93 ms (blocks
   4.32, 1.70, 1.97, 1.93; block 0 includes the inverse, T(h) and the forwards of W_t),
@@ -1600,6 +1610,27 @@ product-tree lanes):
   - Inverter half step at the start of each block: 1-2% slower.
 - Merged as #300. CI: exp 0.9904, log 0.9940, pow 0.9971, sqrt 0.9878; all 4 0.9923. exp
   sparse judged 6-7 ms per dense case (was 7), every run with a launch spike (log in its notes).
+
+2026-10-10, claude (issue #63, exp round 3; owner lane):
+- `exp.hpp`: the last step in two blocks of m/2 (Exp above): h is needed at precision m/2 only,
+  14 transforms and 7 leaf products of length m (was 14 and 8). q = x f' instead of f' (aligned
+  loads and sources); q below exp_length(n) / 2 in the scratch, the rest in g's own buffer
+  (`exp`, `power`): scratch 8 -> 7 MB at N = 500000. `pow.hpp` follows (sink into q and g).
+  Public signatures unchanged.
+- In process (`lc-bench`, in-process A/B, 41 alternating calls, N = 500000): exp warm 11.86 ->
+  11.59 ms (0.9773) with the blocks alone; with q in g 0.9808 warm, 0.9779 with a fresh arena
+  per call (12.09 -> 11.82 ms; one huge page less to fault); power warm 0.9914, fresh 0.9880.
+  Outputs equal. Last step 5.67 ms, full steps 5.83 ms (phases: lc-bench, warm).
+- `judge.py bench` (`lc-bench`, 21 rounds, new/main): exp 0.9803 (16.36 -> 16.04 ms), pow
+  0.9832, compositional_inverse 0.9988, compositional_inverse_large 0.9942.
+- Tests: `test.cpp` at -O2 and ASan/UBSan (`lc-amd`, native; `lc-intel`, x86-64-v3); 5
+  mutations of the last step (G0 for G_lo in the block-3 sum, x G' index off by one, block 3
+  without q_3, block 2 with q_0 shifted, block 3 without x G') fail them.
+- Counted, not kept: the last full step and the last step as one step from 2^17 in blocks of
+  2^17 (h extended to 2^17 first): ~3.1 against ~2.9 ms for the full step it replaces; a full
+  step in blocks plus the h update and the next step's transforms: 20 transforms and 9 leaf
+  products of length m against 16 and 7. Blocks need h only at their own size, but the next
+  step needs h at the full precision anyway.
 
 ## Sources
 

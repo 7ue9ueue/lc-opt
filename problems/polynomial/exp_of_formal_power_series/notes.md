@@ -13,12 +13,14 @@ Record when opened (issue #63): 38 ms.
 
 - `lib/poly/exp.hpp`: Newton iteration on g = exp(f) with h = 1/g kept at half precision,
   8 transforms of length 2m and 3.5 leaf products per step m -> 2m; the last step (m < N <= 2m)
-  with transforms of length m only: 14 and 8 of length m (lib/poly/notes.md, Exp).
+  with transforms of length m only, in two blocks of m/2 that need h at precision m/2 only:
+  14 transforms and 7 leaf products of length m (lib/poly/notes.md, Exp).
 - `lib/io` input (`io::read_bulk`, the transposed parser on Zen 3); output in 10-byte
   fixed-width fields (`problems/convolution/convolution_mod/fields.hpp`,
   judge-specific: the checker compares tokens). One `poly::Arena` (huge pages) for the tables,
-  g, the scratch and the text. f is read into g's array; exp runs in place.
-- The program runs from `.preinit_array` and ends with `_exit` (as inv_of_formal_power_series).
+  g, the scratch and the text: 9.4 MB at N = 500000, 5 huge pages. f is read into g's array;
+  exp runs in place and keeps x f' from 2^18 on in g's array until the last step replaces it.
+- The program runs from `.preinit_array` and ends with `_exit` (`lib/run/early.hpp`).
 
 ## Floor
 
@@ -105,6 +107,28 @@ this round 16.62. In process (N = 500000, warm): exp 11.74 ms, of which the last
     [409401](https://judge.yosupo.jp/submission/409401) AC 25 ms (2/5; spike on random_01,
     clean 16), [409402](https://judge.yosupo.jp/submission/409402) AC 16 ms, 16.5 MiB (3/5;
     no spike).
-- Next: the remaining time is transforms (~15 T(N)) and leaf products (~7.5 LP(N)), both
-  shared lib/poly kernels near their op-count bounds; page faults of the 8 MB scratch cost
-  ~0.34 ms (the last step's peak: G0, T_m(g), H, work, r, T_m(r0) of m words each, d of 2m).
+- 2026-10-10, claude (round 3; lib/poly owner lane, issue #95).
+  - Kept: the last step in two blocks of m/2 = 2^17 (lib/poly/notes.md, Exp). For G = g mod
+    x^(kB), g[kB, kB + B) = g0 (f - log G)[kB, kB + B) mod x^B, and the coefficients of
+    x (f - log G)' from kB on are those of (x f' G) h0: only h0 = 1/g mod x^B is needed. Block 2
+    reuses r = (x f' mod x^m) g mod (x^m - 1); block 3 adds the products with g_2 and
+    x f'[2B, 3B) in one `inverse_product_sum`. 14 transforms and 7 leaf products of length m
+    (was 14 and 8). In process (`lc-bench`, A/B, 41 calls): exp 11.86 -> 11.59 ms (0.9773).
+  - Kept: q = x f' instead of f', its part from 2^18 on kept in g's buffer (in place) until the
+    last step replaces it: scratch 8 -> 7 MB, the arena 10.4 -> 9.4 MB, 6 -> 5 huge pages. A/B
+    with a fresh arena per call 12.09 -> 11.82 ms (0.9779; warm 0.9808).
+  - Kept: `RUN_EARLY` from `lib/run/early.hpp` (same code as the old copy).
+  - Phases after (`lc-bench`, warm, ms): last step 5.67 (G_lo 0.30, T(q mod x^m) and r 0.79,
+    block 2 1.66, block 3 2.93), full steps 5.83; exp 11.64.
+  - Whole process (`judge.py bench`, `lc-bench`, 21 rounds, slowest 3 cases): main 16.36 ->
+    16.04 ms (0.9803); pow 0.9832, compositional_inverse 0.9988, compositional_inverse_large
+    0.9942.
+  - Checks: 26/26 official tests (`lc-amd`); `stress.py` 300 rounds; ASan/UBSan on all 26
+    official cases, file and pipe input; pow, compositional_inverse and its large version: all
+    official tests, `stress.py` 100 rounds, ASan/UBSan on all official cases; lib/poly tests.
+  - Counted, not built: fused top levels between consecutive products (inv's `step.hpp`; a
+    top pass costs ~0.01 ms at 2^18, as T(half-zero source) 0.288 against T(full) 0.299 ms);
+    direct writes of the halves into g instead of copies (all copies 0.08 ms).
+- Next: the remaining time is transforms (~15 T(N)) and leaf products (~7 LP(N)), both shared
+  lib/poly kernels near their op-count bounds. The full steps (5.8 ms) are 16 transforms and 7
+  leaf products of length m per step; block steps need fewer only without the h update.

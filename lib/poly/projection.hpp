@@ -117,20 +117,20 @@ template <int kParity>
 
 // tc[j] = t c[j] for j >= first (canonical), t = s per lane, or -s if kNegative; the rest zero.
 template <bool kNegative>
-[[gnu::always_inline]] inline void scaled_leaves(const Vec (&c)[8], const Factor& s, int first, Vec (&tc)[8]) {
+[[gnu::always_inline]] inline void scaled_leaves(const Vec (&c)[8], const Factors& s, int first, Vec (&tc)[8]) {
 #pragma GCC unroll 8
     for (int j = 0; j < 8; ++j) {
-        const Vec x = reduce(times_lanes(c[j], s), kP);
+        const Vec x = reduce(times(c[j], s), kP);
         tc[j] = j < first ? _mm256_setzero_si256() : kNegative ? negate(x) : x;
     }
 }
 
 // Leaves k .. k + 7 at out from x mod (u^4 - s) and y mod (u^4 + s): (x + y) + u^4 (x - y) / s,
 // twice their CRT, in [0, 2P).
-inline void combine_pairs(const Vec (&x)[4], const Vec (&y)[4], const Factor& inverse, std::uint32_t* out) {
+inline void combine_pairs(const Vec (&x)[4], const Vec (&y)[4], const Factors& inverse, std::uint32_t* out) {
     Vec r[8];
 #pragma GCC unroll 4
-    for (int i = 0; i < 4; ++i) r[i] = low(add(x[i], y[i])), r[i + 4] = times_lanes(diff(x[i], y[i]), inverse);
+    for (int i = 0; i < 4; ++i) r[i] = low(add(x[i], y[i])), r[i + 4] = times(diff(x[i], y[i]), inverse);
     transpose(r);
 #pragma GCC unroll 8
     for (int i = 0; i < 8; ++i) store(out + 8 * i, r[i]);
@@ -138,11 +138,8 @@ inline void combine_pairs(const Vec (&x)[4], const Vec (&y)[4], const Factor& in
 
 // s = r[k + lane] and its inverse, for 8 pairs from pair k (a multiple of 8).
 struct PairWeights {
-    Factor s{0}, inverse{0};
-    PairWeights(const Tables& tables, std::size_t k) {
-        s.w = load(tables.roots + slot(k)), s.q = load(tables.roots + slot(k) + 8);
-        inverse.w = load(tables.inverse_roots + slot(k)), inverse.q = load(tables.inverse_roots + slot(k) + 8);
-    }
+    Factors s, inverse;
+    PairWeights(const Tables& tables, std::size_t k) : s(entries(tables.roots, k)), inverse(entries(tables.inverse_roots, k)) {}
 };
 
 // The bottom of the forward transform of Q_s (length 4m): forward butterflies, then per pair of
@@ -177,7 +174,7 @@ struct ProjectionBottom {
 
     // V and W mod (u^4 - t) for t = s (or -s if kNegative) of the 8 leaves at q and p, times 2^-32.
     template <bool kNegative>
-    [[gnu::noinline, gnu::flatten]] static void leaves(const std::uint32_t* q, const std::uint32_t* p, const Factor& s,
+    [[gnu::noinline, gnu::flatten]] static void leaves(const std::uint32_t* q, const std::uint32_t* p, const Factors& s,
                                                        Vec (&v)[4], Vec (&w)[4]) {
         Vec c[8], a[8], tc[8];
         load_leaves(q, c), load_leaves(p, a);
@@ -205,7 +202,7 @@ struct FirstLevelProducts {
     }
 
     template <bool kNegative>
-    [[gnu::noinline, gnu::flatten]] void leaves(std::size_t at, const Factor& s, Vec (&r)[5][4]) const {
+    [[gnu::noinline, gnu::flatten]] void leaves(std::size_t at, const Factors& s, Vec (&r)[5][4]) const {
         Vec c1[8], c2[8], a[8], t1[8], t2[8];
         load_leaves(q1 + at, c1), load_leaves(q2 + at, c2), load_leaves(p1 + at, a);
         scaled_leaves<kNegative>(c1, s, 2, t1);
@@ -217,176 +214,6 @@ struct FirstLevelProducts {
         product_leaf<1>(a, c2, t2, r[4]);
     }
 };
-
-// Pruned transforms for the Kronecker layouts, in vectors of 8 coefficients. In the forward
-// transform of a level, vector bit b of the index (x = L, the padding bit) is zero in the input;
-// the levels above b (y) act on each column separately, so they skip the columns with bit b set,
-// and the level with bit b has half its inputs. In the inverse transforms of V and W only the
-// columns with bit b clear (x < L/2) are kept: the y levels compute those, the level with bit b
-// half its outputs. Levels below b are full (Recursion), and so are small groups (kForwardFull,
-// kInverseFull): the bottoms take at least 16 vectors, and narrow columns gain little.
-
-// Butterflies j < h of a radix-4 group (inputs at j + t h) on the columns with bit b of j clear.
-inline void forward_columns(std::uint32_t* a, std::size_t h, std::size_t b, const Group& w) {
-    const std::size_t width = std::size_t(1) << b;
-    for (std::size_t c = 0; c < h; c += 2 * width)
-        for (std::uint32_t* x = a + 8 * c; x < a + 8 * (c + width); x += 8) {
-            Vec f[4] = {load(x), load(x + 8 * h), load(x + 16 * h), load(x + 24 * h)};
-            forward_h1(f, w);
-            store(x, f[0]), store(x + 8 * h, f[1]), store(x + 16 * h, f[2]), store(x + 24 * h, f[3]);
-        }
-}
-
-// The same with inverse butterflies.
-inline void inverse_columns(std::uint32_t* a, std::size_t h, std::size_t b, const Group& w) {
-    const std::size_t width = std::size_t(1) << b;
-    for (std::size_t c = 0; c < h; c += 2 * width)
-        for (std::uint32_t* x = a + 8 * c; x < a + 8 * (c + width); x += 8) {
-            Vec f[4] = {load(x), load(x + 8 * h), load(x + 16 * h), load(x + 24 * h)};
-            inverse_h1(f, w);
-            store(x, f[0]), store(x + 8 * h, f[1]), store(x + 16 * h, f[2]), store(x + 24 * h, f[3]);
-        }
-}
-
-// forward_h1 with the inputs at 2h and 3h zero (high = true) or at h and 3h (high = false).
-inline void forward_half(std::uint32_t* a, std::size_t h, bool high, const Group& w) {
-    for (std::uint32_t* x = a; x < a + 8 * h; x += 8) {
-        const Vec u = low(load(x));
-        if (high) {
-            const Vec b = load(x + 8 * h), yb = times(b, w.y), zb = times(b, w.z);
-            store(x, add(u, yb)), store(x + 8 * h, diff(u, yb));
-            store(x + 16 * h, add(u, zb)), store(x + 24 * h, diff(u, zb));
-        } else {
-            const Vec xc = times(load(x + 16 * h), w.x), sum = low(add(u, xc)), difference = low_difference(u, xc);
-            store(x, sum), store(x + 8 * h, sum), store(x + 16 * h, difference), store(x + 24 * h, difference);
-        }
-    }
-}
-
-// inverse_h1 computing only the outputs at 0 and h (high = true: 2h and 3h unused) or at 0 and 2h.
-inline void inverse_half(std::uint32_t* a, std::size_t h, bool high, const Group& w) {
-    for (std::uint32_t* x = a; x < a + 8 * h; x += 8) {
-        const Vec f0 = load(x), f1 = load(x + 8 * h), f2 = load(x + 16 * h), f3 = load(x + 24 * h);
-        const Vec ab = low(add(f0, f1)), cd = low(add(f2, f3));
-        store(x, low(add(ab, cd)));
-        if (high) store(x + 8 * h, low(add(times(diff(f0, f1), w.y), times(diff(f2, f3), w.z))));
-        else store(x + 16 * h, times(diff(ab, cd), w.x));
-    }
-}
-
-// The pruned forward and inverse below the top level: group k of nv vectors at a.
-template <class Bottom>
-class Pruned {
-public:
-    Pruned(const Tables& tables, const Bottom& bottom, std::size_t b)
-        : recursion_(tables.roots, tables.inverse_roots, bottom), tables_(tables), b_(b) {}
-
-    void forward(std::uint32_t* a, std::size_t nv, std::size_t k) const {
-        const std::size_t h = nv / 4, low = std::size_t(std::countr_zero(h));
-        if (nv <= kForwardFull || low + 1 < b_) return recursion_.visit(a, nv, k);
-        const Group w(tables_.roots, k);
-        if (low > b_) {
-            forward_columns(a, h, b_, w);
-            for (std::size_t t = 0; t < 4; ++t) forward(a + 8 * t * h, h, 4 * k + t);
-            return;
-        }
-        forward_half(a, h, low + 1 == b_, w);
-        for (std::size_t t = 0; t < 4; ++t) recursion_.visit(a + 8 * t * h, h, 4 * k + t);
-    }
-
-    void inverse(std::uint32_t* a, std::size_t nv, std::size_t k) const {
-        const std::size_t h = nv / 4, low = std::size_t(std::countr_zero(h));
-        if (nv <= kInverseFull || low + 1 < b_) return recursion_.visit(a, nv, k);
-        const Group w(tables_.inverse_roots, k);
-        if (low > b_) {
-            for (std::size_t t = 0; t < 4; ++t) inverse(a + 8 * t * h, h, 4 * k + t);
-            return inverse_columns(a, h, b_, w);
-        }
-        for (std::size_t t = 0; t < 4; ++t) recursion_.visit(a + 8 * t * h, h, 4 * k + t);
-        inverse_half(a, h, low + 1 == b_, w);
-    }
-
-private:
-    static constexpr std::size_t kForwardFull = 64, kInverseFull = 16;  // vectors
-
-    Recursion<Bottom> recursion_;
-    const Tables& tables_;
-    std::size_t b_;
-};
-
-// The forward transform of length a.size() of a[0, size) in place (the rest zero and not read),
-// with vector bit b of the index zero in the input; b lies below the top level's bits. The top
-// level writes zeros to the skipped columns, which the levels above b then leave alone.
-template <class Bottom>
-void forward_pruned(std::span<std::uint32_t> a, std::size_t size, std::size_t b, const Tables& tables,
-                    const Bottom& bottom) {
-    const Pruned<Bottom> pruned(tables, bottom, b);
-    const Source in(a.data(), size, 0);
-    const std::size_t nv = a.size() / 8, width = std::size_t(1) << b;
-    auto* v = reinterpret_cast<Vec*>(a.data());
-    const Vec p = broadcast(kP), zero = _mm256_setzero_si256();
-    if (std::countr_zero(nv) % 2 == 0) {  // radix-4 identity group, as forward_top4
-        const std::size_t h = nv / 4;
-        const Factor z(tables.roots[1], tables.roots[9]);
-        for (std::size_t c = 0; c < h; c += 2 * width) {
-            for (std::size_t j = c; j < c + width; ++j) {
-                const Vec x0 = in(j), x1 = in(j + h), x2 = in(j + 2 * h), x3 = in(j + 3 * h);
-                const Vec ac = add(x0, x2), amc = _mm256_sub_epi32(add(x0, p), x2);
-                const Vec bd = add(x1, x3), zbmd = times(_mm256_sub_epi32(add(x1, p), x3), z);
-                v[j] = add(ac, bd), v[j + h] = diff(ac, bd);
-                v[j + 2 * h] = add(amc, zbmd), v[j + 3 * h] = diff(amc, zbmd);
-            }
-            for (std::size_t j = c + width; j < c + 2 * width; ++j)
-                v[j] = v[j + h] = v[j + 2 * h] = v[j + 3 * h] = zero;
-        }
-        for (std::size_t t = 0; t < 4; ++t) pruned.forward(a.data() + 8 * t * h, h, t);
-    } else {  // radix 2, as forward_top2
-        const std::size_t h = nv / 2;
-        for (std::size_t c = 0; c < h; c += 2 * width) {
-            for (std::size_t j = c; j < c + width; ++j) {
-                const Vec x0 = in(j), x1 = in(j + h);
-                v[j] = add(x0, x1), v[j + h] = _mm256_sub_epi32(add(x0, p), x1);
-            }
-            for (std::size_t j = c + width; j < c + 2 * width; ++j) v[j] = v[j + h] = zero;
-        }
-        pruned.forward(a.data(), h, 0);
-        pruned.forward(a.data() + 8 * h, h, 1);
-    }
-}
-
-// The inverse transform of length a.size() in place, times scale, canonical on the columns with
-// vector bit b clear (the others are left unspecified); b lies below the top level's bits.
-template <class Bottom>
-void inverse_pruned(std::span<std::uint32_t> a, std::size_t b, const Tables& tables, const Bottom& bottom,
-                    std::uint32_t scale) {
-    const Pruned<Bottom> pruned(tables, bottom, b);
-    const std::size_t nv = a.size() / 8, width = std::size_t(1) << b;
-    auto* v = reinterpret_cast<Vec*>(a.data());
-    const Factor s(scale);
-    const auto scaled = [&s](Vec x) { return reduce(times(x, s), kP); };
-    if (std::countr_zero(nv) % 2 == 0) {  // radix-4 identity group, as inverse_top4
-        const std::size_t h = nv / 4;
-        for (std::size_t t = 0; t < 4; ++t) pruned.inverse(a.data() + 8 * t * h, h, t);
-        const Factor z(tables.inverse_roots[1], tables.inverse_roots[9]);
-        for (std::size_t c = 0; c < h; c += 2 * width)
-            for (std::size_t j = c; j < c + width; ++j) {
-                const Vec x0 = v[j], x1 = v[j + h], x2 = v[j + 2 * h], x3 = v[j + 3 * h];
-                const Vec ab = low(add(x0, x1)), cd = low(add(x2, x3));
-                const Vec amb = low(diff(x0, x1)), cmd = times(diff(x2, x3), z);
-                v[j] = scaled(add(ab, cd)), v[j + h] = scaled(add(amb, cmd));
-                v[j + 2 * h] = scaled(diff(ab, cd)), v[j + 3 * h] = scaled(diff(amb, cmd));
-            }
-    } else {  // radix 2, as inverse_top2
-        const std::size_t h = nv / 2;
-        pruned.inverse(a.data(), h, 0);
-        pruned.inverse(a.data() + 8 * h, h, 1);
-        for (std::size_t c = 0; c < h; c += 2 * width)
-            for (std::size_t j = c; j < c + width; ++j) {
-                const Vec x0 = v[j], x1 = v[j + h];
-                v[j] = scaled(add(x0, x1)), v[j + h] = scaled(diff(x0, x1));
-            }
-    }
-}
 
 // Levels 0 and 1, one-dimensional in x, into q and p (length 4m each), ending in level 2's
 // layout (stride m/2: Q_2 rows 0 .. 4, P_2 rows 0 .. 3, x below m/4).

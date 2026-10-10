@@ -167,9 +167,9 @@ Record when opened: 29 ms (another user). Best judged: ours, 22 ms, spike-free:
   radix-4 first pass might hide it); primes below 2^27.
 - 2026-10-10, claude (lib, issue #156 round 3): `product.hpp`, `kernels.hpp`, `gen_kernels.py`
   and `test_product.cpp` moved to lib/multimod (`LazyProduct`, one kernel set of
-  `multimod::Product`; the test is now part of `lib/multimod/test.cpp`). Same instructions but in
-  `Product::multiply` (other registers and stack slots around the calls); `judge.py bench`,
-  `lc-bench`, 61 rounds: 22.30 -> 22.34 ms (1.0020, noise). 48/48 official tests, stress 200
+  `multimod::Product`; the test is now part of `lib/multimod/test.cpp`). Same instructions;
+  `Product::multiply` has its registers permuted in one block of calls. `judge.py bench`,
+  `lc-bench`, 61 rounds: 21.95 -> 21.97 ms (1.0009, noise). 48/48 official tests, stress 200
   rounds, ASan/UBSan on 6 official cases. Details: `lib/multimod/notes.md`.
 
 ## Sources

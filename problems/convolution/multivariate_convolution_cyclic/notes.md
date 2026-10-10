@@ -201,9 +201,9 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   conflicts above (a buffered radix-16).
 - 2026-10-10, claude (lib, issue #156 round 3): the product comes from lib/multimod
   (`LazyProduct`) instead of `../convolution_mod_1000000007/product.hpp`, which moved there. Same
-  instructions but in `Product::multiply` (other registers and stack slots around the calls) and
-  two compares with swapped operands in `solve()`; `judge.py bench`, `lc-bench`, 61 rounds:
-  10.33 -> 10.32 ms (1.0004, noise). 24/24 official tests, stress 200 rounds, ASan/UBSan on 7
+  instructions; registers permuted in one block of `Product::multiply` and two compares with
+  swapped operands in `solve()`. `judge.py bench`, `lc-bench`, 61 rounds: 10.07 -> 10.09 ms
+  (1.0015, noise). 24/24 official tests, stress 200 rounds, ASan/UBSan on 7
   official cases. Details: `lib/multimod/notes.md`.
 
 ## Sources

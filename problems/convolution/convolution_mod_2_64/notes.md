@@ -148,9 +148,9 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
   (2.5 ms) and parsing (3.3 ms, lib/io) are the rest of the 40 ms.
 - 2026-10-10, claude (lib, issue #156 round 3): `product.hpp`, `kernels.hpp` and `gen_kernels.py`
   moved to lib/multimod (`WideProduct`, one kernel set of `multimod::Product`; tests in
-  `lib/multimod/test.cpp`). Same instructions but in `Product::multiply` (other registers and
-  stack slots around the calls); `judge.py bench`, `lc-bench`, 61 rounds: 40.83 -> 40.80 ms
-  (1.0013, noise). 44/44 official tests, stress 200 rounds, ASan/UBSan on 7 official cases.
+  `lib/multimod/test.cpp`). Same instructions but in `Product::multiply` (631 -> 630, other
+  registers in the setup); `judge.py bench`, `lc-bench`, 61 rounds: 40.38 -> 40.55 ms (1.0004,
+  noise). 44/44 official tests, stress 200 rounds, ASan/UBSan on 7 official cases.
   Details: `lib/multimod/notes.md`.
 
 ## Sources

@@ -1,7 +1,8 @@
 # Judge spikes
 
 About 5% of judged cases take a fixed +9 ms more. The program does not cause it; a resubmission
-re-rolls it. `tools/spikes.py ID` flags spiked cases and prints the clean score.
+re-rolls it. `tools/spikes.py ID` flags spiked cases and prints the clean score. It compares each
+case with the same case in our other runs of the problem; see Detection.
 
 ## Data
 
@@ -19,6 +20,33 @@ classes of at least 3 (same name without `_NN`). Residual = time - class median.
   2: 24 vs 26.5, 3: 17 vs 18.0, 4: 11 vs 9.6); adjacent spiked pairs 13 vs 11 expected.
 
 So it is one fixed delay per process launch, not a slowdown during the run.
+
+## Detection
+
+2026-10-10, claude. The first rule (6-14 ms above the class median) flagged real cost when a class
+mixes fast and slow inputs: min_plus_convolution_concave_arbitrary monotone_01/02 take 26-31 ms in
+all 5 runs, monotone_00/03 11-14, so 409349 and 409355 got clean 19 and 20 ms instead of 28.
+It also missed sqrt_of_formal_power_series 409361 monomial_02: 20 ms, 11 in 409316, 16 above its
+class median. Both are now regression cases in `spikes_test.py`.
+
+Now a case is compared with the same case in Aiyiyi's other AC runs of the problem (rule in the
+`spikes.py` docstring). Data: 157 AC submissions to 2026-10-10, 118 of them with a same-source repeat.
+
+- Same source, time minus the median of the repeats. Reference under 100 ms: 4213 of 4623 cases
+  within ±2 ms, 233 at +6 to +14, 6 at +2 to +6 (171 below -2: the repeat itself spiked).
+  Reference over 300 ms (convolution_mod_large, 450 ms): 109 of 210 within ±2, 25 at +2 to +6,
+  25 at +6 to +14. Noise hides the spike there, so references of 100 ms or more are never flagged.
+- Other sources: used only when they match the run on the case's peers (median gap at most 1 ms).
+  Checked on the 118 as if they had no repeat, the repeats as truth: 179 of 233 spikes found,
+  1 false (convolution_mod_1000000007 random_00: 21 or 30-31 ms, 6 of 16 runs are high).
+  With 2 peers instead of 3: 203 found, 6 false, e.g. multivariate_convolution_cyclic threes_00,
+  15 ms in both runs of one version, 5-6 in the next. Kept 3.
+- Class median alone (the first rule), same check: 206 found, 50 false. Peers that agree within
+  2 ms: 127 found, 1 false. Dropped: with no other run to compare, nothing is flagged.
+- Against the first rule on all 157: 278 flagged cases instead of 336; the clean score changes on 36.
+  It rises on 25, 10 of them convolution_mod_large (no flags at 450 ms). It falls on 11: 10 by
+  spikes against same-source repeats (e.g. 409288 large_05: 22 ms, 11 in its repeat), 1 against
+  a matching version (409361).
 
 ## Cause (partly confirmed)
 

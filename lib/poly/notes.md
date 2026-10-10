@@ -386,18 +386,20 @@ rule.
 ## Power projection
 
 a[k] = [x^(n-1)] g^k for k < n, g[0] = 0 (`projection.hpp`): sum_k a[k] y^k = [x^(m-1)] P_0 / Q_0
-with P_0 = x^(m-n), Q_0 = 1 - y g, m = 2^T >= max(n, 128); n <= 32 from the powers of g.
+with P_0 = x^(m-n), Q_0 = 1 - y g, m = 2^T >= max(n, 512); n <= 32 from the powers of g.
 - Levels as Composition: Q_(s+1)(x^2) = Q_s(x) Q_s(-x) mod x^L and P_(s+1)(x^2) x = the odd part
   of P_s(x) Q_s(-x) mod x^L keep [x^(L-1)] P_s / Q_s; P_s has rows 0 .. Y - 1. Forward only: P
-  rides along, no level is stored: 2 arrays of 4m (the last levels' spans reuse them) and Tables.
-- Generic level (2 .. T - 3): transform of P_s at 4m (plain bottom), then of Q_s with
+  rides along, no level is stored: 2 arrays of 4m, a work span of ~2m (the last levels) and
+  Tables.
+- Generic level (2 .. T - 4): transform of P_s at 4m (plain bottom), then of Q_s with
   `ProjectionBottom`: per leaf pair (moduli z^8 -+ s) the leaves of V (Graeffe, as LevelBottom)
   and of W = the odd part of P(z) Q(-z) = Po Qe - Pe Qo mod (u^4 -+ s), 32 products per leaf;
   the wrapped terms use t c_j (6 Shoup products per leaf set, shared with the Graeffe), so each
   output is one sum of 8 products and one reduction. The CRT is (A + B) + u^4 (A - B) / s with
   s^-1 from the inverse table; the factor 2 and the products' 2^-32 go into the inverses' scale.
   V and W are written over the leaves already read (Q's and P's arrays), then inverse transforms
-  at 2m, the next layout (truncate x, unwrap row 2Y for Q).
+  at 2m and the next layout (unwrap row 2Y for Q). The x >= L/2 halves of the rows are left as
+  the pruned inverses leave them: the next pruned forwards do not read them.
 - Leaf sums in transposed form (one leaf per lane) as 64-bit products of the even lanes, then of
   the odd lanes after a shift: one function per leaf kind; `[[gnu::flatten]]` keeps the
   transposes inline (GCC called them, spilling every vector around the calls).
@@ -413,12 +415,24 @@ with P_0 = x^(m-n), Q_0 = 1 - y g, m = 2^T >= max(n, 128); n <= 32 from the powe
   P_1 = p0 + y p1, p0 a monomial): 1-D transforms of q1, q2, p1 at m, then per leaf pair
   (`FirstLevelProducts`) G(q1), G(q2), E(q1, q2), O(p1, q1), O(p1, q2) (G = a(x) a(-x), E and O
   the even and odd parts of a(x) b(-x)), inverses at m/2 (lower half), and Q_2, P_2 assembled
-  in level 2's layout; ~50 against 101 µs for the generic level. Levels T - 2 and T - 1
-  one-dimensional in y, from level
-  T - 3's V and W at stride 8: a = r3 + r1 (c1^2 - 2 c2), r1 = p1 + p0 c1,
-  r3 = p3 + p2 c1 + p1 c2 + p0 c3 (c_k = (-1)^k q_k): products of length m/2, the last of m.
-- Costs at m = 8192 (`lc-amd`, in process, µs): power_projection ~1180; per generic level P
-  forward 26, Q forward with the bottom 58 (bottom ~33), two inverses 22; last levels 100.
+  in level 2's layout; ~50 against 101 µs for the generic level. The strided picks (q1 from g's
+  even terms, p1 from g at offset 1 - e with one sign, the shifts O(p0, b)) are AVX2 loops
+  (`even_terms`: `even_lanes` of two unaligned loads, scalar ends).
+- Level T - 3 one-dimensional in y (as composition's third_last_level): Q = sum_(k < 8) x^k q_k,
+  P = sum_(k < 8) x^k p_k; columns by 8 x 8 transposes into the work span, transforms of length
+  m/4 of c_k = (-1)^k q_k (k = 1 .. 7) and p_0 .. p_6, then c'_1 = c1^2 - 2 c2,
+  c'_2 = c2^2 - 2 c1 c3 + 2 c4, c'_3 = c3^2 + 2 c1 c5 - 2 c2 c4 - 2 c6 (6 products) and
+  p'_j = sum over a + b = 2j + 1 of p_a c_b (16 products; sums of 5 and 7 by composition.hpp's
+  `inverse_product_sum<K>`). Needs m/4 >= 128 words for its transforms: m >= 512.
+- Levels T - 2 and T - 1 one-dimensional in y: a = r3 + r1 (c'_1^2 - 2 c'_2), r1 = p'_1 + p'_0 c'_1,
+  r3 = p'_3 + p'_2 c'_1 + p'_1 c'_2 + p'_0 c'_3: products of length m/2, the last of m.
+- Costs at m = 8192 (`lc-amd`, in process, µs, before level T - 3 was one-dimensional):
+  power_projection ~1180; per generic level P forward 26, Q forward with the bottom 58 (bottom
+  ~33), two inverses 22; last levels 100.
+- Costs at m = 2^17 (`lc-amd`, in process, ms): power_projection 27.6. Levels 0, 1: 1.75;
+  generic levels 2 .. 13: P forward 5.65, Q forward with the bottom 12.24, inverses 5.26; level
+  T - 3: columns 0.06, 14 forwards 0.38, Q' products 0.26, P' products 0.59; levels T - 2 and
+  T - 1: 6 forwards 0.37, products at m/2 0.45, the product at m 0.58.
 
 ## Compositional inverse
 
@@ -1197,6 +1211,24 @@ official tests. projection.hpp has loops of the same kind (for #87).
   random, 0 .. m - 1, near P - 1, random with 0), 30 random m <= 20000. -O2 (native,
   x86-64-v3) and ASan/UBSan (`lc-intel`).
 - Measurements: problems/polynomial/polynomial_interpolation/notes.md.
+
+2026-10-10, claude (issue #87, compositional_inverse_of_formal_power_series_large; composition and
+owner lanes): projection.hpp (Power projection above).
+- Level T - 3 one-dimensional in y, as composition's: in process at m = 2^17 the generic level
+  T - 3 with its unpruned inverses and the old last levels' strided column copies cost ~4.2 ms;
+  levels T - 3 .. T - 1 now 2.7 ms. m >= 512 (was 128) so that its transforms of m/4 have at least
+  128 words; a work span of ~2m for its columns and the last levels' temporaries.
+- Level 1's coefficient loops in AVX2 (`even_terms`; GCC left the lambdas with branches scalar):
+  levels 0 and 1 2.01 -> 1.75 ms. The zero fills of whole rows and `truncate_rows` (zeroing the
+  x >= L/2 halves of P's rows after each level, ~16 µs per level) are gone: the pruned forwards
+  do not read those halves.
+- `projection_log` is T (was T + 1): no transform of the projection's own Transform exceeds m.
+- In process at N = 131072 (`lc-amd`, compositional_inverse, warm): 34.5 -> 32.3 ms.
+- Tests: `test.cpp`'s projection and compositional inverse suites at -O2 and ASan/UBSan
+  (`lc-intel`); both problems' `stress.py` (400 and 1000 rounds); all official tests (`lc-amd`).
+- `judge.py bench` (21 rounds, new/main), `lc-amd` (`lc-intel`):
+  compositional_inverse_of_formal_power_series_large 0.9466 (0.9607), 36.89 -> 34.92 ms;
+  compositional_inverse_of_formal_power_series 0.9591 (0.9537).
 
 ## Sources
 

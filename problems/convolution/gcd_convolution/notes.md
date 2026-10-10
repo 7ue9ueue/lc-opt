@@ -4,8 +4,8 @@ N <= 10^6, a_i, b_i < 998244353; print c_k = sum over gcd(i, j) = k of a_i b_j f
 Large tests: N = 10^6, 999982..999984, 994008..994010 (997^2 - 1 + {0, 1, 2}), random values;
 19.8 MB of input, 10 MB of output.
 
-Record when opened: 37 ms (407011). Best judged: ours, [409214](https://judge.yosupo.jp/submission/409214),
-15 ms.
+Record when opened: 37 ms (407011). Best judged: ours, [409380](https://judge.yosupo.jp/submission/409380),
+14 ms (#176). Earlier: 15 ms, [409214](https://judge.yosupo.jp/submission/409214).
 
 ## Design
 
@@ -89,6 +89,9 @@ Record when opened: 37 ms (407011). Best judged: ours, [409214](https://judge.yo
   (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
   values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
   15.13 → 14.86 ms (0.979). 29/29 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
+- 2026-10-10, claude (lib/io #21, round 3): submitted the #176 `main.cpp`,
+  [409380](https://judge.yosupo.jp/submission/409380): AC 14 ms, 22.5 MiB; clean 14 ms
+  (`tools/spikes.py`: spikes only on small cases). New best judged (was 15 ms).
 
 ## Next
 

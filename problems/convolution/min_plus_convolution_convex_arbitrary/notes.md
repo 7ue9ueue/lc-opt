@@ -63,3 +63,6 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.36 ms on `lc-amd`.
   (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
   values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
   11.25 → 11.05 ms (0.981). 41/41 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
+- 2026-10-10, claude (lib/io #21, round 3): submitted the #176 `main.cpp`,
+  [409383](https://judge.yosupo.jp/submission/409383): AC 15 ms, 21.3 MiB; seven launch spikes,
+  clean 11 ms (`tools/spikes.py`). Best judged stays 11 ms.

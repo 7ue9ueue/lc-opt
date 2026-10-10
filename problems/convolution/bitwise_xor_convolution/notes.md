@@ -31,7 +31,7 @@ Record when opened: 25 ms.
   int64 array: rows, columns with the products, inverse columns; inverse rows, printed per chunk.
 - Each chunk is parsed into the last 256 KiB of its own 16 rows and widened in place (round 2):
   a row's int64 vectors end before input values not yet read. No separate input buffer.
-- Output: `../fixed_width.hpp` per chunk of 2^16 values, so a newline ends every chunk
+- Output: `../convolution_mod/fields.hpp` per chunk of 2^16 values, so a newline ends every chunk
   (judge-specific; the checker compares tokens). Its text follows the chunk in a (dead by then).
 - Memory: 8 MiB + 16 KiB int64 + 4 MiB dwords: 6 huge pages and 4 small ones below them. a's
   dwords are stored strip after strip (8 KiB each, no padding); output chunks reuse a's space.
@@ -132,6 +132,11 @@ faults), columns a 0.59, columns b 1.05, inverse rows 0.75, print 4.63, exit 0.9
   control: 0.991, control 0.995. Outputs byte-identical to main on all 13 tests (judge build,
   ASan/UBSan, pipe input). PR #187 merged; CI 0.9810 (EPYC 9V74 0.981, EPYC 9V45 0.982,
   EPYC 7763 0.980). Not submitted (best judged 14 ms; the gain is ~0.1 ms).
+- 2026-10-10, claude (lib/io #21, round 5): output through `../convolution_mod/fields.hpp`
+  (in memory 0.64 ms per 2^20 values against 1.04 for `fixed_width.hpp`, now deleted); text
+  still page-aligned after the chunk (`../text_buffer.hpp`). `judge.py bench`, `lc-amd`, 31
+  rounds, slowest 3 cases: 14.53 → 14.14 ms (0.973). Outputs byte-identical to main on all 13
+  tests and 200 random inputs (N 0-13); ASan/UBSan on all 13 tests, file and pipe.
 
 ## Next
 

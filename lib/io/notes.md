@@ -71,30 +71,32 @@ Whole process, judge-like runner, ms, median of 21 rounds, max over the 3 larges
 
 Floors (`problems/convolution/floor.py`, 11 rounds): read the slowest test's input, write an
 answer of the same length, nothing else. Arrays in huge pages; "fixed" prints 9-character fields
-(`problems/convolution/fixed_width.hpp`, judge-specific) where every value is below 10^9. Record:
-the fastest judged time when the problem's issue was opened. 2_64 rows: 21 rounds.
+(`problems/convolution/convolution_mod/fields.hpp`, judge-specific) where every value is below
+10^9; that column is from round 5, the others from round 1 (round 1's fixed column used the
+slower `fixed_width.hpp`: 9.61, 230.1, 11.88, 11.76, 11.87, 11.19, 11.57, 6.46, 3.89, 3.88).
+Record: the fastest judged time when the problem's issue was opened. 2_64 rows: 21 rounds.
 
 | Problem | in / out MB | floor ms | fixed ms | record ms | best floor / record |
 |---|---|---|---|---|---|
-| convolution_mod | 10.5 / 10.4 | 11.00 | 9.61 | 14 | 69% |
+| convolution_mod | 10.5 / 10.4 | 11.00 | 9.04 | 14 | 65% |
 | convolution_mod_1000000007 | 10.5 / 10.4 | 10.97 | | 29 | 38% |
-| convolution_mod_large | 335.5 / 331.8 | 284.0 | 230.1 | 452 | 51% |
+| convolution_mod_large | 335.5 / 331.8 | 284.0 | 217.4 | 452 | 48% |
 | convolution_mod_2_64 | 22.0 / 21.4 | 18.67 | | 76 | 25% |
 | convolution_F_2_64 | 22.0 / 21.4 | 18.94 | | 409 | 5% |
 | min_plus_convolution_convex_convex | 10.5 / 11.5 | 11.31 | | 20 | 57% |
 | min_plus_convolution_convex_arbitrary | 10.5 / 11.0 | 11.36 | | 38 | 30% |
 | min_plus_convolution_concave_arbitrary | 10.4 / 11.0 | 11.58 | | 117 | 10% |
-| bitwise_and_convolution | 20.7 / 10.4 | 13.53 | 11.88 | 26 | 46% |
-| bitwise_xor_convolution | 20.7 / 10.4 | 13.39 | 11.76 | 25 | 47% |
-| mul_mod2n_convolution | 20.7 / 10.4 | 13.15 | 11.87 | 81 | 15% |
-| gcd_convolution | 19.8 / 9.9 | 12.71 | 11.19 | 37 | 30% |
-| lcm_convolution | 19.8 / 9.9 | 12.66 | 11.57 | 37 | 31% |
-| mul_modp_convolution | 10.4 / 5.2 | 7.29 | 6.46 | 45 | 14% |
-| multivariate_convolution | 5.2 / 2.6 | 4.19 | 3.89 | 117 | 3% |
-| multivariate_convolution_cyclic | 5.2 / 2.6 | 4.18 | 3.88 | 117 | 3% |
+| bitwise_and_convolution | 20.7 / 10.4 | 13.53 | 11.26 | 26 | 43% |
+| bitwise_xor_convolution | 20.7 / 10.4 | 13.39 | 11.14 | 25 | 45% |
+| mul_mod2n_convolution | 20.7 / 10.4 | 13.15 | 11.26 | 81 | 14% |
+| gcd_convolution | 19.8 / 9.9 | 12.71 | 10.96 | 37 | 30% |
+| lcm_convolution | 19.8 / 9.9 | 12.66 | 10.79 | 37 | 29% |
+| mul_modp_convolution | 10.4 / 5.2 | 7.29 | 6.18 | 45 | 14% |
+| multivariate_convolution | 5.2 / 2.6 | 4.19 | 3.71 | 117 | 3% |
+| multivariate_convolution_cyclic | 5.2 / 2.6 | 4.18 | 3.69 | 117 | 3% |
 
-The 2_64 rows use the bulk uint64 read (main: 19.87 and 20.52). bitwise_and_convolution's own
-floor (its notes) is 11.91 ms, against 11.88 here.
+The 2_64 rows use the bulk uint64 read (main: 19.87 and 20.52). The uint32 floors parse with
+`Reader::read`; the solutions use `io::read_bulk` (`bulk32.hpp`), 0.1-0.4 ms less (round 3).
 
 The 64-bit bulk read loses in `bench.cpp` (21 MB of text streamed from memory) but wins on warm
 input (`BulkParser64::parse` 1.6 ns per token for 2^14..2^20 tokens, a scalar chain of separator
@@ -303,6 +305,37 @@ in Docker with a 1 GiB memory limit and tmpfs files unless noted; medians of 21-
   and multivariate_convolution 409405, both with launch spikes; clean 12 and 14 ms, unchanged
   (the gain is 0.1-0.2 ms, under the judge's 1 ms resolution). Details in their notes.
 
+2026-10-10, claude, issue #21 round 5: output. `lc-amd`, GCC 15.2 image, judge flags, in Docker,
+files on tmpfs.
+- `write(2)` alignment, re-measured: 10 MiB to a new tmpfs file in chunks from a page-aligned
+  buffer plus a skew, medians of 31 rounds (a second run: 41). Whole-page chunks: d = 0 3.07 ms
+  (3.16); d = 32, 64, 128, 192, 256, 512, 2048, 3584, 3840, 3968, 4032, 4064 3.07-3.08
+  (3.13-3.16; d = 48 3.22, d = 4048-4095 3.17-3.19); d = 1, 16, 24 6.32-6.54 (2.06x).
+  256000-byte chunks (d alternates 0 and 2048) 3.07 and 281600-byte chunks 3.07, as whole pages.
+  64 KiB-sized chunks: 61440 bytes 3.14, 65536 3.13, 65516 (d drifts) 3.22. So only d = 1..31
+  costs; round 4's 3.31-3.43 ms for d = 32..192 did not repeat, and whole pages gain nothing.
+- The writes of every convolution problem and many_aplusb on its largest case (an `LD_PRELOAD`
+  shim logging size and d per `write(2)`): none at d = 1..31 except convolution_F_2_64 (0.6% of
+  its bytes). Two round-4 leads are void: page-multiple blocks for the other fixed-width writers,
+  and Writer flushes of whole pages. Neither these nor `MADV_RANDOM` (-0.04 ms per 20 MB) is worth
+  an io.hpp change that re-bundles every problem.
+- Formatters: bitwise_and, bitwise_xor and multivariate_convolution printed with
+  `problems/convolution/fixed_width.hpp` (1.04 ms per 2^20 values in memory), the other uint32
+  problems with `convolution_mod/fields.hpp` (0.64 ms; `convolution_mod/notes.md`, round 2), the
+  same text. The three now use fields.hpp, the text still page-aligned in dead memory
+  (`problems/convolution/text_buffer.hpp`, fixed_width.hpp's `text_buffer()` made generic);
+  fixed_width.hpp is deleted and `floor.cpp` uses fields.hpp. `judge.py bench`, 31 rounds,
+  slowest 3 cases: bitwise_and 12.56 → 12.27 ms (0.973), bitwise_xor 14.53 → 14.14 (0.973),
+  multivariate_convolution 13.69 → 13.60 (0.995; a quarter of the output). Outputs
+  byte-identical to main on all official tests and 200 random inputs each, ASan/UBSan included.
+- 64-bit: convolution_F_2_64's own fixed-width formatter takes 3.19 ms per 2^20 random values in
+  memory, `convolution_mod_2_64/fields64.hpp` 2.62. F_2_64's long blocks now go through fields64,
+  12288 values per direct `write(2)` from its dead b, instead of 65516-byte Writer flushes.
+  gen_max_00 37.85 → 36.78 ms, many_ones_00 38.09 → 37.12; `judge.py bench`, 31 rounds, 6
+  slowest cases (the variable-width ones unchanged): 39.62 → 39.23 (0.976). Details in its notes.
+- Floors with fields.hpp (`floor.py --fixed`, 11 rounds): the fixed column above, 0.2-0.8 ms
+  below round 1's (convolution_mod_large 12.7).
+
 ## Sources
 
 - Our own QPoly explorations 007 and 011 (`../SymPoly/work/ntt/io_yosupo`, `io_large`): the
@@ -324,14 +357,13 @@ in Docker with a 1 GiB memory limit and tmpfs files unless noted; medians of 21-
   polynomial problems too.
 - `BulkParser64` with whole-vector stores: -6% of the parse, measured in round 4; worth adding
   only with another gain for the 2_64 problems, since alone it is below their noise.
-- Writer: buffered flushes have arbitrary sizes, so 31 in 4096 of them land in the slow band
-  (d = 1..31, round 4) and the rest are not whole pages (~1.4% of `write(2)` time against d = 0).
-  Flushing whole pages from a page-aligned buffer avoids both: next time io.hpp changes.
-- Other fixed-width writers (`convolution_mod/fields.hpp` and its users, `fields10/11.hpp`,
-  `fields64.hpp`, `columns.hpp`): page-multiple blocks from page-aligned text, as
-  `fixed_width.hpp` now does. A guess: ~1.4% of their `write(2)` time, 0.2-0.5% of a problem.
-- `MADV_RANDOM` on the input mapping: -0.04 ms per 20 MB at exit (round 4); fold it in with
-  the next io.hpp change.
+- Writer: flushes of arbitrary size land at d = 1..31 with odds 31 in 4096, each then 2x slower
+  (~0.8% of `write(2)` time on average); whole pages gain nothing more (round 5). Fold a fix in
+  with the next io.hpp change, together with `MADV_RANDOM` on the input (-0.04 ms per 20 MB).
+- `convolution_mod/fields.hpp`'s first comment still names `../fixed_width.hpp`, deleted in
+  round 5 (that folder belonged to another round); fix it with the next change there.
+- convolution_F_2_64's variable-width blocks (all_ones, all_same, small_values: 35-36 ms, near
+  its slowest case) print one `uint64_t` at a time through `write_array`.
 - The parser is still about 0.2 ns per token above the constant-stride ablation (0.75): the
   pointer chains. Tried and lost: more streams, four tokens per step, a bitmap of separators.
 - A faster uint64 write: only if a problem's floor becomes a large share of its time

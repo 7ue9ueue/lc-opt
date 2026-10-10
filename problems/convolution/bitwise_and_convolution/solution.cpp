@@ -12,7 +12,8 @@
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
-#include "../fixed_width.hpp"
+#include "../convolution_mod/fields.hpp"
+#include "../text_buffer.hpp"
 
 namespace {
 
@@ -212,10 +213,10 @@ void solve() {
     default: combine<kMaxRowsLog>(a, b, block); break;
     }
     io::Writer out;
-    char* const text = fixed_width::text_buffer(b, size * sizeof(std::uint32_t));  // b is dead
+    char* const text = text_buffer<fields::kTextBytes>(b, size * sizeof(std::uint32_t));  // b is dead
     for (std::size_t r = 0; r < rows; ++r) {
         row_levels<true>(a + row_offset(r, block), block_log);
-        fixed_width::write(out, a + row_offset(r, block), std::min(block, total), text);
+        fields::write(out, a + row_offset(r, block), std::min(block, total), text);
     }
 }
 

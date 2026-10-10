@@ -65,4 +65,5 @@ issue_1287_cpp_00, random_02.
   transposes and 3 radix-2 levels per 8 vectors) instead of coefficients, transposes and a lanes
   forward. `judge.py bench` against main 0.9928 (14.61 -> 14.50 ms) and 0.9960 (15.17 -> 15.07
   ms), 21 rounds each, `lc-amd`. 11/11 official tests; ASan/UBSan on all 11, file and pipe input
-  (`lc-intel`).
+  (`lc-intel`). Merged as #257; CI 0.9879 (EPYC 9V74: 0.9915, 0.9893, 0.9830). Not submitted
+  (about 0.1 ms below the judged 15 ms).

@@ -4,7 +4,8 @@ N <= 2^17 distinct points x_i and values y_i mod 998244353; print the N coeffici
 degree < N with f(x_i) = y_i. 10 s. Slowest tests: max_random_00/01 and x_zero_00 (N = 2^17,
 x_zero has one point 0), random_00 (N = 127669: the same transform lengths).
 
-Best judged: none yet.
+Best judged: ours, 20 ms: [409545](https://judge.yosupo.jp/submission/409545) (`main.cpp` of #257),
+clean score 20 ms (`tools/spikes.py`).
 Record when opened (issue #77): 55 ms.
 
 ## Design
@@ -52,6 +53,13 @@ random_00, x_zero_00.
     (D <= 8) 214 / 274 / 427 / 793 and blocks of 2 (D = 16) 1220. Blocks of 4 with zero padding
     for D = 2 .. 8 lost (640 / 823 / 1129: the padding's stores). Inversion: 1 chain ~1400, 4
     chains 1037 (the exponentiation alone 366).
+  - Merged as #257. CI: multipoint_evaluation 0.9879 (EPYC 9V74: 0.9915, 0.9893, 0.9830),
+    product_of_polynomial_sequence 0.9988; all 2 0.9934.
+  - Submitted the merged `main.cpp` (#257): [409544](https://judge.yosupo.jp/submission/409544)
+    AC 28 ms, a launch spike on max_random_00 (28 ms, its peers 19-20; `spikes.py`: clean 20);
+    resubmitted: [409545](https://judge.yosupo.jp/submission/409545) AC 20 ms, 27.5 MiB, clean
+    20 ms (random_00 20, max_random_00 20, max_random_01 19, x_zero_00 20). Record when opened
+    55 ms.
   - Next: the build's lane root to the top leaves in the transform domain (the lane root's product
     transform gives the leaves' lower halves; needs leaves as transforms in ProductTree); a cheaper
     lanes-to-standard conversion would make the sums' one pay (0.081 ms now against 0.085 saved);

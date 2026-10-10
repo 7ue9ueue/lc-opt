@@ -4,9 +4,12 @@
 // 8k + l to lane l, and one product tree computes the 8 lane products side by side
 // (lib/poly/product_tree.hpp). The top tree multiplies the lane products and the big ones.
 // Output in fixed-width fields (problems/convolution/convolution_mod/fields.hpp).
+// Memory: two huge-page arenas, no heap arrays (4 KiB page faults cost 0.43 ms per MB on lc-amd,
+// huge pages 0.05).
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -19,30 +22,82 @@ namespace {
 
 using u32 = std::uint32_t;
 using u64 = std::uint64_t;
-using poly::detail::Vec;
+namespace pd = poly::detail;
 
 constexpr u32 kP = poly::kModulus;
 constexpr std::size_t kMaxDegree = 500000;
 
-// The tokens after N: for each polynomial its degree d, then its d + 1 coefficients. Reads in
-// rounds, each up to a lower bound on the token count (2 per polynomial not yet located).
-// starts[i] = the index of polynomial i's degree. Returns the token count.
-std::size_t read_polynomials(io::Reader& in, std::size_t n, u32* tokens, u32* starts) {
-    std::size_t parsed = 0, need = 2 * n, at = 0, i = 0;
+// The product of residues, 64 at a time as 8 lanes of Montgomery products. Each lane carries
+// 2^-32 per vector multiplied in, undone at the end.
+class ConstantProduct {
+public:
+    void add(u32 x) {
+        buffer_[size_++] = x;
+        if (size_ == 64) flush();
+    }
+
+    u32 value() const {
+        alignas(32) u32 lanes[8];
+        pd::store(lanes, pd::reduce(lanes_, kP));
+        u64 r = ntt::detail::power(pd::kR, u32(8 * vectors_ % (kP - 1)));
+        for (u32 x : lanes) r = r * x % kP;
+        for (std::size_t i = 0; i < size_; ++i) r = r * buffer_[i] % kP;
+        return u32(r);
+    }
+
+private:
+    void flush() {
+        for (std::size_t v = 0; v < 64; v += 8) lanes_ = pd::montgomery(lanes_, pd::load(buffer_ + v));  // < 2P
+        vectors_ += 8, size_ = 0;
+    }
+
+    alignas(32) u32 buffer_[64];
+    std::size_t size_ = 0, vectors_ = 0;
+    pd::Vec lanes_ = pd::broadcast(1);
+};
+
+constexpr std::size_t kBuckets = 256;  // degrees below this are counting-sorted
+
+// The polynomials after N, as tokens: each one's degree d, then its d + 1 coefficients.
+struct Polynomials {
+    u32* tokens;
+    u32* starts;                  // starts[0, small): where the nonconstant polynomials of degree < kBuckets start
+    std::size_t small = 0, total = 0;  // total: sum of degrees
+    std::array<u32, kBuckets> count{};  // count[d]: polynomials of degree d < kBuckets
+    std::array<u32, kMaxDegree / kBuckets + 1> large;  // starts of those of degree >= kBuckets
+    std::size_t large_count = 0;
+    ConstantProduct constants;
+};
+
+// Reads in rounds, each up to a lower bound on the token count (2 per polynomial not yet
+// located), and sorts the polynomials on the way, branch free but for large degrees.
+void read_polynomials(io::Reader& in, std::size_t n, Polynomials& p) {
+    u32* const tokens = p.tokens;
+    std::size_t parsed = 0, need = 2 * n, at = 0, i = 0, small = 0, total = 0;
     while (need > parsed) {
         io::read_bulk(in, tokens + parsed, need - parsed);
         parsed = need;
-        for (; i < n && at < parsed; ++i) starts[i] = u32(at), at += tokens[at] + 2;
+        for (; i < n && at + 1 < parsed; ++i) {  // degree and first coefficient parsed
+            const u32 d = tokens[at];
+            p.constants.add(d ? 1 : tokens[at + 1]);
+            total += d;
+            if (d >= kBuckets) [[unlikely]] {
+                p.large[p.large_count++] = u32(at);
+            } else {
+                p.starts[small] = u32(at), small += d != 0;
+                ++p.count[d];
+            }
+            at += d + 2;
+        }
         need = at + 2 * (n - i);
     }
-    return parsed;
+    p.small = small, p.total = total;
 }
 
 // a[0 .. n) to Montgomery form in place, any alignment.
 void montgomery_form(u32* a, std::size_t n) {
-    namespace d = poly::detail;
     std::size_t i = 0;
-    for (; i + 8 <= n; i += 8) d::store_unaligned(a + i, d::to_montgomery(d::load_unaligned(a + i)));
+    for (; i + 8 <= n; i += 8) pd::store_unaligned(a + i, pd::to_montgomery(pd::load_unaligned(a + i)));
     for (; i < n; ++i) a[i] = u32((u64(a[i]) << 32) % kP);
 }
 
@@ -57,8 +112,8 @@ struct Slots {
     u32 degree(std::size_t k) const { return tokens[order[8 * k]]; }
 
     poly::ProductTree<poly::LaneLayout, Slots>::Node load(std::size_t k, u32* c) const {
-        namespace v = poly::detail;
         const std::size_t d = degree(k);
+        if (d == 1 && 8 * k + 8 <= size) return load_linear(order + 8 * k, c);
         std::fill_n(c, 8 * (d + 1), 0);
         alignas(32) u32 degrees[8], leads[8];
         for (std::size_t l = 0; l < 8; ++l) {
@@ -70,8 +125,23 @@ struct Slots {
             degrees[l] = p[0], leads[l] = p[p[0] + 1];
             for (std::size_t j = 0; j <= p[0]; ++j) c[8 * j + l] = p[j + 1];
         }
-        for (std::size_t j = 0; j <= d; ++j) v::store(c + 8 * j, v::to_montgomery(v::load(c + 8 * j)));
-        return {v::load(degrees), v::to_montgomery(v::load(leads))};
+        for (std::size_t j = 0; j <= d; ++j) pd::store(c + 8 * j, pd::to_montgomery(pd::load(c + 8 * j)));
+        return {pd::load(degrees), pd::to_montgomery(pd::load(leads))};
+    }
+
+    // 8 polynomials of degree 1: their coefficient pairs gathered as qwords, then even and odd words.
+    poly::ProductTree<poly::LaneLayout, Slots>::Node load_linear(const u32* at, u32* c) const {
+        const pd::Vec index = _mm256_add_epi32(pd::load_unaligned(at), pd::broadcast(1));
+        const auto* base = reinterpret_cast<const long long*>(tokens);
+        const __m256 lo = _mm256_castsi256_ps(_mm256_i32gather_epi64(base, _mm256_castsi256_si128(index), 4));
+        const __m256 hi = _mm256_castsi256_ps(_mm256_i32gather_epi64(base, _mm256_extracti128_si256(index, 1), 4));
+        // shuffle_ps gives qwords (0 1), (4 5), (2 3), (6 7) of the lanes: put them in order.
+        const pd::Vec c0 = _mm256_permute4x64_epi64(_mm256_castps_si256(_mm256_shuffle_ps(lo, hi, 0x88)), 0xD8);
+        const pd::Vec c1 = _mm256_permute4x64_epi64(_mm256_castps_si256(_mm256_shuffle_ps(lo, hi, 0xDD)), 0xD8);
+        const pd::Vec m1 = pd::to_montgomery(c1);
+        pd::store(c, pd::to_montgomery(c0));
+        pd::store(c + 8, m1);
+        return {pd::broadcast(1), m1};
     }
 };
 
@@ -94,40 +164,32 @@ struct Items {
     }
 };
 
-// Product of the constants c[0 .. n) mod P, four chains.
-u32 product(const std::vector<u32>& c) {
-    u64 r[4] = {1, 1, 1, 1};
-    std::size_t i = 0;
-    for (; i + 4 <= c.size(); i += 4)
-        for (int j = 0; j < 4; ++j) r[j] = r[j] * c[i + j] % kP;
-    for (; i < c.size(); ++i) r[0] = r[0] * c[i] % kP;
-    return u32(r[0] * r[1] % kP * (r[2] * r[3] % kP) % kP);
-}
+using LaneTree = poly::ProductTree<poly::LaneLayout, Slots>;
+using TopTree = poly::ProductTree<poly::StandardLayout, Items>;
 
 void solve() {
     io::Reader in;
     const std::size_t n = in.read<u32>();
     poly::Arena input(poly::Arena::footprint(2 * n + kMaxDegree + 64) + 2 * poly::Arena::footprint(n + 1));
-    u32* const tokens = input.take(2 * n + kMaxDegree + 64).data();
-    u32* const starts = input.take(n + 1).data();
-    read_polynomials(in, n, tokens, starts);
+    Polynomials polys;
+    u32* const tokens = polys.tokens = input.take(2 * n + kMaxDegree + 64).data();
+    u32* const starts = polys.starts = input.take(n + 1).data();
+    read_polynomials(in, n, polys);
+    const std::size_t m = polys.small, large_count = polys.large_count, total = polys.total;
+    auto& count = polys.count;
+    auto& large = polys.large;
+    const u32 scalar = polys.constants.value();
 
-    // Constants; the others by degree, largest first (counting sort).
-    std::vector<u32> constants;
-    std::size_t total = 0, largest = 0;
-    for (std::size_t i = 0; i < n; ++i) {
-        const u32 d = tokens[starts[i]];
-        if (d == 0) constants.push_back(tokens[starts[i] + 1]);
-        total += d, largest = std::max<std::size_t>(largest, d);
+    // order: the nonconstant polynomials by degree, largest first (counting sort below kBuckets).
+    std::sort(large.begin(), large.begin() + std::ptrdiff_t(large_count), [&](u32 x, u32 y) { return tokens[x] > tokens[y]; });
+    const std::size_t nonconstant = m + large_count;
+    u32* order = starts;
+    if (large_count || std::count_if(count.begin() + 1, count.end(), [](u32 c) { return c != 0; }) > 1) {
+        order = input.take(n + 1).data();
+        std::copy_n(large.begin(), large_count, order);
+        for (std::size_t d = kBuckets - 1, at = large_count; d >= 1; --d) at += count[d], count[d] = u32(at - count[d]);
+        for (std::size_t j = 0; j < m; ++j) order[count[tokens[starts[j]]]++] = starts[j];
     }
-    std::vector<u32> count(largest + 1);
-    for (std::size_t i = 0; i < n; ++i) ++count[tokens[starts[i]]];
-    for (std::size_t d = largest, sum = 0; d >= 1; --d) sum += count[d], count[d] = u32(sum - count[d]);
-    u32* const order = input.take(n + 1).data();
-    const std::size_t nonconstant = n - constants.size();
-    for (std::size_t i = 0; i < n; ++i)
-        if (const u32 d = tokens[starts[i]]) order[count[d]++] = starts[i];
-    const u32 scalar = product(constants);
 
     // Big polynomials: while one's degree exceeds 1/64 of the rest's. Few small ones join them.
     std::size_t big = 0, rest = total;
@@ -142,15 +204,13 @@ void solve() {
     std::size_t lane_total = 0;  // lane 0's degree, the largest
     for (std::size_t k = 0; k < slots.count(); ++k) lane_total += slots.degree(k);
     const std::size_t lane_length = poly::LaneLayout::length(u32(lane_total)), lane_words = slots.size ? 8 * (lane_length + 1) : 0;
+    const std::size_t items_count = big + 8;
     const int lg = std::max(std::countr_zero(lane_length) + 3, std::countr_zero(poly::StandardLayout::length(u32(total))));
-    constexpr std::size_t kTextWords = fields::kTextBytes / sizeof(u32);
-    using LaneTree = poly::ProductTree<poly::LaneLayout, Slots>;
-    using TopTree = poly::ProductTree<poly::StandardLayout, Items>;
-    const std::size_t lane_scratch = slots.size ? LaneTree::scratch_words(lane_total) : 0;
-    poly::Arena arena(poly::TreeTransform::words(lg) + poly::Arena::footprint(lane_scratch) +
-                      poly::Arena::footprint(lane_words + 64) + poly::Arena::footprint(TopTree::scratch_words(total)) +
-                      poly::Arena::footprint(kTextWords));
+    const std::size_t scratch = std::max(slots.size ? LaneTree::scratch_words(slots.count(), lane_total) : 0,
+                                         TopTree::scratch_words(items_count, total));
+    poly::Arena arena(poly::TreeTransform::words(lg) + poly::Arena::footprint(scratch) + poly::Arena::footprint(lane_words + 64));
     const poly::TreeTransform t(arena, lg);
+    const std::span<u32> memory = arena.take(scratch);
 
     std::vector<Item> items;
     for (std::size_t i = 0; i < big; ++i) {
@@ -159,14 +219,14 @@ void solve() {
         items.push_back({c, c[-1]});
     }
     if (slots.size) {
-        LaneTree lanes(t, slots, arena.take(lane_scratch));
+        LaneTree lanes(t, slots, memory);
         const LaneTree::Root root = lanes.root();
         alignas(32) u32 degrees[8], sizes[8];
-        poly::detail::store(degrees, root.node.degree);
+        pd::store(degrees, root.node.degree);
         u32* columns[8];
-        u32* const memory = arena.take(lane_words + 64).data();
+        u32* const lane_polys = arena.take(lane_words + 64).data();
         for (std::size_t l = 0, at = 0; l < 8; ++l) {
-            columns[l] = memory + at;
+            columns[l] = lane_polys + at;
             sizes[l] = degrees[l] ? degrees[l] + 1 : 0;  // lanes of constants 1 are left out
             if (degrees[l]) items.push_back({columns[l], degrees[l]}), at += (degrees[l] + 8) / 8 * 8;
         }
@@ -175,21 +235,18 @@ void solve() {
     std::stable_sort(items.begin(), items.end(), [](const Item& x, const Item& y) { return x.degree > y.degree; });
 
     // The product's coefficients times scalar, from Montgomery form.
-    const u32 factor = poly::detail::montgomery_scalar(scalar, 1);
     std::span<const u32> product{&scalar, 1};
-    std::vector<u32> single;
     if (!items.empty()) {
         const Items leaves{items};
-        TopTree top(t, leaves, arena.take(TopTree::scratch_words(total)));
+        TopTree top(t, leaves, memory);
         const TopTree::Root root = top.root();
         u32* const c = root.coefficients.data();
-        const poly::detail::Factor f(factor);
-        for (std::size_t i = 0; i <= total; i += 8)
-            poly::detail::store(c + i, poly::detail::reduce(poly::detail::times(poly::detail::load(c + i), f), kP));
+        const pd::Factor f(pd::montgomery_scalar(scalar, 1));
+        for (std::size_t i = 0; i <= total; i += 8) pd::store(c + i, pd::reduce(pd::times(pd::load(c + i), f), kP));
         product = {c, total + 1};
     }
     io::Writer out;
-    fields::write(out, product.data(), product.size(), reinterpret_cast<char*>(arena.take(kTextWords).data()));
+    fields::write(out, product.data(), product.size(), reinterpret_cast<char*>(tokens));  // tokens are no longer needed
 }
 
 #ifdef __ELF__

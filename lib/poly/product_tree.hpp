@@ -37,7 +37,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <span>
-#include <vector>
 
 #include "lib/poly/calculus.hpp"
 #include "lib/poly/transform.hpp"
@@ -83,6 +82,49 @@ inline void inverse_small(Vec* f, std::size_t m, std::size_t k, const std::uint3
 inline std::uint32_t montgomery_scalar(std::uint32_t x, std::uint32_t y) {
     constexpr std::uint32_t kInverseR = ntt::detail::power(kR, kP - 2);
     return ntt::detail::multiply_mod(ntt::detail::multiply_mod(x, y), kInverseR);
+}
+
+// Lanes: c = a b for polynomials of degrees m and k (m + k <= 32), m + 1 and k + 1 vectors in
+// Montgomery form; c canonical. Coefficient sums of up to 17 products < P^2 in 64-bit lanes. Up to
+// 12 products: one Montgomery step (< 3.8P). More: first 2^32 h + l -> h 2^32 + l mod P (< 2^62),
+// then the step (< 2P + 1).
+[[gnu::always_inline]] inline void multiply_lanes(const std::uint32_t* a, std::size_t m, const std::uint32_t* b, std::size_t k,
+                                                  std::uint32_t* c) {
+    const Vec ni = broadcast(ntt::kernels::kNI), p = broadcast(kP), r = broadcast(kR);
+    Vec x[33], xo[33], y[33], yo[33];  // odd lanes moved to the even ones
+#pragma GCC unroll 33
+    for (std::size_t i = 0; i <= m; ++i) x[i] = load(a + 8 * i), xo[i] = _mm256_srli_epi64(x[i], 32);
+#pragma GCC unroll 33
+    for (std::size_t j = 0; j <= k; ++j) y[j] = load(b + 8 * j), yo[j] = _mm256_srli_epi64(y[j], 32);
+    const auto fold = [r](Vec s) { return _mm256_add_epi64(_mm256_mul_epu32(_mm256_srli_epi64(s, 32), r), _mm256_blend_epi32(s, _mm256_setzero_si256(), 0xAA)); };
+#pragma GCC unroll 65
+    for (std::size_t t = 0; t <= m + k; ++t) {
+        Vec even = _mm256_setzero_si256(), odd = _mm256_setzero_si256();
+        const std::size_t first = t > k ? t - k : 0, last = std::min(t, m);
+#pragma GCC unroll 17
+        for (std::size_t i = first; i <= last; ++i) {
+            even = _mm256_add_epi64(even, _mm256_mul_epu32(x[i], y[t - i]));
+            odd = _mm256_add_epi64(odd, _mm256_mul_epu32(xo[i], yo[t - i]));
+        }
+        if (last - first >= 12) even = fold(even), odd = fold(odd);
+        even = _mm256_add_epi64(even, _mm256_mul_epu32(_mm256_mul_epu32(even, ni), p));
+        odd = _mm256_add_epi64(odd, _mm256_mul_epu32(_mm256_mul_epu32(odd, ni), p));
+        store(c + 8 * t, canonical(_mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA)));
+    }
+}
+
+// multiply_lanes for m = k = 1, 2, 4, 8, 16 unrolled; others by the loops.
+inline void multiply_lanes_any(const std::uint32_t* a, std::size_t m, const std::uint32_t* b, std::size_t k, std::uint32_t* c) {
+    if (m == k) {
+        switch (m) {
+            case 1: return multiply_lanes(a, 1, b, 1, c);
+            case 2: return multiply_lanes(a, 2, b, 2, c);
+            case 4: return multiply_lanes(a, 4, b, 4, c);
+            case 8: return multiply_lanes(a, 8, b, 8, c);
+            case 16: return multiply_lanes(a, 16, b, 16, c);
+        }
+    }
+    multiply_lanes(a, m, b, k, c);
 }
 
 // LIFO allocation from one span: spans as Arena's (32-byte aligned, 16 words after each).
@@ -166,17 +208,16 @@ public:
     void inverse(std::span<const std::uint32_t> in, std::span<std::uint32_t> out, std::uint32_t c = 1) const {
         using namespace detail;
         check_length(out.size());
-        const std::uint32_t scale = ntt::detail::multiply_mod(leaf_scale_[std::countr_zero(out.size())], c);
         if (out.size() < 64) {
             const std::size_t nv = out.size() / 8;
             Vec f[4];
             for (std::size_t j = 0; j < nv; ++j) f[j] = load(in.data() + 8 * j);
             inverse_small(f, nv, 0, inverse_roots_);
-            const Factor s(scale);
+            const Factor s(scale(out.size(), c));
             for (std::size_t j = 0; j < nv; ++j) store(out.data() + 8 * j, reduce(times(f[j], s), kP));
             return;
         }
-        run(out, Source(nullptr, 0, 0), InverseBottom{inverse_roots_, in.data()}, scale);
+        run(out, Source(nullptr, 0, 0), InverseBottom{inverse_roots_, in.data()}, scale(out.size(), c));
     }
 
     // Standard layout: out = a b leaf by leaf (canonical, times 2^-32), n = out.size() words.
@@ -199,6 +240,9 @@ public:
     }
 
 private:
+    // The inverse's scale for n words, times c.
+    std::uint32_t scale(std::size_t n, std::uint32_t c) const { return ntt::detail::multiply_mod(leaf_scale_[std::countr_zero(n)], c); }
+
     void check_length(std::size_t n) const {
         if (!std::has_single_bit(n) || n < 8 || std::countr_zero(n) > lg_max_) std::abort();
     }
@@ -248,12 +292,23 @@ private:
 // Lanes: 8 polynomials per node, degrees and leading coefficients as vectors (one per lane).
 struct LaneLayout {
     static constexpr std::size_t kWords = 8;  // words per coefficient
+    static constexpr std::uint32_t kBase = 32;  // nodes up to this degree by schoolbook
     using Value = detail::Vec;
+
+    static void multiply(const std::uint32_t* a, std::size_t m, const std::uint32_t* b, std::size_t k, std::uint32_t* c) {
+        detail::multiply_lanes_any(a, m, b, k, c);
+    }
 
     static std::size_t length(std::uint32_t degree) { return std::bit_ceil(std::max<std::uint32_t>(degree, 1)); }
 
     static void product(const TreeTransform&, const std::uint32_t* a, const std::uint32_t* b, std::span<std::uint32_t> out) {
         TreeTransform::pointwise_products(a, b, out);
+    }
+
+    // The leading coefficients: lane l of c[degree_l].
+    static Value lead(const std::uint32_t* c, Value degree) {
+        const Value index = _mm256_add_epi32(_mm256_slli_epi32(degree, 3), _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7));
+        return _mm256_i32gather_epi32(reinterpret_cast<const int*>(c), index, 4);
     }
 
     static Value sum(Value x, Value y) { return _mm256_add_epi32(x, y); }
@@ -272,13 +327,18 @@ struct LaneLayout {
 // Standard: one polynomial per node.
 struct StandardLayout {
     static constexpr std::size_t kWords = 1;
+    static constexpr std::uint32_t kBase = 0;
     using Value = std::uint32_t;
+
+    static void multiply(const std::uint32_t*, std::size_t, const std::uint32_t*, std::size_t, std::uint32_t*) {}
 
     static std::size_t length(std::uint32_t degree) { return std::max<std::size_t>(8, std::bit_ceil(degree)); }
 
     static void product(const TreeTransform& t, const std::uint32_t* a, const std::uint32_t* b, std::span<std::uint32_t> out) {
         t.leaf_products(a, b, out);
     }
+
+    static Value lead(const std::uint32_t* c, Value degree) { return c[degree]; }
 
     static Value sum(Value x, Value y) { return x + y; }
     static Value lead_product(Value x, Value y) { return detail::montgomery_scalar(x, y); }
@@ -314,31 +374,32 @@ public:
         std::size_t length;  // coefficients past a lane's degree are zero
     };
 
-    // Scratch words for leaves whose degrees sum to total (lanes: the largest lane's sum).
-    static std::size_t scratch_words(std::size_t total) {
-        return 8 * Arena::footprint(Layout::kWords * (Layout::length(std::uint32_t(total)) + 1)) + 4096;
+    // Scratch words for count leaves whose degrees sum to total (lanes: the largest lane's sum).
+    static std::size_t scratch_words(std::size_t count, std::size_t total) {
+        return Arena::footprint(count + 1) + 8 * Arena::footprint(Layout::kWords * (Layout::length(std::uint32_t(total)) + 1)) + 4096;
     }
 
     ProductTree(const TreeTransform& t, const Leaves& leaves, std::span<std::uint32_t> scratch, Keep keep = {})
-        : t_(t), leaves_(leaves), keep_(keep), stack_(scratch), prefix_(leaves.count() + 1) {
-        for (std::size_t k = 0; k < leaves.count(); ++k) prefix_[k + 1] = prefix_[k] + leaves.degree(k);
+        : t_(t), leaves_(leaves), keep_(keep), stack_(scratch), count_(leaves.count()), prefix_(stack_.take(count_ + 1)) {
+        prefix_[0] = 0;
+        for (std::size_t k = 0; k < count_; ++k) prefix_[k + 1] = prefix_[k] + leaves.degree(k);
     }
 
     // The product of all leaves. Its coefficients live in the scratch.
     Root root() {
-        const std::size_t count = prefix_.size() - 1, length = Layout::length(degree(0, count));
+        const std::size_t count = count_, length = Layout::length(degree(0, count));
         constexpr std::size_t w = Layout::kWords;
         std::uint32_t* const c = stack_.take(w * (length + 1));
-        if (count == 1) {
+        if (count == 1 || degree(0, count) <= Layout::kBase) {
             std::fill_n(c, w * (length + 1), 0);
-            return {{c, w * (length + 1)}, leaves_.load(0, c), length};
+            return {{c, w * (length + 1)}, coefficients(0, count, c), length};
         }
         std::uint32_t* const a = stack_.take(w * length);
         const std::size_t mid = split(0, count);
         const Node left = build(0, mid, a, length), right = build(mid, count, c, length);
         Layout::product(t_, a, c, {a, w * length});
-        const Node node{Layout::sum(left.degree, right.degree), Layout::lead_product(left.lead, right.lead)};
         t_.inverse({a, w * length}, {c, w * length});
+        const Node node{Layout::sum(left.degree, right.degree), Layout::lead_product(left.lead, right.lead)};
         const Value top = Layout::top(node.degree, node.lead, length);
         Layout::subtract(c, top);
         Layout::put(c + w * length, top);
@@ -348,8 +409,7 @@ public:
     // The leaf where node [lo, hi) splits.
     std::size_t split(std::size_t lo, std::size_t hi) const {
         const std::uint32_t target = prefix_[lo] + (prefix_[hi] - prefix_[lo]) / 2;
-        const auto first = prefix_.begin() + std::ptrdiff_t(lo) + 1, last = prefix_.begin() + std::ptrdiff_t(hi) - 1;
-        std::size_t mid = std::size_t(std::lower_bound(first, last, target) - prefix_.begin());  // in [lo + 1, hi - 1]
+        std::size_t mid = std::size_t(std::lower_bound(prefix_ + lo + 1, prefix_ + hi - 1, target) - prefix_);  // in [lo + 1, hi - 1]
         if (mid > lo + 1 && prefix_[mid] >= target && target - prefix_[mid - 1] < prefix_[mid] - target) --mid;
         return mid;
     }
@@ -357,12 +417,51 @@ public:
     std::uint32_t degree(std::size_t lo, std::size_t hi) const { return prefix_[hi] - prefix_[lo]; }
 
 private:
+    // The degree(lo, hi) + 1 coefficients of node [lo, hi) at c: a leaf, or a node of degree <=
+    // Layout::kBase, multiplied out in consecutive pairs, level by level (any order gives the product).
+    Node coefficients(std::size_t lo, std::size_t hi, std::uint32_t* c) const {
+        if (hi - lo == 1) return leaves_.load(lo, c);
+        constexpr std::size_t w = Layout::kWords, kMax = std::max<std::size_t>(Layout::kBase, 1);  // leaves have degree >= 1
+        struct Part {
+            std::uint32_t* c;
+            std::size_t degree;
+        };
+        Part part[kMax];
+        alignas(32) std::uint32_t memory[2][w * 2 * kMax];  // a level's coefficients: degree + parts <= 2 kBase
+        std::size_t count = hi - lo;
+        std::uint32_t* to = memory[0];
+        Value degree{};
+        for (std::size_t k = 0; k < count; ++k) {
+            const Value d = leaves_.load(lo + k, to).degree;
+            degree = k ? Layout::sum(degree, d) : d;
+            part[k] = {to, leaves_.degree(lo + k)};
+            to += w * (part[k].degree + 1);
+        }
+        for (std::size_t level = 1; count > 1; ++level) {
+            to = count == 2 ? c : memory[level & 1];
+            std::size_t next = 0;
+            for (std::size_t k = 0; k + 1 < count; k += 2) {
+                const Part &a = part[k], &b = part[k + 1];
+                Layout::multiply(a.c, a.degree, b.c, b.degree, to);
+                part[next++] = {to, a.degree + b.degree};
+                to += w * (a.degree + b.degree + 1);
+            }
+            if (count % 2) {  // the odd one moves up as it is
+                const Part& a = part[count - 1];
+                std::copy_n(a.c, w * (a.degree + 1), to);
+                part[next++] = {to, a.degree};
+            }
+            count = next;
+        }
+        return {degree, Layout::lead(c, degree)};
+    }
+
     // out = the transform of node [lo, hi) of out_length coefficients (>= its length).
     Node build(std::size_t lo, std::size_t hi, std::uint32_t* out, std::size_t out_length) {
         constexpr std::size_t w = Layout::kWords;
-        if (hi - lo == 1) {
-            const Node node = leaves_.load(lo, out);
-            t_.forward({out, w * (leaves_.degree(lo) + 1)}, 0, {out, w * out_length});
+        if (hi - lo == 1 || degree(lo, hi) <= Layout::kBase) {  // out_length > degree: not the root
+            const Node node = coefficients(lo, hi, out);
+            t_.forward({out, w * (degree(lo, hi) + 1)}, 0, {out, w * out_length});
             keep_(lo, hi, std::span<const std::uint32_t>(out, w * out_length));
             return node;
         }
@@ -371,8 +470,8 @@ private:
         std::uint32_t* const b = stack_.take(words + w);
         const std::size_t mid = split(lo, hi);
         const Node left = build(lo, mid, a, length), right = build(mid, hi, b, length);
-        Layout::product(t_, a, b, {out, words});
         const Node node{Layout::sum(left.degree, right.degree), Layout::lead_product(left.lead, right.lead)};
+        Layout::product(t_, a, b, {out, words});  // separate passes: 1 cycle per vector faster than fused
         if (out_length > length) {
             // b = p mod (x^L - 1) = p + top (1 - x^L), top = p[L] or 0; first p mod (x^L + 1).
             t_.inverse({out, words}, {b, words});
@@ -393,7 +492,8 @@ private:
     const Leaves& leaves_;
     Keep keep_;
     detail::Stack stack_;
-    std::vector<std::uint32_t> prefix_;  // prefix_[k] = degree(0) + ... + degree(k - 1)
+    std::size_t count_;
+    std::uint32_t* prefix_;  // prefix_[k] = degree(0) + ... + degree(k - 1)
 };
 
 // Lane l of the vectors c[0 .. size[l]) into out[l][0 .. size[l]) for each lane, size[l] <= count

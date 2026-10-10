@@ -3,8 +3,8 @@
 K <= 18 variables, n_l >= 2, N = prod n_l <= 2^18; print f g mod (x_1^n_1, ..., x_K^n_K) mod
 998244353. 10 s.
 
-Record when opened: 117 ms (issue #36). Best judged: ours, 14 ms:
-[409322](https://judge.yosupo.jp/submission/409322) (round 2 `main.cpp`).
+Record when opened: 117 ms (issue #36). Best judged: ours, 11 ms:
+[409673](https://judge.yosupo.jp/submission/409673) (round 3 `main.cpp`).
 
 Official tests (shapes): twos (18 and 17 variables of size 2), threes (14 and 13 variables of
 sizes 2 and 3), max_random (7 variables of 2..10, N = 151200 and 181440), dim1 (N ~ 2^18), dim2,
@@ -221,6 +221,12 @@ no sources read.
   - Measured: `vpmuludq` ymm 0.51 cycles each on Zen 3 (2 per cycle; lc-bench, core clock).
   - lc-intel instruction shares, twos_00: spread 16%, pointwise 16% + `block_sums` 12%, forward
     steps 11%, top evaluation and interpolation 10%, inverse steps 7%, gather 5%, parser 12%.
+  - Merged in #328; CI 0.9364 (EPYC 9V74 0.901, EPYC 7763 0.954 and 0.956).
+  - Submitted the same source three times: [409671](https://judge.yosupo.jp/submission/409671)
+    AC 17 ms (spikes: dim2_00 17, threes_01 16, example_00 10; clean 12),
+    [409672](https://judge.yosupo.jp/submission/409672) AC 18 ms (spike: dim2_01 18; clean 12),
+    [409673](https://judge.yosupo.jp/submission/409673) AC 11 ms, 10.8 MiB: twos_00 11,
+    threes_00 10, max_random_01 10, max_random_00 9, threes_01 9 (was 14 ms, 409322).
 
 ## Next
 

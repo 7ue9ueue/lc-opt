@@ -2,6 +2,7 @@
 // fields (../convolution_mod/fields.hpp).
 #include <unistd.h>
 
+#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/ntt/ntt.hpp"
 #include "../convolution_mod/fields.hpp"
@@ -12,8 +13,8 @@ void solve() {
     io::Reader in;
     const auto n = in.read<std::uint32_t>(), m = in.read<std::uint32_t>();
     ntt::Convolution conv(n, m);
-    in.read(conv.a(), n);
-    in.read(conv.b(), m);
+    io::read_bulk(in, conv.a(), n);
+    io::read_bulk(in, conv.b(), m);
     const std::uint32_t* c = conv.multiply();
     io::Writer out;
     alignas(64) static char text[fields::kTextBytes];

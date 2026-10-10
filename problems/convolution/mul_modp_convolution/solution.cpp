@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/ntt/ntt.hpp"
 #include "../convolution_mod/fields.hpp"
@@ -124,9 +125,9 @@ struct Input {
 
 // Reads a_1.., b_0, b_1.. (n each but b_0) into pairs; returns b_0. a, b: scratch for n + 8 words.
 std::uint32_t read_pairs(io::Reader& in, std::uint32_t n, std::uint32_t* a, std::uint32_t* b, const Pairs& pairs) {
-    in.read(a, n);
+    io::read_bulk(in, a, n);
     const std::uint32_t b0 = in.read<std::uint32_t>();
-    in.read(b, n);
+    io::read_bulk(in, b, n);
     for (std::uint32_t i = 0; i < n; i += 8) {
         auto* out = reinterpret_cast<Vec*>(pairs.at(i + 1));
         const Vec x = _mm256_permute4x64_epi64(load(a + i), 0xD8), y = _mm256_permute4x64_epi64(load(b + i), 0xD8);

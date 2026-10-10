@@ -113,3 +113,7 @@ and `_exit` as in `../convolution_mod`.
   - [409343](https://judge.yosupo.jp/submission/409343) 2026-10-10 01:47 UTC: AC 430 ms,
     612.8 MiB, no spike; `main.cpp` of #127 (2/5 with 409265). The 15 slowest cases take
     426-430 ms (409265: 422-429, plus two spikes at 438-439). New best judged: 430 ms (was 439).
+- 2026-10-10, claude (lib/io #21, round 3): uint32 arrays read with `io::read_bulk`
+  (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
+  values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
+  412.06 → 406.55 ms (0.987). 54/54 official tests.

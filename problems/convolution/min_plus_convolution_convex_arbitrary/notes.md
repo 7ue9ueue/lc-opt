@@ -59,3 +59,7 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.36 ms on `lc-amd`.
   - CI (#92, EPYC 9V74, 3 runs): ratio 0.8555. Submitted the merged `main.cpp`:
     [409229](https://judge.yosupo.jp/submission/409229) AC 11 ms (was 13 ms, 409218).
   - Next: parse (`lib/io`, ~1.6 ms) and `write()` (kernel) dominate; compute ~1.7 ms.
+- 2026-10-10, claude (lib/io #21, round 3): uint32 arrays read with `io::read_bulk`
+  (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
+  values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
+  11.25 → 11.05 ms (0.981). 41/41 official tests. ASan/UBSan on the 3 largest cases, file and pipe.

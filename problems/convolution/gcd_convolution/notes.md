@@ -85,6 +85,10 @@ Record when opened: 37 ms (407011). Best judged: ours, [409214](https://judge.yo
   - PR #56 merged. CI ratios: EPYC 7763 0.933, EPYC 9V45 0.936 and 0.932 (geomean 0.933).
 - 2026-10-09, claude: submitted the PR #56 `main.cpp` (v7),
   [409214](https://judge.yosupo.jp/submission/409214): AC, 15 ms, 22.4 MiB (3/5). Was 17 ms.
+- 2026-10-10, claude (lib/io #21, round 3): uint32 arrays read with `io::read_bulk`
+  (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
+  values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
+  15.13 → 14.86 ms (0.979). 29/29 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
 
 ## Next
 

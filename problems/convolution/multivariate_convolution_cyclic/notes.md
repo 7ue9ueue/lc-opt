@@ -104,6 +104,10 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   - New best judged: 12 ms (409321); was 15 (409314).
 - Next: dim2_01 still pays ~0.5 ms for gather and scatter over dim1. The transforms (about
   6.5 ms) are the floor of this method; a gain there needs faster lib/ntt kernels.
+- 2026-10-10, claude (lib/io #21, round 3): uint32 arrays read with `io::read_bulk`
+  (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
+  values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
+  11.36 → 11.25 ms (0.991). 24/24 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
 
 ## Sources
 

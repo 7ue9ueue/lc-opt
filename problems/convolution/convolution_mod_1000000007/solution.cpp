@@ -7,6 +7,7 @@
 
 #include <array>
 
+#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "fields10.hpp"
 #include "fields11.hpp"
@@ -159,8 +160,8 @@ void solve() {
     // transform of b in place.
     auto* a = arena.take<std::uint32_t>(std::max(padded(n), len / 2));
     auto* b = arena.take<std::uint32_t>(words);
-    in.read(a, n);
-    in.read(b, m);
+    io::read_bulk(in, a, n);
+    io::read_bulk(in, b, m);
 
     const multimod::Transform transform(lg, arena.take<std::uint32_t>(multimod::Transform::table_words(lg)));
     auto* work = arena.take<std::uint32_t>(words);

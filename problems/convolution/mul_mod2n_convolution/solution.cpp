@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstdlib>
 
+#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/ntt/ntt.hpp"
 #include "../convolution_mod/fields.hpp"
@@ -470,7 +471,7 @@ void split(io::Reader& in, int n, Level* levels, Arena& arena, const Buffers& bu
         const int rows_log = n - kRowLog;
         const std::size_t width = std::size_t(1) << rows_log;
         for (std::size_t first = 0; first < kHeight; first += kBand) {
-            in.read(buffers.band, kBand * width);
+            io::read_bulk(in, buffers.band, kBand * width);
             to_grid(buffers.band, width, first, buffers.grid);
         }
         for (; n - s >= kBlockedLog; ++s) gather(buffers.grid, n - s, s, z, open_level(levels[s], n - s, arena));
@@ -480,7 +481,7 @@ void split(io::Reader& in, int n, Level* levels, Arena& arena, const Buffers& bu
             cur[i] = buffers.grid[(x & (width - 1)) * kPitch + (x >> rows_log)];
         }
     } else {
-        in.read(cur, std::size_t(1) << n);
+        io::read_bulk(in, cur, std::size_t(1) << n);
     }
     for (; s <= n; ++s) {
         const int m = n - s;

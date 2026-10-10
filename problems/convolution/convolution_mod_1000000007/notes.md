@@ -101,6 +101,10 @@ Record when opened: 29 ms (another user). Best judged: ours, 23 ms, spike-free:
   - New best judged: 23 ms (409310, 409353); was 31 (409262).
 - Next: everything left is in the transforms (14.2 of ~23 ms, lib/ntt's kernels) and fixed I/O.
   No problem-local idea left that is worth more than noise.
+- 2026-10-10, claude (lib/io #21, round 3): uint32 arrays read with `io::read_bulk`
+  (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
+  values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
+  24.03 → 23.86 ms (0.989). 48/48 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
 
 ## Sources
 

@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "../convolution_mod/fields.hpp"
 
@@ -388,8 +389,8 @@ void solve() {
     auto* region = allocate<std::uint32_t>(std::max(3 * words, fields::kTextBytes / sizeof(std::uint32_t)));
     auto* pairs = reinterpret_cast<std::uint64_t*>(region);
     std::uint32_t* const b = region + 2 * words;
-    in.read(region + 1, n);
-    in.read(b + 1, n);
+    io::read_bulk(in, region + 1, n);
+    io::read_bulk(in, b + 1, n);
 
     interleave_zeta3(region, b, pairs, n);
     for (const std::uint32_t p : {5, 7, 11, 13}) zeta_pass(pairs, n, p);

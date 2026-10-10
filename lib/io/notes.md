@@ -25,6 +25,11 @@ convolution problems: `problems/convolution/floor.py`.
   top * 10^16 + mid * 10^8 + low. It needs no input end: n tokens span at least 2n - 1 bytes,
   which bounds chunks and loads. It works through `Reader::scan()`/`resume()` and has its own
   header so that io.hpp, and the code of every problem bundled from it, stays unchanged.
+- Bulk `uint32_t` read on Zen 3 (`bulk32.hpp`, `io::read_bulk(in, dst, n)`): the same streams and
+  steps, but each step stores its eight values as one vector, [a0 a1 a2 a3 b0 b1 b2 b3] for the
+  two tokens of each stream, into a buffer; a 4x4 transpose of value pairs then writes each
+  stream's values in order. Elsewhere `io::read_bulk` is `Reader::read`; `-DIO_BULK32_TRANSPOSE`
+  forces either. Like `bulk64.hpp`, it needs no input end.
 - Output: 64 KiB buffer, `write(2)`. Integers: 4-digit table (10000 entries), groups placed in a
   vector, `pshufb` drops the leading zeros, one 16-byte store. Digit count from a 32-entry table
   (32-bit) or two 65-entry tables (64-bit). No branches on value size. `write<MaxDigits>()` with
@@ -212,6 +217,43 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
   reads overlap the parse and only fault-around and `munmap` (1.64 ms per 20.7 MB) are extra;
   the kernel copy of `read()` runs serially and costs more than that.
 
+2026-10-10, claude, issue #21 round 3. Parse alone: warm input of bitwise_and max_random_00 (2^21
+tokens, 90% of 9 digits), in-process, ns per token, medians of 21; "in L2" parses 16K tokens
+301 times. `lc-amd` at 3.48 GHz unless noted.
+- `Reader::read` (BulkParser): 1.17 (in L2 1.29), ~11 instructions per token, IPC ~2.7.
+- Block parser: aligned 64-byte blocks, the tokens ending in a block in 8 lanes (positions by
+  `tzcnt`/`blsr`, windows ending at each separator, rows by length), no pointer chain: 1.23
+  (in L2 1.20). 18.75 instructions per token at IPC 4.4: bound by instruction count, a quarter
+  of the lanes empty. `lc-intel`: 0.99 vs 1.06.
+- More streams for BulkParser (pointer chains): 8 1.29, 12 1.31. Four tokens per step (64-byte
+  mask, windows ending at the separators): 1.20. Masks from a separator bitmap built per chunk
+  (the chain without `vpmovmskb`): 1.33.
+- Ablations of BulkParser (values wrong): no stores 0.99; one 32-byte store per step instead of
+  four 8-byte stores, `vpermd` and `vextracti128` 0.97; constant rows 1.15; no window insert 1.07;
+  constant stride (no pointer chain, rows hoisted) 0.75.
+- Kept: one store per step and a transpose pass (`BulkParser32`, `bulk32.hpp`): 0.97 (-17%), in L2
+  1.15 (-11%); 0.94 vs 1.13 on convolution_mod all_same_01. `lc-intel` (Emerald Rapids,
+  x86-64-v3): 1.07 vs 1.02 (+5%), so `io::read_bulk` takes it only on `__znver3__`.
+- Transposing in registers every four steps instead (four 32-byte stores to the streams): 1.09 on
+  `lc-amd`, 1.04 on `lc-intel`. Row pairs from one 32-byte load of a 35 KB table: -1%. 8 streams
+  with whole-vector stores: slower than 4. None kept.
+- Floors with the new parser in `Reader::read` (`floor.py --fixed`, 21 rounds): bitwise_and
+  11.74 → 11.46 ms (0.972), gcd 11.36 → 10.97 (0.966), convolution_mod 9.61 → 9.50 (0.982),
+  mul_modp 6.61 → 6.41 (0.971).
+- Problems switched to `io::read_bulk` (`judge.py bench`, 21 rounds, slowest 3 cases, ms, ratio):
+  bitwise_and 13.17 → 12.79 (0.979), gcd 15.13 → 14.86 (0.979), bitwise_xor 14.97 → 14.68
+  (0.981), lcm 16.37 → 16.05 (0.981), min_plus convex_arbitrary 11.25 → 11.05 (0.981), mul_mod2n
+  20.57 → 20.24 (0.986), convolution_mod_large 412.06 → 406.55 (0.987),
+  convolution_mod_1000000007 24.03 → 23.86 (0.989), min_plus concave_arbitrary 28.20 → 28.03
+  (0.991), multivariate_convolution_cyclic 11.36 → 11.25 (0.991), mul_modp 12.04 → 11.93 (0.993).
+  multivariate_convolution 13.71 → 13.68 (0.998, 2^19 tokens): noise, left on `Reader::read`.
+  Not switched: convolution_mod (another round is running on it), min_plus convex_convex (own
+  parser), the polynomial problems (another session).
+- Checks: lib tests with judge flags, with `-DIO_BULK32_TRANSPOSE=0`, and with ASan/UBSan, on
+  `lc-amd` and `lc-intel`; the transposed parser is tested on every CPU through
+  `detail::read_transposed`. Every switched problem passes all official tests; ASan/UBSan builds
+  pass on the 3 largest cases of each (but convolution_mod_large), file and pipe input.
+
 ## Sources
 
 - Our own QPoly explorations 007 and 011 (`../SymPoly/work/ntt/io_yosupo`, `io_large`): the
@@ -228,13 +270,19 @@ many_aplusb, where the time goes (ms): start 1.1, input pages 4.7, parse 2M toke
 - Bulk write is 1.3 ns per value slower than fixed-width output; the vector work, not the stores,
   is the limit (in-memory: compute 1.4, with movemask 1.7, full 2.4 ns per value).
 - Bulk reads for signed values.
-- Fold `io::read_bulk` into `Reader::read` when io.hpp changes anyway, with gains that outweigh
-  the noise of re-timing every problem.
+- Fold `io::read_bulk` (both widths) into `Reader::read` when io.hpp changes anyway, with gains
+  that outweigh the noise of re-timing every problem; then switch convolution_mod and the
+  polynomial problems too.
+- `BulkParser64` also stores its values in pieces (four 16-byte stores per step): whole-vector
+  stores and a transpose may help it on Zen 3 as they did here (a guess; convolution_mod_2_64
+  parses for 2.5 of ~43 ms).
+- The parser is still about 0.2 ns per token above the constant-stride ablation (0.75): the
+  pointer chains. Tried and lost: more streams, four tokens per step, a bitmap of separators.
 - A faster uint64 write: only if a problem's floor becomes a large share of its time
   (convolution_mod_2_64 and convolution_F_2_64 are at 25% and 5% now).
 - Huge-page arrays (2 MiB-aligned mapping, `MADV_HUGEPAGE`) are copied in three solutions and cut
   floors by 15-20%: a shared helper may belong in `lib/`. It gains nothing on solved problems
   (all allocate this way already); add it with the next problem that needs it.
 - Streamed input lost to the mapping on all four solved convolution problems (round 2); the rest
-  of the floors is kernel time (`write()`, input faults, `munmap`), the parser (~1.2 ns per token)
-  and the formatter.
+  of the floors is kernel time (`write()`, input faults, `munmap`), the parser (~1.0 ns per token
+  on Zen 3 with `bulk32.hpp`) and the formatter.

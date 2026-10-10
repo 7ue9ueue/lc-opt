@@ -118,6 +118,10 @@ faults), columns a 0.59, columns b 1.05, inverse rows 0.75, print 4.63, exit 0.9
   ~1.25 for radix-16 in 16 registers; the rest is the I/O floor and process start/exit.
 - PR #53 merged. CI ratios: EPYC 7763 0.973, EPYC 9V74 0.963 and 0.931. Submitted its `main.cpp`:
   [409210](https://judge.yosupo.jp/submission/409210), AC, 14 ms, 23.0 MiB (2/5).
+- 2026-10-10, claude (lib/io #21, round 3): uint32 arrays read with `io::read_bulk`
+  (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
+  values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
+  14.97 → 14.68 ms (0.981). 13/13 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
 
 ## Next
 

@@ -111,6 +111,10 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
 - Next: the transforms (1.5 ms) run at ~3 vector ops per butterfly plus one store per element
   per pass, near the 4-pipe bound; little left there. Remaining time is lib/io (parse 2.5 ms,
   input faults and `munmap` 1.6 ms), `../fixed_width.hpp` (1.13 ms) and `write()` (3.4 ms).
+- 2026-10-10, claude (lib/io #21, round 3): uint32 arrays read with `io::read_bulk`
+  (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
+  values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
+  13.17 → 12.79 ms (0.979). 13/13 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
 
 ## Sources
 

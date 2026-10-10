@@ -117,20 +117,20 @@ template <int kParity>
 
 // tc[j] = t c[j] for j >= first (canonical), t = s per lane, or -s if kNegative; the rest zero.
 template <bool kNegative>
-[[gnu::always_inline]] inline void scaled_leaves(const Vec (&c)[8], const Factor& s, int first, Vec (&tc)[8]) {
+[[gnu::always_inline]] inline void scaled_leaves(const Vec (&c)[8], const Factors& s, int first, Vec (&tc)[8]) {
 #pragma GCC unroll 8
     for (int j = 0; j < 8; ++j) {
-        const Vec x = reduce(times_lanes(c[j], s), kP);
+        const Vec x = reduce(times(c[j], s), kP);
         tc[j] = j < first ? _mm256_setzero_si256() : kNegative ? negate(x) : x;
     }
 }
 
 // Leaves k .. k + 7 at out from x mod (u^4 - s) and y mod (u^4 + s): (x + y) + u^4 (x - y) / s,
 // twice their CRT, in [0, 2P).
-inline void combine_pairs(const Vec (&x)[4], const Vec (&y)[4], const Factor& inverse, std::uint32_t* out) {
+inline void combine_pairs(const Vec (&x)[4], const Vec (&y)[4], const Factors& inverse, std::uint32_t* out) {
     Vec r[8];
 #pragma GCC unroll 4
-    for (int i = 0; i < 4; ++i) r[i] = low(add(x[i], y[i])), r[i + 4] = times_lanes(diff(x[i], y[i]), inverse);
+    for (int i = 0; i < 4; ++i) r[i] = low(add(x[i], y[i])), r[i + 4] = times(diff(x[i], y[i]), inverse);
     transpose(r);
 #pragma GCC unroll 8
     for (int i = 0; i < 8; ++i) store(out + 8 * i, r[i]);
@@ -138,11 +138,8 @@ inline void combine_pairs(const Vec (&x)[4], const Vec (&y)[4], const Factor& in
 
 // s = r[k + lane] and its inverse, for 8 pairs from pair k (a multiple of 8).
 struct PairWeights {
-    Factor s{0}, inverse{0};
-    PairWeights(const Tables& tables, std::size_t k) {
-        s.w = load(tables.roots + slot(k)), s.q = load(tables.roots + slot(k) + 8);
-        inverse.w = load(tables.inverse_roots + slot(k)), inverse.q = load(tables.inverse_roots + slot(k) + 8);
-    }
+    Factors s, inverse;
+    PairWeights(const Tables& tables, std::size_t k) : s(entries(tables.roots, k)), inverse(entries(tables.inverse_roots, k)) {}
 };
 
 // The bottom of the forward transform of Q_s (length 4m): forward butterflies, then per pair of
@@ -177,7 +174,7 @@ struct ProjectionBottom {
 
     // V and W mod (u^4 - t) for t = s (or -s if kNegative) of the 8 leaves at q and p, times 2^-32.
     template <bool kNegative>
-    [[gnu::noinline, gnu::flatten]] static void leaves(const std::uint32_t* q, const std::uint32_t* p, const Factor& s,
+    [[gnu::noinline, gnu::flatten]] static void leaves(const std::uint32_t* q, const std::uint32_t* p, const Factors& s,
                                                        Vec (&v)[4], Vec (&w)[4]) {
         Vec c[8], a[8], tc[8];
         load_leaves(q, c), load_leaves(p, a);
@@ -205,7 +202,7 @@ struct FirstLevelProducts {
     }
 
     template <bool kNegative>
-    [[gnu::noinline, gnu::flatten]] void leaves(std::size_t at, const Factor& s, Vec (&r)[5][4]) const {
+    [[gnu::noinline, gnu::flatten]] void leaves(std::size_t at, const Factors& s, Vec (&r)[5][4]) const {
         Vec c1[8], c2[8], a[8], t1[8], t2[8];
         load_leaves(q1 + at, c1), load_leaves(q2 + at, c2), load_leaves(p1 + at, a);
         scaled_leaves<kNegative>(c1, s, 2, t1);

@@ -60,14 +60,6 @@ inline Vec negate(Vec x) {
     return _mm256_min_epu32(_mm256_sub_epi32(broadcast(kP), x), _mm256_sub_epi32(_mm256_setzero_si256(), x));
 }
 
-// x w mod P in [0, 2P) for any x < 2^32 and a factor per lane (times() needs one factor).
-inline Vec times_lanes(Vec x, const Factor& f) {
-    const Vec even = _mm256_srli_epi64(_mm256_mul_epu32(x, f.q), 32);
-    const Vec odd = _mm256_mul_epu32(_mm256_srli_epi64(x, 32), _mm256_srli_epi64(f.q, 32));
-    const Vec q = _mm256_blend_epi32(even, odd, 0xAA);
-    return _mm256_sub_epi32(_mm256_mullo_epi32(x, f.w), _mm256_mullo_epi32(q, broadcast(kP)));
-}
-
 // Lane j of r[i] <-> lane i of r[j].
 inline void transpose(Vec (&r)[8]) {
     Vec t[8], u[8];
@@ -243,14 +235,13 @@ struct CompositionBottom {
 #pragma GCC unroll 8
         for (int i = 0; i < 8; ++i) x[i] = load(f + 8 * (p + i)), a[i] = load(q + 16 * (p + i)), b[i] = load(q + 16 * (p + i) + 8);
         transpose(x), transpose(a), transpose(b);
-        Factor s(0);  // r[p + lane]
-        s.w = load(tables->roots + slot(p)), s.q = load(tables->roots + slot(p) + 8);
+        const Factors s = entries(tables->roots, p);  // r[p + lane]
         Vec pa[4], pb[4], spa[4], spb[4];
 #pragma GCC unroll 4
         for (int i = 0; i < 4; ++i) {
-            const Vec t = times_lanes(x[i + 4], s);
+            const Vec t = times(x[i + 4], s);
             pa[i] = canonical(add(x[i], t)), pb[i] = canonical(diff(x[i], t));
-            spa[i] = reduce(times_lanes(pa[i], s), kP), spb[i] = negate(reduce(times_lanes(pb[i], s), kP));
+            spa[i] = reduce(times(pa[i], s), kP), spb[i] = negate(reduce(times(pb[i], s), kP));
         }
         Vec ra[8], rb[8];
         leaf(pa, spa, a, ra);

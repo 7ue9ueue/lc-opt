@@ -111,13 +111,44 @@ inline Vec low_difference(Vec x, Vec y) {
 // x - y mod P for canonical x, y.
 inline Vec difference(Vec x, Vec y) { return reduce(_mm256_sub_epi32(add(x, broadcast(kP)), y), kP); }
 
-// x w mod P in [0, 2P), any x < 2^32.
+// x w mod P in [0, 2P), any x < 2^32, w the same in every lane: the odd lanes use the even lanes'
+// quotient. Factors that differ by lane are Factors, not a Factor with its fields overwritten.
 inline Vec times(Vec x, const Factor& w) { return ntt::detail::multiply(x, w); }
+
+// A factor per lane and its Shoup quotients.
+struct Factors {
+    Vec w, q;
+};
+
+// x w mod P in [0, 2P), any x < 2^32, w per lane.
+inline Vec times(Vec x, const Factors& w) {
+    const Vec even = _mm256_srli_epi64(_mm256_mul_epu32(x, w.q), 32);
+    const Vec odd = _mm256_mul_epu32(_mm256_srli_epi64(x, 32), _mm256_srli_epi64(w.q, 32));
+    const Vec q = _mm256_blend_epi32(even, odd, 0xAA);
+    return _mm256_sub_epi32(_mm256_mullo_epi32(x, w.w), _mm256_mullo_epi32(q, broadcast(kP)));
+}
+
+// (n / 8)^-1 mod P for n = 2^lg, 3 <= lg <= kMaxLog: undoes a transform's factor n / 8. Row 1:
+// times 2^32, which also undoes the 2^-32 of leaf products.
+inline constexpr auto kInverseScales = [] {
+    std::array<std::array<std::uint32_t, ntt::kMaxLog + 1>, 2> s{};
+    for (int lg = 3; lg <= ntt::kMaxLog; ++lg) {
+        s[0][lg] = ntt::detail::power(std::uint32_t(1) << (lg - 3), kP - 2);
+        s[1][lg] = ntt::detail::multiply_mod(s[0][lg], kR);
+    }
+    return s;
+}();
 
 // Entry k of a twiddle table with its Shoup quotient.
 inline Factor entry(const std::uint32_t* table, std::size_t k) {
     const std::uint32_t* e = table + slot(k);
     return Factor(e[0], e[8]);
+}
+
+// Entries k .. k + 7 of a twiddle table, one per lane, k a multiple of 8.
+inline Factors entries(const std::uint32_t* table, std::size_t k) {
+    const std::uint32_t* e = table + slot(k);
+    return {load(e), load(e + 8)};
 }
 
 // w_p and its quotient; the quotient of P - w is ~quotient(w).
@@ -629,9 +660,8 @@ public:
     // out = the coefficients in [0, P) of the transform in, both of length n = out.size(). in may
     // be out; otherwise the two must not overlap.
     void inverse(std::span<const std::uint32_t> in, std::span<std::uint32_t> out, Half output = Half::kBoth) const {
-        using namespace ntt::detail;
-        const std::uint32_t scale = power(std::uint32_t(out.size() / 8), kP - 2);  // undoes the factor n / 8
-        run(out, detail::Source(nullptr, 0, 0), detail::InverseBottom{inverse_roots_, in.data()}, scale, output);
+        run(out, detail::Source(nullptr, 0, 0), detail::InverseBottom{inverse_roots_, in.data()}, inverse_scale(out.size(), false),
+            output);
     }
 
     // In place: transform -> coefficients in [0, P).
@@ -641,8 +671,7 @@ public:
     // as for forward(). Only the output half of out is computed.
     void cyclic_product(std::span<const std::uint32_t> in, std::size_t shift, std::span<std::uint32_t> out,
                         std::span<const std::uint32_t> b, Half output = Half::kBoth, std::uint32_t c = 1) const {
-        using namespace ntt::detail;
-        const std::uint32_t scale = multiply_mod(multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR), c);  // and 2^-32
+        const std::uint32_t scale = ntt::detail::multiply_mod(inverse_scale(out.size(), true), c);
         run(out, source(in, shift, out.size()), detail::ProductBottom{roots_, inverse_roots_, b.data()}, scale, output);
     }
 
@@ -653,10 +682,9 @@ public:
     // Only the output half of out is computed. out may be a or b; otherwise none may overlap.
     void inverse_product(std::span<const std::uint32_t> a, std::span<const std::uint32_t> b, std::span<std::uint32_t> out,
                          Half output = Half::kBoth) const {
-        using namespace ntt::detail;
-        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
         const detail::ProductBottom product{roots_, inverse_roots_, b.data()};
-        run(out, detail::Source(nullptr, 0, 0), detail::InverseProductBottom{product, a.data()}, scale, output);
+        run(out, detail::Source(nullptr, 0, 0), detail::InverseProductBottom{product, a.data()}, inverse_scale(out.size(), true),
+            output);
     }
 
     // Two transforms of the same length.
@@ -681,9 +709,7 @@ public:
     // InverseProductBottom does for a b. Only the output half of out is computed.
     template <class Bottom>
     void inverse_with(const Bottom& bottom, std::span<std::uint32_t> out, Half output = Half::kBoth) const {
-        using namespace ntt::detail;
-        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
-        run(out, detail::Source(nullptr, 0, 0), bottom, scale, output);
+        run(out, detail::Source(nullptr, 0, 0), bottom, inverse_scale(out.size(), true), output);
     }
 
     // out = the transform of (x^shift in) b mod (x^n - 1) for b a transform of length
@@ -711,13 +737,17 @@ private:
         if (!std::has_single_bit(n) || lg < kMinLog || lg > lg_max_) std::abort();
     }
 
+    // The scale of an inverse transform of length n (kInverseScales), with 2^32 if montgomery.
+    std::uint32_t inverse_scale(std::size_t n, bool montgomery) const {
+        check_length(n);
+        return detail::kInverseScales[montgomery][std::countr_zero(n)];
+    }
+
     template <std::size_t K>
     void inverse_products(std::span<const Pair> pairs, std::span<std::uint32_t> out, Half output) const {
-        using namespace ntt::detail;
-        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
         detail::InverseProductSumBottom<K> bottom{};
         for (std::size_t k = 0; k < K; ++k) bottom.terms[k] = {{roots_, inverse_roots_, pairs[k].b.data()}, pairs[k].a.data()};
-        run(out, detail::Source(nullptr, 0, 0), bottom, scale, output);
+        run(out, detail::Source(nullptr, 0, 0), bottom, inverse_scale(out.size(), true), output);
     }
 
     static detail::Source source(std::span<const std::uint32_t> in, std::size_t shift, std::size_t n) {

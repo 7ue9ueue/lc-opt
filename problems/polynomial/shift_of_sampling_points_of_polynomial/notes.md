@@ -6,7 +6,8 @@ type1_random_00/03 (N ~ 4 10^5, outputs partly at sample points). type0 (all out
 samples), type1 (c < N, outputs run past the samples), type2 (no overlap), type3 (c + M wraps
 past P, outputs may hit the samples again), c_0, N_1.
 
-Best judged: none yet.
+Best judged: ours, 11 ms: [409556](https://judge.yosupo.jp/submission/409556) (`main.cpp` of #264),
+clean (`tools/spikes.py`).
 Record when opened (issue #80): 41 ms.
 
 ## Design
@@ -97,6 +98,11 @@ median of the slowest case (15 rounds); 4.37 in the run next to v4 below.
     N, M <= 1500 against `brute.cpp` (Newton differences), larger by Lagrange at 6 points; c at
     0, inside the samples, just past them, wrapping past P, ending at P - 1 +- 2, random;
     ASan/UBSan on all 32 official cases, file and pipe input.
+  - Merged as #264 (v5; new problem: CI checks only).
+  - Submitted the merged `main.cpp` once (1 of 5 this session):
+    [409556](https://judge.yosupo.jp/submission/409556) AC 11 ms, clean (`spikes.py`: no case
+    above its peers): max_random_00/03 11 ms, max_random_01/02, type1_random_00, type2_random_00
+    10, the rest at most 9. Not resubmitted: no spike set the score.
 - Next:
   - The transform is 4.2 of the 6.5 ms above the floor (shared with #76, #79).
   - inverses (0.77 ms warm): z costs two products per output; kappa is per lane pair because

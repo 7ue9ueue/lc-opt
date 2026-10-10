@@ -11,8 +11,12 @@ Record when opened (issue #62): 25 ms.
 - `lib/poly/inverse.hpp`: Newton iteration, 5 transforms of length 2k per step k -> 2k
   (lib/poly/notes.md).
 - `lib/io` input; output in 10-byte fixed-width fields (`problems/convolution/convolution_mod/fields.hpp`,
-  judge-specific: the checker compares tokens). One `poly::Arena` (huge pages) for the tables,
-  f, g, the scratch and the text.
+  judge-specific: the checker compares tokens).
+- Memory: one `poly::Arena` (huge pages). `poly::inverse` computes g mod x^k, k = 2^18; the last
+  step (`poly::inverse_step`) runs in f's buffer of 2^19 words, which ends up holding g[k, N).
+  Arrays: tables 0.5 MiB, f 2 MiB, scratch 2 MiB (the inverse's, then T(g mod x^k)), g mod x^k
+  1 MiB, text 0.25 MiB: 3 huge pages, against 5 before. The output is written in two pieces
+  (a newline after the first; the checker reads tokens).
 - The program runs from `.preinit_array` and ends with `_exit` (as convolution_mod).
 
 ## Floor
@@ -41,7 +45,16 @@ tables 0.07, inverse 8.26, format 0.32 (to /dev/null); total 9.5. Whole process 
 - 2026-10-09, claude (lib/poly round, issue #95): faster leaf products (#158; lib/poly/notes.md):
   `cyclic_product` at 2^19 3.38 -> 3.07 ns per coefficient. `judge.py bench` (21 rounds):
   `lc-amd` 13.11 -> 12.52 ms (0.9550), `lc-intel` 0.9800; CI 0.9493. Not submitted (0.6 ms).
-- Next: the transform levels run at ~4.5 cycles per vector per radix-4 level, near the ~3.6 cycle
-  uop bound; the leaf product now at ~16 cycles per leaf inside `cyclic_product` (multiply-pipe
-  bound ~12). Then writing g directly from the last inverse (0.15 ms) and a smaller arena (~1-2
-  MiB less first touch).
+- 2026-10-09, claude (round 2, issue #62).
+  - Phases on main, in process, `lc-amd` (scratch probe, medians of 41): inverse 7.48 ms warm,
+    8.03 first use (+0.55 ms: faults of 3 huge pages). Last step (2^19): forward 0.61, products
+    1.58 and 1.56, negation 0.135; all negations 0.28 ms.
+  - Changes: the negation folded into the second product's scale (lib/poly
+    `cyclic_product(..., c)`, `inverse_step`); the last step in f's buffer, 3 huge pages instead
+    of 5 (see Design).
+  - `judge.py bench`, 21 rounds, slowest 3 cases: `lc-amd` 12.58 -> 12.13 ms (0.9618), `lc-intel`
+    0.9748. An earlier version that wrote the halves straight into g: `lc-amd` 0.9672, `lc-intel`
+    0.9927 (slower on `lc-intel` in sqrt and pow; lib/poly/notes.md).
+  - Checks: 25/25 official tests (`lc-amd`); `stress.py` 400 rounds; ASan/UBSan on all 25
+    official cases, file and pipe input (`lc-intel`); lib/poly tests (in-place last step for
+    n = 33 .. 300 and around powers of two).

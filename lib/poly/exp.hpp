@@ -38,11 +38,6 @@ inline void exp_direct(std::span<const std::uint32_t> d, std::span<std::uint32_t
     }
 }
 
-// out[i] = -a[i] mod P, a.size() a multiple of 8, both 32-byte aligned.
-inline void negate(std::span<const std::uint32_t> a, std::span<std::uint32_t> out) {
-    for (std::size_t i = 0; i < a.size(); i += 8) store(out.data() + i, reduce(_mm256_sub_epi32(broadcast(kP), load(a.data() + i)), kP));
-}
-
 }  // namespace detail
 
 // Transform length exp uses for n coefficients: the Transform needs lg_max >= this.
@@ -76,8 +71,8 @@ namespace detail {
         t.forward(g.first(m), 0, g_low);
         // h[m/2, m) = -(h e mod x^(m/2)), e = (g h)[m/2, m)
         t.inverse_product(g_low, h_low, w_low, Half::kUpper);
-        t.cyclic_product(w_low.subspan(half), half, w_low, h_low, Half::kUpper);
-        negate(w_low.subspan(half), h.subspan(half, half));
+        t.cyclic_product(w_low.subspan(half), half, w_low, h_low, Half::kUpper, kP - 1);
+        std::copy_n(w.begin() + std::ptrdiff_t(half), half, h.begin() + std::ptrdiff_t(half));
         // T_m(r) = T_m(x q) G_lo at w[0, m), r at gt[m, 2m) until G's upper half goes there
         t.forward_product(d.first(m - 1), 1, w_low, g_low);
         t.inverse(w_low, gt.subspan(m, m));

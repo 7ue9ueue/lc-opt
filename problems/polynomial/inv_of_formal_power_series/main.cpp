@@ -3,6 +3,8 @@
 // (problems/convolution/convolution_mod/fields.hpp). One arena holds every array.
 #include <unistd.h>
 
+#include <algorithm>
+
 // lib/io/io.hpp
 // Fast integer and text I/O on file descriptors (stdin and stdout by default).
 // Linux, x86-64 with AVX2. Design and measurements: lib/io/notes.md.
@@ -3517,12 +3519,12 @@ public:
     // In place: transform -> coefficients in [0, P).
     void inverse(std::span<std::uint32_t> a, Half output = Half::kBoth) const { inverse(a, a, output); }
 
-    // out = (x^shift in) b mod (x^n - 1) for b a transform of length n = out.size(); in as for
-    // forward(). Only the output half of out is computed.
+    // out = c (x^shift in) b mod (x^n - 1) for b a transform of length n = out.size(), c < P; in
+    // as for forward(). Only the output half of out is computed.
     void cyclic_product(std::span<const std::uint32_t> in, std::size_t shift, std::span<std::uint32_t> out,
-                        std::span<const std::uint32_t> b, Half output = Half::kBoth) const {
+                        std::span<const std::uint32_t> b, Half output = Half::kBoth, std::uint32_t c = 1) const {
         using namespace ntt::detail;
-        const std::uint32_t scale = multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR);  // and 2^-32
+        const std::uint32_t scale = multiply_mod(multiply_mod(power(std::uint32_t(out.size() / 8), kP - 2), kR), c);  // and 2^-32
         run(out, source(in, shift, out.size()), detail::ProductBottom{roots_, inverse_roots_, b.data()}, scale, output);
     }
 
@@ -3670,25 +3672,35 @@ inline int inverse_log(std::size_t n) {
 // Scratch words for inverse() of n coefficients.
 inline std::size_t inverse_scratch(std::size_t n) { return 2 * Arena::footprint(std::size_t(1) << inverse_log(n)); }
 
+// One Newton step: to = (1 / f)[k, k + to.size()) from g = 1 / f mod x^k, to.size() <= k, with
+// transforms of length 2k (t: lg_max >= log2(2k)):
+//   e = f g mod (x^2k - 1), whose coefficients [k, 2k) are those of f g;
+//   to = -(x^k e[k, 2k) g mod (x^2k - 1))[k, k + to.size()).
+// 5 transforms of length 2k (g's is used twice). gt, work: 2k words each, 32-byte aligned. f may
+// start at work (f is then overwritten); to may start at work[k] (no copy is made then). Otherwise
+// none may overlap. (Writing the transform's output half straight into to was slower on lc-intel
+// than this copy: lib/poly/notes.md.)
+inline void inverse_step(const Transform& t, std::span<const std::uint32_t> f, std::span<const std::uint32_t> g,
+                         std::span<std::uint32_t> to, std::span<std::uint32_t> gt, std::span<std::uint32_t> work) {
+    const std::size_t k = g.size();
+    t.forward(g, 0, gt);
+    t.cyclic_product(f.first(std::min(2 * k, f.size())), 0, work, gt, Half::kUpper);
+    t.cyclic_product(work.subspan(k), k, work, gt, Half::kUpper, detail::kP - 1);
+    if (to.data() != work.data() + k) std::copy_n(work.begin() + std::ptrdiff_t(k), to.size(), to.begin());
+}
+
 // g = 1 / f mod x^n for n = g.size() >= 1. f[0] != 0; coefficients of f past f.size() are zero.
 // scratch: inverse_scratch(n) words, 32-byte aligned (from an Arena). t: lg_max >= inverse_log(n).
-//
-// Newton steps double the known prefix g_k: with transforms of length 2k,
-//   e = f g_k mod (x^2k - 1), whose coefficients [k, 2k) are those of f g_k;
-//   g[k, 2k) = -(x^k e[k, 2k) g_k mod (x^2k - 1))[k, 2k).
-// Each step takes 5 transforms of length 2k (g_k's is used twice).
+// Newton steps from kInverseBase, each doubling the known prefix of g.
 inline void inverse(const Transform& t, std::span<const std::uint32_t> f, std::span<std::uint32_t> g,
                     std::span<std::uint32_t> scratch) {
     const std::size_t n = g.size();
     std::size_t k = std::min(n, detail::kInverseBase);
     detail::inverse_direct(f, g.first(k));
     for (; k < n; k *= 2) {
-        const std::size_t len = 2 * k, end = std::min(len, n);
-        const std::span<std::uint32_t> gk = scratch.first(len), e = scratch.subspan(Arena::footprint(len), len);
-        t.forward(g.first(k), 0, gk);
-        t.cyclic_product(f.first(std::min(len, f.size())), 0, e, gk, Half::kUpper);
-        t.cyclic_product(e.subspan(k), k, e, gk, Half::kUpper);
-        for (std::size_t i = k; i < end; ++i) g[i] = e[i] ? detail::kP - e[i] : 0;
+        const std::size_t len = 2 * k;
+        inverse_step(t, f, g.first(k), g.subspan(k, std::min(k, n - k)), scratch.first(len),
+                     scratch.subspan(Arena::footprint(len), len));
     }
 }
 
@@ -3870,19 +3882,33 @@ inline void write(io::Writer& out, const std::uint32_t* values, std::size_t coun
 
 namespace {
 
+// g = 1 / f mod x^k for k = 2^(lg - 1) by poly::inverse, then the last step from k to n in the
+// buffer of f: g[k, n) ends up there, after f is read. The arrays fill 3 huge pages at N = 500000
+// (2 + 2 + 1 MiB and 0.75 MiB of tables and text), each first touched once.
 void solve() {
     io::Reader in;
     const std::size_t n = in.read<std::uint32_t>();
     const int lg = poly::inverse_log(n);
+    const std::size_t len = std::size_t(1) << lg, k = len / 2;
     constexpr std::size_t kTextWords = fields::kTextBytes / sizeof(std::uint32_t);
-    poly::Arena arena(poly::Transform::words(lg) + 2 * poly::Arena::footprint(n) + poly::inverse_scratch(n) +
-                      poly::Arena::footprint(kTextWords));
+    const std::size_t scratch_words = std::max(len, poly::inverse_scratch(k));
+    using poly::Arena;
+    Arena arena(poly::Transform::words(lg) + Arena::footprint(len) + Arena::footprint(scratch_words) +
+                Arena::footprint(k) + Arena::footprint(kTextWords));
     const poly::Transform transform(arena, lg);
-    const std::span<std::uint32_t> f = arena.take(n), g = arena.take(n);
-    in.read(f.data(), n);
-    poly::inverse(transform, f, g, arena.take(poly::inverse_scratch(n)));
+    const std::span<std::uint32_t> a = arena.take(len), scratch = arena.take(scratch_words), g = arena.take(k);
+    char* const text = reinterpret_cast<char*>(arena.take(kTextWords).data());
+    in.read(a.data(), n);
+    const std::span<const std::uint32_t> f = a.first(n);
     io::Writer out;
-    fields::write(out, g.data(), n, reinterpret_cast<char*>(arena.take(kTextWords).data()));
+    if (n <= k) {  // n <= 32
+        poly::inverse(transform, f, g.first(n), scratch);
+        return fields::write(out, g.data(), n, text);
+    }
+    poly::inverse(transform, f, g, scratch);
+    poly::inverse_step(transform, f, g, a.subspan(k, n - k), scratch.first(len), a);
+    fields::write(out, g.data(), k, text);  // ends in a newline: the checker reads tokens
+    fields::write(out, a.data() + k, n - k, text);
 }
 
 #ifdef __ELF__

@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / 'bench' / 'data'
 API = 'https://v3.api.judge.yosupo.jp'
 USER = 'Aiyiyi'
-OURS_ANONYMOUS = {408883}  # our submissions made without logging in
+OURS_ANONYMOUS = {406388, 408883}  # our submissions made without logging in
 LOCK = '/tmp/bench.lock'
 PORTABLE = '-march=x86-64-v3 -madx -mpclmul -mvpclmulqdq -maes -mvaes'
 MACHINES = {'lc-amd': 'AMD', 'lc-intel': 'Intel'}  # host -> column; others use the host name

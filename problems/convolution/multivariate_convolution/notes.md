@@ -145,6 +145,11 @@ no sources read.
   faults), and blocks are 60 pages (`lib/io/notes.md`). `judge.py bench`, `lc-amd`, 31 rounds,
   slowest 3 cases: 13.76 → 13.59 ms (0.988). Outputs byte-identical to main on all 17 tests
   (judge build, ASan/UBSan, pipe input).
+  - PR #187 merged; CI 0.9920 (EPYC 7763 0.987, EPYC 9V45 1.000, Xeon 8573C 0.990).
+  - Submitted: [409405](https://judge.yosupo.jp/submission/409405), AC 20 ms, 14.8 MiB.
+    Against 409322: dim1_00 6 → 15, dim1_01 6 → 14, dim2_01 10 → 20 (+9 each: launch spikes;
+    `judge.py test` on `lc-amd`: 7.2, 6.5, 9.0 ms, as main); twos_00 13 → 14, threes_00
+    14 → 13. Clean 14 ms; best judged stays 14 ms.
 
 ## Next
 

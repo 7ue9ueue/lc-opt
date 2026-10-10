@@ -124,6 +124,11 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
   a page-aligned buffer are the fastest). `judge.py bench`, `lc-amd`, 31 rounds, slowest 3 cases:
   12.93 → 12.66 ms (0.985). First try: the buffer move alone 0.988, with 60-page blocks 0.983.
   Outputs byte-identical to main on all 13 tests (judge build, ASan/UBSan, pipe input).
+  PR #187 merged; CI 0.9882 (EPYC 7763 0.982, EPYC 9V45 0.990, Xeon 8370C 0.993).
+- 2026-10-10, claude (lib/io #21, round 4): submitted the #187 `main.cpp`,
+  [409404](https://judge.yosupo.jp/submission/409404): AC 21 ms, 18.8 MiB. max_random_00 and
+  _02 12 ms; max_random_01 21, as in 409382 (12 in 409202): a launch spike twice on the same
+  case (locally the three cases are within 0.2 ms). Clean 12 ms; best judged stays 12 ms.
 
 ## Sources
 

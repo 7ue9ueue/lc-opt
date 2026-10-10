@@ -298,6 +298,10 @@ in Docker with a 1 GiB memory limit and tmpfs files unless noted; medians of 21-
   14.70 → 14.61 (0.998; 41 rounds with a control: 0.991, control 0.995). Outputs byte-identical
   to main on every official test (judge build, ASan/UBSan, pipe input). `floor.cpp` places its
   text the same way.
+- PR #187 merged; CI geomean 0.9871: bitwise_and 0.9882, bitwise_xor 0.9810,
+  multivariate_convolution 0.9920 (EPYC 7763 0.980-0.987). Submitted 2: bitwise_and 409404
+  and multivariate_convolution 409405, both with launch spikes; clean 12 and 14 ms, unchanged
+  (the gain is 0.1-0.2 ms, under the judge's 1 ms resolution). Details in their notes.
 
 ## Sources
 

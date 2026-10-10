@@ -11,16 +11,21 @@ Record when opened (issue #35): 45 ms.
 - Primitive root g (trial division of P - 1). For i, j != 0, i = g^x: the nonzero outputs are the
   cyclic convolution of length n = P - 1 of A[x] = a_(g^x), B[x] = b_(g^x). One linear product of
   length 2n - 1 <= 2^20 (`lib/ntt`), folded: c_(g^k) = d_k + d_(k+n).
-  c_0 = a_0 (b_0 + sum b) + b_0 sum a; the sums come out of the gather.
+  c_0 = a_0 (b_0 + sum b) + b_0 sum a; the sums come out of the fold pass. P = 2 directly.
 - Transform: for 2^lg >= 512 (P >= 131), `ntt::Product` (`lib/ntt/product.hpp`: convolution_mod's
   radix-8 first level, bottom stage and fused inverse top). Other P: `ntt::Convolution`.
-- Input: a_1.. and b_1.. are parsed into the factors' lower halves, then interleaved into pairs
-  a_i + 2^32 b_i (one 8-byte load serves both factors). The pairs live in the factors' upper
-  halves (which `ntt::Product` does not read): pairs 1..2^lg/4 in a's, the rest in b's. No
-  memory beyond the product's layout.
-- Gather: powers g^x, g^(x+16) by a vector Shoup multiply (16 lanes, step g^16), lane order
-  0 1 4 5 2 3 6 7 so that two `vpgatherdq` and two `shufps` give A and B in natural order.
-- Output: scatter c[g^k] into b's buffer, `../convolution_mod/fields.hpp`,
+- Slots: g^(x + n/2) = P - g^x, so x and x + n/2 meet indices s and P - s, slot
+  s = min(g^x, P - g^x) in [1, n/2]. Input and output keep each slot's two indices side by side:
+  one random access serves x and x + n/2 (half of round 2's).
+- Input: a_1.. and b_1.. are parsed into the factors' lower halves, then folded into quads
+  [a_s, b_s, a_(P-s), b_(P-s)] (16 bytes; the second pair read backwards). The quads live in the
+  factors' upper halves (which `ntt::Product` does not read): slots 1..2^lg/8 in a's, the rest in
+  b's. No memory beyond the product's layout.
+- Gather: powers g^x by a vector Shoup multiply (8 lanes, step g^8); per lane one 16-byte load of
+  the slot's quad, a 4x8 transpose, and blends by y > (P - 1)/2 give A[x], B[x], A[x + n/2],
+  B[x + n/2].
+- Output: scatter c_s + 2^32 c_(P-s) into slot s of b's buffer (one 8-byte store per slot), unfold
+  into a's buffer (even dwords forward, odd dwords backward), `../convolution_mod/fields.hpp`,
   `.preinit_array` start, `_exit`.
 
 ## Log
@@ -68,7 +73,7 @@ Record when opened (issue #35): 45 ms.
 - 2026-10-10, audit (claude): [409350](https://judge.yosupo.jp/submission/409350) (2026-10-10
   01:54 UTC) was not logged before; who submitted it is not recorded. Current `main.cpp` (#163):
   AC 12 ms, 15.8 MiB, no spike on the slowest case. Ties best judged (409289).
-- Next: the product (4.46 ms) is `lib/ntt`'s. Gather and scatter (0.78 + 0.66) resisted
+- Next (round 2): the product (4.46 ms) is `lib/ntt`'s. Gather and scatter (0.78 + 0.66) resisted
   prefetch, fusion and partitioning. No idea left outside `lib/` worth a round (guess).
 - 2026-10-10, claude (lib/io #21, round 3): uint32 arrays read with `io::read_bulk`
   (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
@@ -85,8 +90,41 @@ Record when opened (issue #35): 45 ms.
   `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
   before (judge flags, `lc-amd`).
 
+- 2026-10-10, claude (round 3). `lc-amd` and `lc-bench` (EPYC 7B13), judge flags. Exploration
+  files: `lc-opt-explore/mul_modp_convolution/` (`probe.py` stamps convolve(), `phases.sh`,
+  `variants.py`, `split_bench.cpp`, `asan.sh`). Phases: in-process medians of 21 interleaved runs
+  on p_max_00 (us): parse a + b, interleave or fold, gather, multiply, scatter, output.
+  - Kept, slots (Design): main 1694 / 255 / 681 / 4314 / 476 / 1975 (9395); slots 1694 / 248 /
+    412 / 4312 / 313 / 2067 (9046). The gather and scatter make half the random accesses; the
+    output pays ~0.1 ms for the unfold.
+  - Kept details: input sums in the fold pass instead of the gather (gather 475 -> 412, fold +4).
+    Unfold in one pass, then `fields::write`: equal to unfolding per 25600-value block into a
+    staging buffer (`judge.py bench` 10.71 vs 10.70 ms) and simpler.
+  - Lost (same phases): the unfold fused into the formatter (fields.hpp's `divide` and `store`
+    with loads from the folded layout, four 16-byte loads and two `shufps` per 16 values): output
+    2129 vs 2090 us for the staging buffer. Gather with `vpgatherdq` 666 vs 490; two groups of 8
+    slots per iteration 551 vs 490; 64-bit addresses through the stack 517 vs 475 (GCC turns the
+    index store and reloads into `vpextrd`); scatter of 16 slots per iteration 350 vs 344;
+    scatter's store loop unrolled 307 vs 313 (noise).
+  - Measured, not pursued: x^n - 1 = (x^(n/2) - 1)(x^(n/2) + 1) splits the product into two
+    linear products of length n - 1 <= 2^19 (inputs A_lo +- A_hi from the gather, c from the
+    scatter). Two `ntt::Product` of 2^19 against one of 2^20, fresh mappings, medians of 41:
+    4552 vs 4594 us (-1%; lg 19 takes the radix-4 top level). The quads would span four upper
+    halves. Not worth it.
+  - The binary always needs libstdc++ (the driver links it without `--as-needed`; checked with
+    `readelf -d`), so its loading (~0.4 ms, lib/run/notes.md) cannot be avoided from source.
+  - `judge.py bench`, `lc-bench`, slowest 3 cases (p_max_00, p_max_01, large_05): 31 rounds
+    11.09 -> 10.71 ms (0.968); final version, 41 rounds, a busier VM: 11.56 -> 11.17 (0.962).
+  - Checks: 40/40 official tests (`lc-amd`); `stress.py` 500 rounds and 24 known large cases,
+    200 rounds built with `-march=x86-64-v3`; ASan/UBSan on all 40 official cases, file and pipe
+    input.
+- Next: left outside `lib/`: fold 0.25, gather 0.41, scatter 0.31 and unfold ~0.1 ms of ~9.0 in
+  process. The product (4.3 ms), the parse (1.7) and `write()` (~1.7) belong to `lib/ntt`,
+  `lib/io` and the kernel. Halving the random accesses again needs a dense index of the cosets of
+  a subgroup larger than {1, -1}; none is cheap (guess).
+
 ## Sources
 
 - Discrete log reduction of multiplicative convolution mod a prime: standard (Rader-style index
-  map). No code read.
+  map). No code read. Slots: g^((P - 1)/2) = -1 for a primitive root g (standard).
 - `lib/ntt` (`ntt::Product`), `lib/io`; `../convolution_mod/fields.hpp` (shared).

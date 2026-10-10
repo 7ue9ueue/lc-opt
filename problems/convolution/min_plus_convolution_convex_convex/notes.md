@@ -3,10 +3,11 @@
 N, M <= 2^19; a and b convex, 0 <= a_i, b_i <= 10^9; print c_k = min_{i+j=k} a_i + b_j
 (N + M - 1 values, each < 2^31). 5 s.
 
-Best judged: ours, 9 ms: [409568](https://judge.yosupo.jp/submission/409568) (`main.cpp` of #280).
+Best judged: ours, 9 ms: [409568](https://judge.yosupo.jp/submission/409568) (`main.cpp` of #280) and
+[409575](https://judge.yosupo.jp/submission/409575) (current `main.cpp`, #283). Clean score of #283: 8-9 ms.
 Record when opened: 20 ms (issue #29).
 I/O floor (`../floor.py`, `lib/io/notes.md`): 11.31 ms on `lc-amd` (with `lib/io` output); 10.66 ms on
-`lc-bench` in round 3, against 8.70 ms for this `main.cpp` (own parser and formatter).
+`lc-bench` in round 3, against 8.70 ms for #280's `main.cpp` (own parser and formatter).
 
 ## Design
 
@@ -143,3 +144,18 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.31 ms on `lc-amd` (with `lib/io
     2, 6, 8 chains 0.845, 0.601, 0.802 (4 kept). `judge.py bench` against #280, 41 rounds,
     5 slowest cases: 8.62 -> 8.52 ms (0.974). Checks: 34/34, stress 1500, ASan/UBSan on all 34
     cases, file and pipe.
+  - PR #283 merged; CI new/old 0.9891 (EPYC 7763: 0.9925, 0.9948, 0.9801). Submitted the same
+    source 3 times: [409573](https://judge.yosupo.jp/submission/409573) AC 13 ms (spikes on
+    near_power_of_2_08 and small_07; clean 9: monotone_03 and max_random_01 at 9),
+    [409574](https://judge.yosupo.jp/submission/409574) AC 17 ms (spike on max_random_00; clean
+    8, every other case <= 8), [409575](https://judge.yosupo.jp/submission/409575) AC 9 ms, no
+    spike (small_slopes_00/01 at 9, the rest <= 7). The judge moves a case by 1-2 ms between runs
+    (small_slopes_01: 7 in 409573/409574, 9 in 409575). 4 submissions this round.
+  - Not kept: the window steps fused with the formatter (two steps per chain, then 16 values
+    formatted from registers into 16-aligned text, no c buffer): `judge.py bench` 1.096 against
+    #283 with 4 chains, 1.10 with 2 and 1 (lc-bench, 15-21 rounds). The bitonic version fused
+    earlier this round lost too (merge + format 2.35 ms against 1.82).
+  - Next: the slowest cases are within ~1 ms of each other (small_slopes, max_random, monotone);
+    user time is ~1.9 ms of ~8.5 (parse 0.6, merge 0.55, format 0.85), the rest kernel and start.
+    The window step is load-bound (~20 loads per 8 values, guess from the port probe): building
+    some windows from registers (vperm2i128, vpalignr) instead of loads is untried.

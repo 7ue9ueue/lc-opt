@@ -259,6 +259,7 @@ struct Crt {
         _mm256_maskstore_epi32(reinterpret_cast<int*>(out + i), keep, folded(y, i, n));
     }
 
+private:
     // (c_j + c_{j + n}) z mod p for j in [i, i + 8): residues folded per prime, then one CRT.
     Vec folded(const Residues& y, std::size_t i, std::size_t n) const {
         const auto fold = [&](int k) {
@@ -268,7 +269,6 @@ struct Crt {
         return combine(fold(0), fold(1), fold(2));
     }
 
-private:
     // c z mod p from canonical residues y_k of 8 coefficients, canonical.
     Vec combine(Vec y0, Vec y1, Vec y2) const {
         const auto inv = [](int k) { return _mm256_set1_ps(1.0f / float(kPrimeList[k][0])); };
@@ -400,10 +400,8 @@ public:
             for_row(r, wide_, y_.length, [&](std::size_t c, std::size_t at) { place[r * y_.length + c] = f[at]; });
     }
 
-    // f[i_x s_x + c s_y] <- the value at place r n_y + c, where values(j) returns places [j, j + 8)
-    // for j < D.
-    template <class Values>
-    void scatter(Values values, std::uint32_t* f) const {
+    // f[i_x s_x + c s_y] <- place[r n_y + c].
+    void scatter(const std::uint32_t* place, std::uint32_t* f) const {
         for (std::size_t c0 = 0; c0 < wide_; c0 += 8) {
             std::uint32_t* rows = f + c0 * y_.stride;
             std::size_t start[8];
@@ -412,18 +410,15 @@ public:
                 const std::size_t count = std::min<std::size_t>(8, x_.length - r0);
                 Vec v[8];
                 for (std::size_t k = 0; k < 8; ++k)
-                    v[k] = k < count ? values((r0 + k) * y_.length + c0) : _mm256_setzero_si256();
+                    v[k] = k < count ? _mm256_loadu_si256(reinterpret_cast<const Vec*>(place + (r0 + k) * y_.length + c0))
+                                     : _mm256_setzero_si256();
                 transpose8(v);
                 for (std::size_t l = 0; l < 8; ++l) store(rows + l * y_.stride, start[l], count, v[l]);
                 advance(start);
             }
         }
         for (std::size_t r = 0; r < x_.length; ++r)
-            for (std::size_t c0 = wide_; c0 < y_.length; c0 += 8) {
-                alignas(32) std::uint32_t v[8];
-                _mm256_store_si256(reinterpret_cast<Vec*>(v), values(r * y_.length + c0));
-                for_row(r, c0, std::min(c0 + 8, y_.length), [&](std::size_t c, std::size_t at) { f[at] = v[c - c0]; });
-            }
+            for_row(r, wide_, y_.length, [&](std::size_t c, std::size_t at) { f[at] = place[r * y_.length + c]; });
     }
 
 private:
@@ -533,6 +528,23 @@ public:
         }
     }
 
+    // Two long axes of coprime lengths and no short ones, f and g still in the input: read(x)
+    // parses D values into x, f then g; write(x) prints D values. Each is staged in an array of
+    // the product that is free at that time (f in b, g in work), the result in work.
+    template <class Read, class Write>
+    void multiply_input(Read read, Write write) {
+        const SkewedTranspose transpose(axes_[0], axes_[1]);
+        std::uint32_t *a = pair_, *b = pair_ + half();
+        read(b);
+        transpose.gather(b, a);
+        read(work_);
+        transpose.gather(work_, b);
+        products(pair_);
+        crt_.reconstruct_folded(residues_, lengths_[0], a);
+        transpose.scatter(a, work_);
+        write(work_);
+    }
+
     // f[base + offset] <- (f * g)[base + offset] over the long axes, times the scale. The pair is
     // zero between calls but at the points' places; the last call (last = true) leaves it dirty.
     void multiply(std::uint32_t* f, const std::uint32_t* g, std::size_t base, bool last) {
@@ -562,7 +574,8 @@ private:
             transpose.gather(f + base, a);
             transpose.gather(g + base, b);
             products(pair_);
-            transpose.scatter([&](std::size_t j) { return crt_.folded(residues_, j, d); }, f + base);
+            crt_.reconstruct_folded(residues_, d, a);
+            transpose.scatter(a, f + base);
         } else {
             for_each_point([&](std::size_t offset, std::size_t place) {
                 a[place] = f[base + offset];
@@ -728,6 +741,17 @@ void solve() {
             short_axes.push_back(axis);
             short_total *= axis.length;
         }
+    const Field field(p);
+    if (short_axes.empty() && long_axes.size() == 2 && CyclicFactors(long_axes).length.size() == 1) {
+        // No arrays in input order: f, g and the result are staged in the product's arrays.
+        mem::Arena arena(take_bytes(fields::kTextBytes / 4 + 1) + LongProduct::arena_bytes(long_axes));
+        char* text = arena.take<char>(fields::kTextBytes);
+        io::Writer out;
+        LongProduct(long_axes, field, 1, arena)
+            .multiply_input([&](std::uint32_t* x) { io::read_bulk(in, x, total); },
+                            [&](const std::uint32_t* x) { fields::write(out, x, total, text); });
+        return;
+    }
 
     // Direct product (one long axis, of stride 1): f holds pairs [row r of f | row r of g], each row
     // of n values zero up to half the pair. Else g follows f.
@@ -745,7 +769,6 @@ void solve() {
     for (std::uint32_t* x : {f, g})
         for (std::size_t r = 0; r < rows; ++r) io::read_bulk(in, x + r * gap, n);
 
-    const Field field(p);
     const std::uint32_t scale = field.inverse(std::uint32_t(short_total % p));
     const std::uint32_t root = short_axes.empty() ? 1 : primitive_root(field);
     if (direct) {

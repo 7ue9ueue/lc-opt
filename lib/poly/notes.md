@@ -375,8 +375,8 @@ rule.
   2 .. T - 4, per level: forward of Q_s with the Graeffe bottom 0.76 (the bottom ~0.25), inverse
   of V 0.23; forward of P 0.24, inverse of R with the product bottom 0.79 (the bottom ~0.30).
   Levels 0: 0.60 + 0.68; 1: 0.73 + 0.81; T - 3: 0.51 + 0.75; T - 2 and T - 1: 0.61 + 0.94.
-- Memory: level s keeps its transform of 4m words (levels 0, 1, T - 3, T - 2, T - 1 less); 2
-  work spans of 4m.
+- Memory: a slot of 4m words per level (levels 0, 1, T - 3, T - 2, T - 1 store less); no work
+  spans: temporaries use slots not filled yet (forward) or no longer read (backward).
 - For power projection (#68, #86, #87): the forward pass is the same; P_(s+1) = odd part of
   P_s Q_s(-x) is, per leaf pair, the CRT of the odd parts of a_P(z) a_Q(-z) and b_P(z) b_Q(-z),
   so the same pair structure fits a forward-only pass with P's transform at 4m per level.
@@ -1094,8 +1094,29 @@ products 1.77 and 1.69).
   composition.hpp has its own `inverse_product_sum<K>` on its tables.
 - `judge.py bench` (21 rounds, new/main), `lc-amd` (`lc-intel`):
   composition_of_formal_power_series_large 0.8973 (0.9219), composition_of_formal_power_series
-  0.9275 (0.9631), compositional_inverse_of_formal_power_series 0.9974 (0.9895). PR #242. All official tests pass (`judge.py test`); `test.cpp` passes at -O2 (x86-64-v3 and
-  native) and ASan/UBSan (`lc-intel`); both composition `stress.py` 400 rounds.
+  0.9275 (0.9631), compositional_inverse_of_formal_power_series 0.9974 (0.9895). All official
+  tests pass (`judge.py test`); `test.cpp` passes at -O2 (x86-64-v3 and native) and ASan/UBSan
+  (`lc-intel`); both composition `stress.py` 400 rounds.
+- Merged as #242. CI: composition_of_formal_power_series 0.9306, _large 0.9024,
+  compositional_inverse_of_formal_power_series 0.9944; all 3 0.9417.
+
+2026-10-10, claude (issue #86, second change):
+- composition.hpp without work spans: each level has a slot of 4m words, and temporaries go to
+  slots not filled yet (forward) or no longer read (backward); V of level s goes straight into
+  level s + 1's slot and is inverted in place. Huge pages touched by compose at m = 2^17: 21 -> 19
+  (~100 µs each on `lc-amd`); in process warm 29.98 -> 29.85 ms. `calculus.hpp` is no longer
+  included (montgomery went with the old Tables).
+- Tried, not kept: level T - 4 one-dimensional in y (column levels generalized to 16 columns:
+  28 products forward, 64 backward, transforms of m/8, `ColumnSumBottom` with weights 1, 2, -2).
+  At m = 2^17: forward 766 µs, backward 1249 µs against ~1030 each for the generic level; compose
+  29.8 ms either way. Products in sums of 8 at length 2^14 cost 15-18 µs per 2048 leaves (the 16
+  operand arrays exceed L2). Preparing windows 2 or 3 groups ahead instead of 1 (store
+  forwarding): no change.
+- `judge.py bench` (21 rounds, new/main), `lc-amd` (`lc-intel`):
+  composition_of_formal_power_series_large 0.9887 (0.9846; with its bulk input and fields output),
+  composition_of_formal_power_series 0.9831 (0.9573), compositional_inverse_of_formal_power_series
+  0.9977 (1.0056). Tests: `test.cpp` at -O2 and ASan/UBSan, both `stress.py` 400 rounds, all
+  official tests.
 
 ## Sources
 

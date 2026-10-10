@@ -784,24 +784,6 @@ private:
 #include <cstdlib>
 #include <span>
 
-// lib/poly/calculus.hpp
-// Coefficient-wise operations on power series modulo 998244353: derivative and division by
-// consecutive integers (integration). x86-64 with AVX2. Log: lib/poly/notes.md.
-//
-//   poly::derivative(f, d);              // d[i] = (i + 1) f[i + 1]; d may be f (in place)
-//   poly::divide_by_index(a, first, q);  // q[i] = a[i] / (first + i)
-//   poly::divide_by_index(a, 1, q.subspan(1)), q[0] = 0;  // q = the integral of a
-//
-// Coefficients in [0, P), spans of any size and alignment.
-
-#include <immintrin.h>
-
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <cstdlib>
-#include <span>
-
 // lib/poly/transform.hpp
 // Transforms modulo 998244353 for power series code. Linux or macOS, x86-64 with AVX2.
 // Design, measurements and sources: lib/poly/notes.md.
@@ -6056,139 +6038,6 @@ namespace poly {
 
 namespace detail {
 
-inline Vec load_unaligned(const std::uint32_t* p) { return _mm256_loadu_si256(reinterpret_cast<const Vec*>(p)); }
-inline void store_unaligned(std::uint32_t* p, Vec x) { _mm256_storeu_si256(reinterpret_cast<Vec*>(p), x); }
-
-// a b / 2^32 mod P in [0, 2P), for a b < 2^32 P (for example a, b < 2P). Each 64-bit sum
-// a b + m P stays below 2^33 P.
-inline Vec montgomery(Vec a, Vec b) {
-    const Vec ni = broadcast(ntt::kernels::kNI), p = broadcast(kP);
-    Vec even = _mm256_mul_epu32(a, b);
-    Vec odd = _mm256_mul_epu32(_mm256_srli_epi64(a, 32), _mm256_srli_epi64(b, 32));
-    even = _mm256_add_epi64(even, _mm256_mul_epu32(_mm256_mul_epu32(even, ni), p));
-    odd = _mm256_add_epi64(odd, _mm256_mul_epu32(_mm256_mul_epu32(odd, ni), p));
-    return _mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA);
-}
-
-// The integers [k, k + 8) times 2^32 mod P, for multiplying by them with montgomery().
-class Indices {
-public:
-    explicit Indices(std::size_t k) {
-        alignas(32) std::uint32_t x[8];
-        for (std::uint32_t i = 0; i < 8; ++i) x[i] = std::uint32_t((std::uint64_t(k + i) << 32) % kP);
-        value_ = load(x);
-    }
-
-    Vec value() const { return value_; }
-    void next() { value_ = reduce(add(value_, broadcast(kStep)), kP); }  // k += 8
-
-private:
-    static constexpr std::uint32_t kStep = std::uint32_t((std::uint64_t(8) << 32) % kP);
-    Vec value_;
-};
-
-inline std::uint32_t scalar_inverse(std::uint32_t x) { return ntt::detail::power(x, kP - 2); }
-
-// out[i] = a(i) / (first + i) for i < out.size(), where a(i) is lane i % 8 of a(8 (i / 8)), a
-// vector in [0, 2P). a(j) may read past the end of out's range (lanes discarded), but not the
-// words of out. Montgomery's batch inversion in 4 interleaved vector chains: out first holds
-// prefix products of blocks of 32 integers, lane by lane, each with a factor 2^-32 per step;
-// the factors cancel in the backward pass. first >= 1, first + out.size() <= P.
-template <class A>
-void divide_by_index(std::size_t first, std::span<std::uint32_t> out, const A& a) {
-    constexpr std::size_t kLanes = 32;
-    const std::size_t n = out.size();
-    if (n == 0) return;
-    const std::size_t blocks = (n + kLanes - 1) / kLanes, last = kLanes * (blocks - 1);
-    const Vec one = broadcast(1), step = broadcast(kLanes);
-    // The integers of block b: first + 32 b + lane; lanes past n count as 1.
-    Vec x[4];
-    for (int v = 0; v < 4; ++v)
-        x[v] = _mm256_add_epi32(broadcast(std::uint32_t(first + 8 * v)), _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7));
-    const auto valid = [n](std::size_t at) {  // lanes of the vector at index at that are < n
-        const Vec lanes = _mm256_add_epi32(broadcast(std::uint32_t(at)), _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7));
-        return _mm256_cmpgt_epi32(broadcast(std::uint32_t(n)), lanes);  // n < 2^31
-    };
-    const auto masked = [&](Vec value, std::size_t at) { return at + 8 <= n ? value : _mm256_blendv_epi8(one, value, valid(at)); };
-
-    Vec prefix[4];
-    for (int v = 0; v < 4; ++v) prefix[v] = masked(x[v], 8 * v);
-    for (std::size_t b = kLanes; b < n; b += kLanes) {
-        for (int v = 0; v < 4; ++v) {
-            store_unaligned(out.data() + b - kLanes + 8 * v, prefix[v]);
-            x[v] = _mm256_add_epi32(x[v], step);
-            prefix[v] = montgomery(prefix[v], masked(x[v], b + 8 * v));
-        }
-    }
-
-    // inverse[lane] = 2^32 / (prefix product of the last block), by one more batch inversion.
-    alignas(32) std::uint32_t total[kLanes], inverse[kLanes];
-    for (int v = 0; v < 4; ++v) store(total + 8 * v, canonical(prefix[v]));
-    std::uint32_t running = 1;
-    for (std::size_t l = 0; l < kLanes; ++l) {
-        inverse[l] = running;
-        running = ntt::detail::multiply_mod(running, total[l]);
-    }
-    running = ntt::detail::multiply_mod(scalar_inverse(running), kR);
-    for (std::size_t l = kLanes; l-- > 0;) {
-        inverse[l] = ntt::detail::multiply_mod(inverse[l], running);
-        running = ntt::detail::multiply_mod(running, total[l]);
-    }
-
-    // Backward: 1 / x = prefix(b - 1) inverse(b) 2^-32, inverse(b - 1) = inverse(b) x 2^-32.
-    // inverse carries an extra 2^32, which the product with a(i) removes.
-    Vec inv[4];
-    for (int v = 0; v < 4; ++v) inv[v] = load(inverse + 8 * v);
-    const auto put = [&](std::size_t at, Vec reciprocal) {
-        const Vec q = canonical(montgomery(reciprocal, a(at)));
-        if (at + 8 <= n) return store_unaligned(out.data() + at, q);
-        _mm256_maskstore_epi32(reinterpret_cast<int*>(out.data() + at), valid(at), q);
-    };
-    for (std::size_t b = last; b > 0; b -= kLanes) {
-        for (int v = 0; v < 4; ++v) {
-            const std::size_t at = b + 8 * v;
-            if (at < n) put(at, montgomery(load_unaligned(out.data() + at - kLanes), inv[v]));
-            inv[v] = montgomery(inv[v], masked(x[v], at));
-            x[v] = _mm256_sub_epi32(x[v], step);
-        }
-    }
-    for (int v = 0; v < 4; ++v)
-        if (8 * std::size_t(v) < n) put(8 * v, inv[v]);
-}
-
-}  // namespace detail
-
-// d[i] = (i + 1) f[i + 1] for i < d.size(), with f[j] = 0 for j >= f.size(). d may start at f
-// (in place); otherwise the two must not overlap.
-inline void derivative(std::span<const std::uint32_t> f, std::span<std::uint32_t> d) {
-    using namespace detail;
-    const std::size_t n = d.size(), full = std::min(n, f.size() > 0 ? f.size() - 1 : 0) / 8 * 8;
-    Indices index(1);
-    for (std::size_t i = 0; i < full; i += 8, index.next())
-        store_unaligned(d.data() + i, canonical(montgomery(load_unaligned(f.data() + i + 1), index.value())));
-    for (std::size_t i = full; i < n; ++i)
-        d[i] = i + 1 < f.size() ? ntt::detail::multiply_mod(std::uint32_t(i + 1), f[i + 1]) : 0;
-}
-
-// q[i] = a[i] / (first + i) for i < q.size() = a.size(). first >= 1, first + a.size() <= P.
-// a and q must not overlap.
-inline void divide_by_index(std::span<const std::uint32_t> a, std::size_t first, std::span<std::uint32_t> q) {
-    if (a.size() != q.size() || first == 0 || first + a.size() > kModulus) std::abort();
-    const std::size_t n = a.size();
-    detail::divide_by_index(first, q, [a, n](std::size_t at) {
-        if (at + 8 <= n) return detail::load_unaligned(a.data() + at);
-        alignas(32) std::uint32_t rest[8] = {};
-        std::copy(a.begin() + at, a.end(), rest);
-        return detail::load(rest);
-    });
-}
-
-}  // namespace poly
-
-namespace poly {
-
-namespace detail {
-
 // Up to this many coefficients, Horner's rule.
 inline constexpr std::size_t kComposeBase = 32;
 
@@ -6780,13 +6629,13 @@ private:
 // 2 .. T - 4 that of length 4m of Q_s, level T - 3 those of length m/4 of (-1)^k q_k for
 // Q_(T-3) = sum_(k < 8) x^k q_k(y) (column_transform), level T - 2 those of length m/2 of -q1, q2, -q3 for
 // Q_(T-2) = 1 + x q1(y) + x^2 q2(y) + x^3 q3(y), level T - 1 that of length m of -q,
-// Q_(T-1) = 1 + x q(y).
+// Q_(T-1) = 1 + x q(y). Each level has a slot of 4m words; temporaries live in slots that are not
+// filled yet (forward pass) or no longer read (backward pass).
 struct Levels {
     std::size_t m;  // 2^T >= 256
     int lg;         // T
     Tables tables;
     std::span<std::uint32_t> transforms;
-    std::span<std::uint32_t> work[2];  // length 4m each
 
     std::span<std::uint32_t> level(int s) const { return transforms.subspan(std::size_t(s) * Arena::footprint(4 * m), 4 * m); }
     // Level 1's transform of q1 (i = 0) or q2 (i = 1).
@@ -6797,15 +6646,13 @@ struct Levels {
     }
 
     static std::size_t scratch(std::size_t m) {
-        return Arena::footprint(Tables::words(m)) + Carve::words(std::size_t(std::countr_zero(m)) * Arena::footprint(4 * m)) +
-               2 * Carve::words(4 * m);
+        return Arena::footprint(Tables::words(m)) + Carve::words(std::size_t(std::countr_zero(m)) * Arena::footprint(4 * m));
     }
 
     Levels(std::size_t size, std::span<std::uint32_t> scratch)
         : m(size), lg(std::countr_zero(size)), tables(scratch.first(Tables::words(size)), size) {
         Carve carve(scratch.subspan(Arena::footprint(Tables::words(size))));
         transforms = carve.take(std::size_t(lg) * Arena::footprint(4 * m));
-        for (auto& w : work) w = carve.take(4 * m);
     }
 };
 
@@ -6820,15 +6667,16 @@ inline void next_level(std::span<std::uint32_t> a, std::size_t stride, std::size
     std::fill(a.begin() + 1, a.begin() + std::ptrdiff_t(half), 0);
 }
 
-// Level 1, one-dimensional in x: Q_1 = 1 + y q1 + y^2 q2 with q1 = -2 ge and q2 = v (v in
-// levels.work[0], series of length m/2). Keeps the transforms of q1 and q2 at m as the level, and
-// with FirstLevelProducts' G and E, writes Q_2 = Q_1(x) Q_1(-x) mod u^(m/4), u = x^2,
+// Level 1, one-dimensional in x: Q_1 = 1 + y q1 + y^2 q2 with q1 = -2 ge and q2 = v (v at the
+// start of level 3's slot, series of length m/2). Keeps the transforms of q1 and q2 at m as the
+// level, and with FirstLevelProducts' G and E (after v in level 3's slot), writes
+// Q_2 = Q_1(x) Q_1(-x) mod u^(m/4), u = x^2,
 //   Q_2 = 1 + 2y q1e + y^2 (2 q2e + G(q1)) + 2y^3 E(q1, q2) + y^4 G(q2),
 // at stride m/2 into level 2 (ae: the even part of a, as a series in u).
 inline void first_level(const Transform& t, std::span<const std::uint32_t> g, Levels& levels) {
     const std::size_t m = levels.m, h = m / 2, quarter = m / 4;
     const Tables& tables = levels.tables;
-    const std::span<const std::uint32_t> v = levels.work[0].first(h);
+    const std::span<const std::uint32_t> v = levels.level(3).first(h);
     const auto sum = [](std::uint32_t x, std::uint32_t y) { return x + y >= kP ? x + y - kP : x + y; };
     const std::span<std::uint32_t> t1 = levels.first_transform(0), t2 = levels.first_transform(1);
     const std::size_t even = std::max<std::size_t>(std::min(h, (g.size() + 1) / 2), 1);  // q1[j] for 0 < j < even
@@ -6840,7 +6688,7 @@ inline void first_level(const Transform& t, std::span<const std::uint32_t> g, Le
     t.forward(t1.first(h), 0, t1);
     t.forward(v, 0, t2);
     std::uint32_t* out[3];  // G(q1), G(q2), E(q1, q2)
-    for (std::size_t i = 0; i < 3; ++i) out[i] = levels.work[1].data() + i * Arena::footprint(h);
+    for (std::size_t i = 0; i < 3; ++i) out[i] = levels.level(3).data() + Arena::footprint(m) + i * Arena::footprint(h);
     const FirstLevelProducts<false> products{&tables, t1.data(), t2.data(), nullptr, {out[0], out[1], out[2]}};
     for (std::size_t k = 0; k < m / 16; k += 8) products.pairs(k);
     for (std::uint32_t* x : out)
@@ -6906,9 +6754,10 @@ inline void multiply_constant(std::span<const std::uint32_t> a, std::uint32_t c,
 inline void third_last_level(const Transform& t, const Levels& levels, const std::span<std::uint32_t> (&c)[4]) {
     const std::size_t m = levels.m, quarter = m / 4, eighth = m / 8;
     const std::span<const std::uint32_t> q = levels.level(levels.lg - 3);
+    const std::span<std::uint32_t> temporary = levels.level(levels.lg - 1);  // filled after this level
     std::span<std::uint32_t> coefficients[8], tc[8];
     for (std::size_t k = 1; k < 8; ++k) {
-        coefficients[k] = levels.work[1].subspan((k - 1) * Arena::footprint(eighth + 1), eighth + 1);
+        coefficients[k] = temporary.subspan((k - 1) * Arena::footprint(eighth + 1), eighth + 1);
         tc[k] = levels.column_transform(k);
     }
     for (std::size_t r = 0; r < eighth; r += 8) {  // rows r .. r + 7, transposed
@@ -6925,8 +6774,9 @@ inline void third_last_level(const Transform& t, const Levels& levels, const std
     }
     for (std::size_t k = 1; k < 8; ++k) t.forward(coefficients[k], 0, tc[k]);  // over q
     std::span<std::uint32_t> twice[3], square[4];  // 2 c5, -2 c3, -2 c4; the product sums
-    for (std::size_t i = 0; i < 3; ++i) twice[i] = levels.work[0].subspan(i * Arena::footprint(quarter), quarter);
-    for (std::size_t k = 1; k < 4; ++k) square[k] = levels.work[0].subspan((k + 2) * Arena::footprint(quarter), quarter);
+    const std::span<std::uint32_t> sums = temporary.subspan(7 * Arena::footprint(eighth + 1));
+    for (std::size_t i = 0; i < 3; ++i) twice[i] = sums.subspan(i * Arena::footprint(quarter), quarter);
+    for (std::size_t k = 1; k < 4; ++k) square[k] = sums.subspan((k + 2) * Arena::footprint(quarter), quarter);
     multiply_constant(tc[5], 2, twice[0]), multiply_constant(tc[3], kP - 2, twice[1]), multiply_constant(tc[4], kP - 2, twice[2]);
     const Transform::Pair first[1] = {{tc[1], tc[1]}}, second[2] = {{tc[2], tc[2]}, {tc[1], twice[1]}},
                           third[3] = {{tc[3], tc[3]}, {tc[1], twice[0]}, {tc[2], twice[2]}};
@@ -6992,19 +6842,19 @@ inline void third_last_level_transposed(const Transform& t, const Levels& levels
 //    y^(m/2) wraps onto y^0).
 inline void build_levels(const Transform& t, std::span<const std::uint32_t> g, Levels& levels) {
     const std::size_t m = levels.m;
-    const std::span<std::uint32_t> v = levels.work[0].first(2 * m), q0 = levels.level(0).first(2 * m);
+    const std::span<std::uint32_t> v = levels.level(3).first(m), q0 = levels.level(0).first(2 * m);
     std::fill(q0.begin(), q0.end(), 0);
     std::copy(g.begin() + std::ptrdiff_t(std::min<std::size_t>(g.size(), 1)), g.begin() + std::ptrdiff_t(std::min(g.size(), m)),
               q0.begin() + 1);
     const Tables& tables = levels.tables;
     forward_with(q0, m, tables, LevelBottom{&tables, v.data()});
-    inverse_with(v.first(m), tables, InverseBottom{tables.inverse_roots, v.data()}, graeffe_scale(levels.lg), Half::kBoth);
+    inverse_with(v, tables, InverseBottom{tables.inverse_roots, v.data()}, graeffe_scale(levels.lg), Half::kBoth);
     first_level(t, g, levels);
-    for (int s = 2; s + 3 < levels.lg; ++s) {  // Q_s: rows 0 .. Y at stride 2L
+    for (int s = 2; s + 3 < levels.lg; ++s) {  // Q_s: rows 0 .. Y at stride 2L; V in level s + 1
         const std::size_t stride = 2 * (m >> s), pad = std::size_t(levels.lg - s - 3);
-        forward_pruned(levels.level(s), ((std::size_t(1) << s) + 1) * stride, pad, tables, LevelBottom{&tables, v.data()});
         const std::span<std::uint32_t> next = levels.level(s + 1).first(2 * m);
-        inverse_pruned(next, pad - 1, tables, InverseBottom{tables.inverse_roots, v.data()}, graeffe_scale(levels.lg + 1));
+        forward_pruned(levels.level(s), ((std::size_t(1) << s) + 1) * stride, pad, tables, LevelBottom{&tables, next.data()});
+        inverse_pruned(next, pad - 1, tables, InverseBottom{tables.inverse_roots, next.data()}, graeffe_scale(levels.lg + 1));
         next_level(levels.level(s + 1), stride / 2, std::size_t(2) << s);
     }
     std::span<std::uint32_t> c[4];  // c[k] = (-1)^k q_k of Q_(T-2)
@@ -7013,7 +6863,7 @@ inline void build_levels(const Transform& t, std::span<const std::uint32_t> g, L
     const std::span<std::uint32_t> q = levels.level(levels.lg - 1).first(m);  // -q_(T-1)
     std::fill(q.begin(), q.end(), 0);
     for (std::size_t i = 1; i <= m / 4; ++i) q[i] = minus_twice(c[2][i]);
-    const std::span<std::uint32_t> square = levels.work[1].first(m / 2);  // q1^2 mod (y^(m/2) - 1)
+    const std::span<std::uint32_t> square = levels.level(levels.lg - 1).subspan(Arena::footprint(m), m / 2);  // q1^2
     for (std::size_t k = 1; k < 4; ++k) t.forward(c[k]);
     t.inverse_product(c[1], c[1], square);
     for (std::size_t i = 1; i <= m / 2; ++i) {
@@ -7062,20 +6912,23 @@ inline void compose(const Transform& t, std::span<const std::uint32_t> f, std::s
     detail::Levels levels(detail::compose_length(n), scratch);
     detail::build_levels(t, g, levels);
     const std::size_t m = levels.m;
-    std::span<std::uint32_t> in = levels.work[0], out = levels.work[1];
-    // Level T - 1: columns p0 = p[m/2, m), p1 = (-p q)[m/2, m) of P_(T-2).
-    const std::span<std::uint32_t> p = out.first(m), pq = out.subspan(m, m);
+    const int lg = levels.lg;
+    // Level T - 1: columns p0 = p[m/2, m), p1 = (-p q)[m/2, m) of P_(T-2), after level T - 1's
+    // transform in its slot.
+    const std::span<std::uint32_t> last = levels.level(lg - 1);
+    const std::span<std::uint32_t> p = last.subspan(Arena::footprint(m), m), pq = last.subspan(2 * Arena::footprint(m), m);
     for (std::size_t i = 0; i < m; ++i) p[i] = m - 1 - i < f.size() ? f[m - 1 - i] : 0;
-    t.cyclic_product(p, 0, pq, levels.level(levels.lg - 1).first(m), Half::kUpper);
+    t.cyclic_product(p, 0, pq, last.first(m), Half::kUpper);
     // Level T - 2, length m/2: columns r0 = p0, r1 = -p0 q1, r2 = p1 + p0 q2, r3 = -p1 q1 - p0 q3 of
-    // P_(T-2), rows [m/4, m/2): r1 and r2 in the lower halves of p and pq, r3 in in[7m/2, 4m). Then
-    // level T - 3 into out[2m, 4m), its work in in[0, 7m/2).
+    // P_(T-2), rows [m/4, m/2): r1 and r2 in the lower halves of p and pq, the transforms t0, t1 of
+    // p0, p1 and r3 in level T - 1's slot too. Then level T - 3, its work in level T - 2's slot, its
+    // output in the upper half of level T - 3's slot.
     {
         const std::size_t h = m / 2, quarter = m / 4;
-        const std::span<std::uint32_t> p0 = p.subspan(h), p1 = pq.subspan(h), t0 = in.first(h), t1 = in.subspan(m, h);
-        const std::span<std::uint32_t> c = levels.level(levels.lg - 2);
+        const std::span<std::uint32_t> p0 = p.subspan(h), p1 = pq.subspan(h), t0 = last.first(h), t1 = last.subspan(Arena::footprint(h), h);
+        const std::span<std::uint32_t> c = levels.level(lg - 2);
         const auto column = [&](std::size_t k) { return c.subspan((k - 1) * Arena::footprint(h), h); };
-        const std::span<std::uint32_t> r1 = p.first(h), r2 = pq.first(h), r3 = in.subspan(3 * m + h, h);
+        const std::span<std::uint32_t> r1 = p.first(h), r2 = pq.first(h), r3 = last.subspan(3 * Arena::footprint(m), h);
         t.forward(p0, 0, t0);
         t.forward(p1, 0, t1);
         t.inverse_product(t0, column(1), r1, Half::kUpper);
@@ -7088,20 +6941,22 @@ inline void compose(const Transform& t, std::span<const std::uint32_t> f, std::s
         }
         const std::span<const std::uint32_t> columns[4] = {p0.subspan(quarter), r1.subspan(quarter), r2.subspan(quarter),
                                                            r3.subspan(quarter)};
-        detail::third_last_level_transposed(t, levels, columns, in.first(3 * m + h), out);
-        std::swap(in, out);
+        detail::third_last_level_transposed(t, levels, columns, levels.level(lg - 2), levels.level(lg - 3));
     }
-    const std::uint32_t scale = detail::kInverseScales[1][levels.lg + 2];
-    for (int s = levels.lg - 4; s >= 2; --s) {
-        const std::span<std::uint32_t> x = in.subspan(2 * m);
-        const std::size_t pad = std::size_t(levels.lg - s - 3);
+    // Level s reads P_(s+1) from the upper half of in and writes R to out, a slot no longer read.
+    std::span<std::uint32_t> in = levels.level(lg - 3);
+    const std::uint32_t scale = detail::kInverseScales[1][lg + 2];
+    for (int s = lg - 4; s >= 2; --s) {
+        const std::span<std::uint32_t> x = in.subspan(2 * m), out = levels.level(s == lg - 4 ? lg - 2 : s + 1);
+        const std::size_t pad = std::size_t(lg - s - 3);
         detail::forward_pruned(x, 2 * m, pad - 1, levels.tables, detail::ForwardBottom{levels.tables.roots});
         detail::inverse_pruned(out, pad, levels.tables, detail::CompositionBottom{&levels.tables, x.data(), levels.level(s).data()},
                                scale, Half::kUpper);
-        std::swap(in, out);
+        in = out;
     }
-    detail::first_level_transposed(t, levels, in, out);
-    std::swap(in, out);
+    detail::first_level_transposed(t, levels, in, levels.level(2));
+    in = levels.level(2);
+    const std::span<std::uint32_t> out = levels.level(1);
     // Level 0: p0 = in[2m, 3m), p1 = in[3m, 4m) (x below m/2).
     const std::span<std::uint32_t> p0 = in.subspan(2 * m, m), r = out.first(2 * m);
     t.forward(p0.first(m / 2), 0, p0);

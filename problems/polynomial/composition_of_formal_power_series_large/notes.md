@@ -5,7 +5,8 @@ Slowest tests: max_random, hack, hack2 and random_00, _01 (N = 131072; hack and 
 after a run of zeros, which the algorithm does not use). mid: N <= 8000; small: N <= 10.
 
 Best judged: ours, 39 ms, no spike: [409504](https://judge.yosupo.jp/submission/409504)
-(`main.cpp` of #238).
+(`main.cpp` of #238). Clean score 35 ms: [409517](https://judge.yosupo.jp/submission/409517)
+(#242, judged 43 ms from two +9 ms launch spikes).
 Record when opened (issue #86): 72 ms.
 
 ## Design
@@ -15,15 +16,17 @@ Record when opened (issue #86): 72 ms.
   m = 2^17 for N = 131072: 17 levels; levels 2 .. 13 bivariate with transforms of length
   4m = 2^19 (2 MiB), levels 0, 1, 14, 15, 16 one-dimensional. The forward pass stores each
   level's transforms: 12 x 2 MiB and less for the others.
-- `lib/io` input and output, one `poly::Arena` (huge pages) for everything. The program runs from
-  `.preinit_array` and ends with `_exit`.
+- Input by `lib/io/bulk32.hpp`; output in fixed-width fields
+  (`problems/convolution/convolution_mod/fields.hpp`, judge-specific: the checker compares tokens),
+  its text in f's span once compose is done. One `poly::Arena` (huge pages) for everything. The
+  program runs from `.preinit_array` and ends with `_exit`.
 
 ## Floor
 
 `lc-amd`, whole process (judge's runner and flags, 15 interleaved rounds, score = slowest of
 max_random_00, max_random_03, hack2_00, hack_02, random_00; scratch `rawbench.py`): read and
 write only (main.cpp with h = f) 2.89 ms; main.cpp 38.7 ms. `tools/floor.c` (no parsing):
-1.6 ms.
+1.6 ms. With the bulk input and the fields output (21 rounds): 2.37 ms against 2.91.
 
 In process (N = 131072, warm, median of 10), round 1's start: compose 34.0 ms. Per generic
 level (s = 1 .. 14, µs): forward of Q_s at 4m 480-630 plus the Graeffe bottom ~350; inverse of
@@ -59,6 +62,25 @@ generic levels 2 .. 13 forward 9.09 (with the Graeffe bottom ~3.0) + 2.76, backw
     `lc-intel` 0.9219. PR #242.
   - Checks: 32/32 official tests (`lc-amd`); `stress.py` 400 rounds (`lc-intel`); lib/poly
     `test.cpp` at -O2 (x86-64-v3 and native) and ASan/UBSan.
+- 2026-10-10, claude (round 1): submitted #242's `main.cpp`:
+  [409517](https://judge.yosupo.jp/submission/409517) AC 43 ms, 44.0 MiB. hack_02 and
+  max_random_03 took 43 ms, the 19 other large cases 33-35: two +9 ms launch spikes, clean 35 ms
+  (`tools/spikes.py` compared it with 409504's 38 ms and flagged neither).
+- 2026-10-10, claude (round 1, second lib/poly change): composition's temporaries live in level
+  slots not filled yet (forward: V of level s in level s + 1's slot, inverted in place; level 0's
+  v and level 1's products in level 3's; level T - 3's in level T - 1's) or no longer read
+  (backward: each level writes R into a dead slot), so the two work spans of 4m are gone.
+  AnonHugePages at the end of compose 42 -> 38 MiB (a huge page's first touch costs ~100 µs on
+  `lc-amd`); in process 29.98 -> 29.85 ms warm, first call 31.7 -> 31.5. Bulk input and fields
+  output: whole process 0.991-0.995 against #242 (`rawbench.py`, 21 rounds; the text after h or
+  in f's span, equal within noise). Both together (`judge.py bench`, 21 rounds): `lc-amd` 0.9887
+  (34.85 -> 34.43 ms), `lc-intel` 0.9846.
+- Tried, not kept: level T - 4 one-dimensional too (column levels for 16 columns: 28 products
+  forward, 64 backward, at m/8). In process at m = 2^17: forward 766 µs, backward 1249 µs against
+  ~1030 each for the generic level; compose 29.8 ms either way. Its leaf products cost 15-18 µs
+  per 2048 leaves in sums of 8 (~31 cycles a leaf: 16 operand arrays of 64 KB exceed L2) against
+  13 for a single product. Preparing the windows 2 or 3 groups ahead instead of 1 changed
+  nothing (one product: 25.3, 24.9, 25.0 µs including the inverse of 12.3).
 - Next: the y levels by doubling (from V's transform at 2Y points, Q_(s+1) at the other 2Y
   points by an inverse and a forward in y of the truncated rows; the first half of the next
   level's transform then needs no y levels): counted ~9-11% of the transform work, ~1.5-2 ms;

@@ -32,7 +32,7 @@ Record when opened: 25 ms.
 - Each chunk is parsed into the last 256 KiB of its own 16 rows and widened in place (round 2):
   a row's int64 vectors end before input values not yet read. No separate input buffer.
 - Output: `../fixed_width.hpp` per chunk of 2^16 values, so a newline ends every chunk
-  (judge-specific; the checker compares tokens).
+  (judge-specific; the checker compares tokens). Its text follows the chunk in a (dead by then).
 - Memory: 8 MiB + 16 KiB int64 + 4 MiB dwords: 6 huge pages and 4 small ones below them. a's
   dwords are stored strip after strip (8 KiB each, no padding); output chunks reuse a's space.
 - Runs from `.preinit_array` and ends with `_exit` (as `convolution_mod`).
@@ -125,6 +125,12 @@ faults), columns a 0.59, columns b 1.05, inverse rows 0.75, print 4.63, exit 0.9
 - 2026-10-10, claude (lib/io #21, round 3): submitted the #176 `main.cpp`,
   [409379](https://judge.yosupo.jp/submission/409379): AC 14 ms, 23.2 MiB, no spike
   (`tools/spikes.py`). Best judged stays 14 ms.
+- 2026-10-10, claude (lib/io #21, round 4): the output text goes after the chunk in a's array
+  (dead after the products, already touched), page-aligned, instead of `fixed_width.hpp`'s static
+  250 KB (63 page faults), and blocks are 60 pages (`lib/io/notes.md`). `judge.py bench`,
+  `lc-amd`, slowest 3 cases: 31 rounds 14.70 → 14.61 ms (0.998); 41 rounds with a copy of main as
+  control: 0.991, control 0.995. Outputs byte-identical to main on all 13 tests (judge build,
+  ASan/UBSan, pipe input).
 
 ## Next
 

@@ -61,7 +61,8 @@ int main() {
 #endif
     io::Writer out;
 #ifdef FIXED
-    fixed_width::write(out, a, answer);
+    // The text after the answer, if it fits there, as the solutions place it in a dead array.
+    fixed_width::write(out, a, answer, fixed_width::text_buffer(a + answer, (n + m - answer) * sizeof(Value)));
 #else
     out.write_array(a, answer, ' ');
     out.write('\n');

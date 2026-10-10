@@ -72,7 +72,8 @@ small, k0.
     m 2^lg lg 0.25. Constants fitted on lc-amd (log below).
 - Memory: blocks of 256 KiB or more are 2 MiB aligned with `MADV_HUGEPAGE`; smaller ones take
   small pages (round 1 rounded every block to 2 MiB pages, faulting in a whole huge page for each).
-- Output: `../fixed_width.hpp` (judge-specific padding). `.preinit_array` start and `_exit`.
+- Output: `../fixed_width.hpp` (judge-specific padding), its text in g (dead by then).
+  `.preinit_array` start and `_exit`.
 - `-DFORCE_GRADED` forces the graded method, `-DFORCE_SPLIT` the cheapest split;
   `-DBLOCK_BYTES=1` makes every non-lane variable a top one. `stress.py` runs all three and the
   default build against `brute.cpp`.
@@ -139,6 +140,11 @@ no sources read.
   - Merged in #153. Submitted: [409322](https://judge.yosupo.jp/submission/409322), AC, 14 ms,
     14.8 MiB; [409323](https://judge.yosupo.jp/submission/409323), AC, 22 ms (same source; a judge
     launch spike, see `tools/spikes.py`).
+- 2026-10-10, claude (lib/io #21, round 4): the output text goes into g, dead after the product
+  and already touched, page-aligned, instead of `fixed_width.hpp`'s static 250 KB (63 page
+  faults), and blocks are 60 pages (`lib/io/notes.md`). `judge.py bench`, `lc-amd`, 31 rounds,
+  slowest 3 cases: 13.76 → 13.59 ms (0.988). Outputs byte-identical to main on all 17 tests
+  (judge build, ASan/UBSan, pipe input).
 
 ## Next
 

@@ -956,7 +956,7 @@ void solve() {
     in.read(g, size);
     const u32* c = multiply(n, size, f, g);
     io::Writer out;
-    fixed_width::write(out, c, size);
+    fixed_width::write(out, c, size, fixed_width::text_buffer(g, size * sizeof(u32)));  // g is dead
 }
 
 #ifdef __ELF__

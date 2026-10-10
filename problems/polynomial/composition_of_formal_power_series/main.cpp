@@ -6264,9 +6264,8 @@ inline Vec reduce_wide(Wide x) {
 
 // One leaf a mod (z^8 - s) per lane, c[k] = its coefficient k (canonical), s_m = s 2^32 mod P:
 // out = a(z) a(-z) mod (z^8 - s) = e(u)^2 - u o(u)^2 mod (u^4 - s), u = z^2, a = e(u) + z o(u),
-// times 2^-32, in [0, 2P). Every sum stays below 8 P^2. Always inlined, as CompositionBottom::leaf:
-// GCC made both calls (compose 1% slower).
-[[gnu::always_inline]] inline void leaf_graeffe(const Vec (&c)[8], Vec s_m, Vec (&out)[4]) {
+// times 2^-32, in [0, 2P). Every sum stays below 8 P^2.
+inline void leaf_graeffe(const Vec (&c)[8], Vec s_m, Vec (&out)[4]) {
     const Lanes e0 = lanes(c[0]), o0 = lanes(c[1]), e1 = lanes(c[2]), o1 = lanes(c[3]);
     const Lanes e2 = lanes(c[4]), o2 = lanes(c[5]), e3 = lanes(c[6]), o3 = lanes(c[7]);
     const Wide e01 = wide(e0, e1), e02 = wide(e0, e2), e03 = wide(e0, e3), e12 = wide(e1, e2), e13 = wide(e1, e3);
@@ -6367,7 +6366,7 @@ struct CompositionBottom {
 
     // One leaf per lane: c[k] = coefficient k of Q_s mod (z^8 - w), p[i] = p_i and wp[i] = w p_i
     // (canonical). out[k] = coefficient k of R mod (z^8 - w), in [0, 2P). Each sum has 4 products.
-    [[gnu::always_inline]] static void leaf(const Vec (&p)[4], const Vec (&wp)[4], const Vec (&c)[8], Vec (&out)[8]) {
+    static void leaf(const Vec (&p)[4], const Vec (&wp)[4], const Vec (&c)[8], Vec (&out)[8]) {
         Lanes pl[4], wl[4], cl[8];
 #pragma GCC unroll 4
         for (int i = 0; i < 4; ++i) pl[i] = lanes(p[i]), wl[i] = lanes(wp[i]);

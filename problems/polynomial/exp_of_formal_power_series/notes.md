@@ -3,9 +3,10 @@
 N <= 500000 coefficients of f mod 998244353, f[0] = 0; print the first N coefficients of exp(f).
 10 s. Largest tests: max_* (N = 500000, transforms up to 2^19).
 
-Best judged: ours, 18 ms: [409327](https://judge.yosupo.jp/submission/409327) (`main.cpp` of #158),
-also [409300](https://judge.yosupo.jp/submission/409300) (#131).
-Earlier: 19 ms, [409248](https://judge.yosupo.jp/submission/409248) (#116).
+Best judged: ours, 16 ms: [409402](https://judge.yosupo.jp/submission/409402) (`main.cpp` of #185).
+Earlier: 18 ms, [409327](https://judge.yosupo.jp/submission/409327) (#158) and
+[409300](https://judge.yosupo.jp/submission/409300) (#131); 19 ms,
+[409248](https://judge.yosupo.jp/submission/409248) (#116).
 Record when opened (issue #63): 38 ms.
 
 ## Design
@@ -93,6 +94,17 @@ this round 16.62. In process (N = 500000, warm): exp 11.74 ms, of which the last
   - Checks: all official tests (exp, pow, compositional_inverse; `lc-amd` and `lc-intel`);
     `stress.py` 300 rounds (judge image); ASan/UBSan main.cpp on all official cases, file and
     pipe input (exp, pow); lib/poly tests as in lib/poly/notes.md.
+  - Also tried, not kept: the division in three passes (prefix products, reciprocals, then
+    the quotients) with only odd integers inverted and even reciprocals halved from a table of
+    the previous step's (as `lib/poly/divider.hpp`): 2^18 integers 0.89 -> 0.68 ns per
+    coefficient, 0.77 when it also writes the table; in exp about 0.08 ms of the division's
+    0.44, less the table's 1 MB of page faults (~0.04 ms). Not worth the code.
+  - Merged as #185. CI: exp 0.9724, pow 0.9750, compositional_inverse 1.0017; all 3 0.9830.
+  - Submitted the merged `main.cpp`: [409400](https://judge.yosupo.jp/submission/409400) AC
+    25 ms (1/5; launch spike on max_ans_zero_00, clean 16 by `tools/spikes.py`),
+    [409401](https://judge.yosupo.jp/submission/409401) AC 25 ms (2/5; spike on random_01,
+    clean 16), [409402](https://judge.yosupo.jp/submission/409402) AC 16 ms, 16.5 MiB (3/5;
+    no spike).
 - Next: the remaining time is transforms (~15 T(N)) and leaf products (~7.5 LP(N)), both
   shared lib/poly kernels near their op-count bounds; page faults of the 8 MB scratch cost
   ~0.34 ms (the last step's peak: G0, T_m(g), H, work, r, T_m(r0) of m words each, d of 2m).

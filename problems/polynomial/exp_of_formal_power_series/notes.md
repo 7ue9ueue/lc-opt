@@ -3,9 +3,10 @@
 N <= 500000 coefficients of f mod 998244353, f[0] = 0; print the first N coefficients of exp(f).
 10 s. Largest tests: max_* (N = 500000, transforms up to 2^19).
 
-Best judged: ours, 16 ms: [409402](https://judge.yosupo.jp/submission/409402) (`main.cpp` of #185)
-and [409661](https://judge.yosupo.jp/submission/409661) (#314; 2 of the 9 largest cases at 16 ms,
-7 at 15). Earlier: 18 ms, [409327](https://judge.yosupo.jp/submission/409327) (#158) and
+Best judged: ours, 16 ms: [409662](https://judge.yosupo.jp/submission/409662) (`main.cpp` of #319;
+1 of the 9 largest cases at 16 ms, 8 at 15), [409661](https://judge.yosupo.jp/submission/409661)
+(#314; 2 at 16) and [409402](https://judge.yosupo.jp/submission/409402) (#185; 5 at 16).
+Earlier: 18 ms, [409327](https://judge.yosupo.jp/submission/409327) (#158) and
 [409300](https://judge.yosupo.jp/submission/409300) (#131); 19 ms,
 [409248](https://judge.yosupo.jp/submission/409248) (#116).
 Record when opened (issue #63): 38 ms.
@@ -143,6 +144,19 @@ this round 16.62. In process (N = 500000, warm): exp 11.74 ms, of which the last
     16.00 ms (0.9978); 21 rounds of the 4 problems: 0.9997 (31 rounds), pow 0.9995,
     compositional_inverse 1.0008, compositional_inverse_large 1.0000 (an exp run of 21 rounds
     during another agent's job on the same core read 22.7 ms on both sides; discarded).
+  - Merged as #319 (#318 closed while #317 also touched lib/). Against main after #317
+    (`lc-bench`): exp 41 rounds 0.9983 and 1.0012, 61 rounds 1.0027 (another agent's job on the
+    core, max 20.4 ms); in process 0.9936 warm (61 calls), 0.9967 fresh. `lc-intel`: exp 0.9953,
+    pow 0.9956. CI: exp 0.9971 (EPYC 7763 0.9972, 0.9963; 9V74 0.9978), pow 1.0017 (Xeon 8573C
+    1.0078, 7763 1.0003, 0.9971), compositional_inverse 1.0000, compositional_inverse_large
+    0.9996; all 4 0.9996. Phases after (`lc-bench`, warm): last step 5.65 ms, full steps 5.78,
+    exp 11.56.
+  - Submitted the merged `main.cpp` (#319): [409662](https://judge.yosupo.jp/submission/409662)
+    AC 16 ms, 15.0 MiB (1/5; clean 16 by `tools/spikes.py`): max_random_02 16 ms, the other 8
+    largest cases 15. Not resubmitted: no launch spike, the case is real cost at the boundary.
 - Next: the remaining time is transforms (~15 T(N)) and leaf products (~7 LP(N)), both shared
   lib/poly kernels near their op-count bounds. The full steps (5.8 ms) are 16 transforms and 7
-  leaf products of length m per step; block steps need fewer only without the h update.
+  leaf products of length m per step; block steps need fewer only without the h update. The
+  largest cases sit at the judge's 15/16 ms boundary (409662: 1 of 9 at 16), so a further
+  ~0.1 ms (guess) would likely read 15. Candidates: the inverse/forward top-level fusions
+  counted above (~0.03 ms), the division (0.43 ms in all).

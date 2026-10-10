@@ -15,13 +15,13 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [convolution_mod](problems/convolution/convolution_mod) | [12 ms](https://judge.yosupo.jp/submission/409465) | 23 ms |
 | [convolution_mod_large](problems/convolution/convolution_mod_large) | [430 ms](https://judge.yosupo.jp/submission/409343) | 737 ms |
 | [convolution_mod_1000000007](problems/convolution/convolution_mod_1000000007) | [23 ms](https://judge.yosupo.jp/submission/409353) | 29 ms |
-| [convolution_mod_2_64](problems/convolution/convolution_mod_2_64) | [43 ms](https://judge.yosupo.jp/submission/409346) | 76 ms |
+| [convolution_mod_2_64](problems/convolution/convolution_mod_2_64) | [41 ms](https://judge.yosupo.jp/submission/409605) | 76 ms |
 | [convolution_F_2_64](problems/convolution/convolution_F_2_64) | [42 ms](https://judge.yosupo.jp/submission/409339) | 409 ms |
 | [bitwise_and_convolution](problems/convolution/bitwise_and_convolution) | [11 ms](https://judge.yosupo.jp/submission/409492) | 26 ms |
 | [bitwise_xor_convolution](problems/convolution/bitwise_xor_convolution) | [13 ms](https://judge.yosupo.jp/submission/409428) | 25 ms |
 | [gcd_convolution](problems/convolution/gcd_convolution) | [14 ms](https://judge.yosupo.jp/submission/409380) | 37 ms |
 | [lcm_convolution](problems/convolution/lcm_convolution) | [14 ms](https://judge.yosupo.jp/submission/409551) | 37 ms |
-| [mul_mod2n_convolution](problems/convolution/mul_mod2n_convolution) | [21 ms](https://judge.yosupo.jp/submission/409247) | 81 ms |
+| [mul_mod2n_convolution](problems/convolution/mul_mod2n_convolution) | [17 ms](https://judge.yosupo.jp/submission/409608) | 81 ms |
 | [mul_modp_convolution](problems/convolution/mul_modp_convolution) | [12 ms](https://judge.yosupo.jp/submission/409350) | 45 ms |
 | [min_plus_convolution_convex_convex](problems/convolution/min_plus_convolution_convex_convex) | [9 ms](https://judge.yosupo.jp/submission/409568) | 20 ms |
 | [min_plus_convolution_convex_arbitrary](problems/convolution/min_plus_convolution_convex_arbitrary) | [9 ms](https://judge.yosupo.jp/submission/409564) | 38 ms |
@@ -53,6 +53,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [division_of_polynomials](problems/polynomial/division_of_polynomials) | [12 ms](https://judge.yosupo.jp/submission/409561) | 30 ms |
 | [inv_of_polynomials](problems/polynomial/inv_of_polynomials) | [15 ms](https://judge.yosupo.jp/submission/409589) | 104 ms |
 | [prefix_sum_of_polynomial](problems/polynomial/prefix_sum_of_polynomial) | [13 ms](https://judge.yosupo.jp/submission/409571) | 143 ms |
+| [conversion_from_monomial_basis_to_newton_basis](problems/polynomial/conversion_from_monomial_basis_to_newton_basis) | [13 ms](https://judge.yosupo.jp/submission/409606) | 142 ms |
 | [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |
 
 Times are the judge's, for the slowest test, checked against the judge's API on 2026-10-10.

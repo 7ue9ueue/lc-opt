@@ -4,7 +4,7 @@ Prime p <= 10^9, K <= 18 axes, n_i >= 2, n_i | p - 1, N = prod n_i <= 2^18. Prin
 (x_i^n_i - 1) mod p. 10 s.
 Record when opened (issue #37): 117 ms. Best judged: ours, 12 ms, no spike:
 [409321](https://judge.yosupo.jp/submission/409321) (`main.cpp` of #150). Earlier: 15 ms,
-[409314](https://judge.yosupo.jp/submission/409314) (#146). Current `main.cpp` (#163): 15 ms,
+[409314](https://judge.yosupo.jp/submission/409314) (#146). `main.cpp` of #163: 15 ms,
 [409362](https://judge.yosupo.jp/submission/409362).
 I/O floor (`lib/io/notes.md`): 4.18 ms, 3.88 with fixed-width output.
 

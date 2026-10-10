@@ -2,7 +2,7 @@
 
 c_k = sum over i j = k (mod 2^N) of a_i b_j mod 998244353, N <= 20. 5 s.
 
-Best judged: ours, 21 ms: [409247](https://judge.yosupo.jp/submission/409247) (current `main.cpp`, #115).
+Best judged: ours, 21 ms: [409247](https://judge.yosupo.jp/submission/409247) (`main.cpp` of #115).
 Earlier: 22 ms, [409243](https://judge.yosupo.jp/submission/409243) (#108).
 Record when opened (issue #30): 81 ms.
 

@@ -3,7 +3,7 @@
 c_k = min over i + j = k of a_i + b_j; a concave, b arbitrary. N, M <= 2^19, values in
 [0, 10^9], so c_k < 2^31 fits uint32. 5 s.
 
-Best judged: 27 ms, [409239](https://judge.yosupo.jp/submission/409239) (current `main.cpp`).
+Best judged: 27 ms, [409239](https://judge.yosupo.jp/submission/409239) (`main.cpp` of #102).
 Record when the issue opened: 117 ms.
 
 ## Design

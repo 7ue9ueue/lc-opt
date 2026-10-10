@@ -964,6 +964,10 @@ products 1.77 and 1.69).
   product_of_polynomial_sequence 1.0006 (1.0004); multipoint_evaluation_on_geometric_sequence
   compiles to the same `.text` bytes. All official tests pass (`judge.py test`); `test.cpp`
   passes at -O2 and ASan/UBSan, `-march=native` and `-march=x86-64-v3` (`lc-intel`).
+- Merged as #232. CI: composition 0.9362, compositional_inverse 0.9899, exp 0.9974, inv 0.9977,
+  log 0.9981, multipoint_evaluation_on_geometric_sequence 0.9964, pow 0.9998,
+  product_of_polynomial_sequence 0.9959, sqrt 0.9936; all 9 0.9892. Not submitted: no problem
+  gained 1 ms on `lc-amd` (composition 0.11 ms).
 
 ## Sources
 

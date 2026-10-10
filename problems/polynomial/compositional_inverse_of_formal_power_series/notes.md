@@ -100,7 +100,7 @@ g = f) 1.22 ms. main.cpp 2.70 ms (#174's 2.76).
   power_projection 0.963, power at 7999 0.98 (235 -> 229 us); whole process (`judge.py bench`)
   0.9838 on `lc-amd` (2.73 -> 2.69 ms, 31 rounds), 0.9896 on `lc-intel`. In the bundle the gain
   is smaller than in the A/B harness (another translation unit): a second projection call
-  1193 -> 1179 us.
+  1193 -> 1179 us. Merged as #232 (CI 0.9899 for this problem).
 - Next: `power` at N - 1 = 7999 (229 us; its steps are near their transform count); the last levels
   (100 us: 7 strided column copies, 6 forwards at m/2, 3 products, one cyclic product at m).
   Counted, not built: level 2 one-dimensional (Q_3 and P_3 from 35 row products at m/2: ~57m

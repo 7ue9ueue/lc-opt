@@ -80,10 +80,10 @@ struct Check {
 // (2p - 1, 2^64 - 1) lead the inputs.
 void test(const multimod::Modulus& mod, u32 generator, int lg, std::size_t n, std::size_t m, Kind kind, bool in_place) {
     const std::size_t len = std::size_t(1) << lg, words = len + multimod::Transform::kPadding;
-    const std::size_t extent = std::max((n + 7) & ~std::size_t(7), len / 2), extent_b = std::max(extent, words);
+    const auto extent = [&](std::size_t count) { return std::max((count + 7) & ~std::size_t(7), len / 2); };
     Buffer<u32> tables(multimod::Transform::table_words(lg)), out(words), work(words);
-    Buffer<u32> a32(extent), b32(extent_b);
-    Buffer<u64> a64(std::max(extent, words / 2)), b64(extent);
+    Buffer<u32> a32(extent(n)), b32(std::max(extent(m), words));
+    Buffer<u64> a64(std::max(extent(n), words / 2)), b64(extent(m));
     Check check{mod, lg, mod.power(generator, (mod.p - 1) >> lg), std::vector<u32>(n), std::vector<u32>(m)};
     const auto fill = [&](u32* x32, u64* x64, std::vector<u32>& reduced) {
         for (std::size_t i = 0; i < reduced.size(); ++i) {

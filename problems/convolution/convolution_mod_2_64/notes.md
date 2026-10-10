@@ -8,10 +8,13 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
 
 - Five NTT primes below 2^30 with 2^20 | p - 1: 998244353, 985661441, 976224257, 975175681,
   972029953. Product 2^149.35 > 2^19 (2^64 - 1)^2. One cyclic transform of length 2^lg per prime.
-- `lib/multimod`: lib/ntt's transform (recursion, tables, kernels) with the modulus a run-time
-  value, `Wide` (64-bit) input. For 2^lg = 2 * 4^j >= 256 with both factors at most half (all large tests) the first level is a
-  radix-8 pass that reads the 64-bit input and reduces it mod p on the fly
-  (hi (2^32 mod p) + lo; lo < 8p brought below 2p by two halvings).
+- `product.hpp` (both factors at most half the transform, lg >= 9: all large tests): lib/multimod's
+  transform (`Wide` 64-bit input, modulus a run-time value) with ntt::Product's bottom stage (two
+  groups per kernel, no leaf weight array) and fused inverse top level. Its kernels
+  (`kernels.hpp`) come from `gen_kernels.py`: ntt::Product's asm with lib/multimod's modulus
+  variables, and `forward_radix8_wide`, the first level for 2^lg = 2 * 4^j as a list-scheduled
+  asm loop (lib/ntt's generator): it reads the 64-bit input and reduces it mod p on the fly
+  (hi (2^32 mod p) + lo; lo < 8p brought below 2p by two halvings). Other sizes: lib/multimod.
 - CRT, not Garner: the transform for prime k returns y_k = c / M_k mod p_k (the factor is folded
   into the final scale). c = sum y_k M_k - t M with t = floor(sum y_k / p_k); the fraction is
   c / M < 0.2, so t comes from a float sum + 0.4. Then c mod 2^64 from 64-bit constants
@@ -21,9 +24,10 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
   The last prime writes its residues to work and uses a's storage as its work.
 - Output (`fields64.hpp`, judge-specific): every value right-aligned in 20 characters after a
   space. top = x / 10^16, mid, low from multiply-shift estimates on the high bits, corrected once.
-  mid and low -> 4-digit chunks -> digit bytes in 16-bit lanes; two stores per value (8 bytes of
-  top, 16 of mid+low). Separators are never written: the buffer starts as spaces. Leading-zero
-  logic for mid and low runs only when some top in the 8 is 0.
+  mid and low -> 4-digit chunks -> digit bytes in 16-bit lanes; top's 4 characters from a table of
+  1845; two stores per value (4 bytes of top, 16 of mid+low). Separators are never written: the
+  buffer starts as spaces. Leading-zero logic for mid and low runs only when some top in the 8 is
+  0. convolution_F_2_64 uses this formatter too.
 - `.preinit_array` start and `_exit`, one huge-page arena (as convolution_mod).
 
 ## Log
@@ -94,8 +98,46 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
   `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
   before (judge flags, `lc-amd`).
 
+- 2026-10-10, claude (round 3). `lc-bench` (EPYC 7B13, 3.49 GHz core clock), judge flags. Hot
+  in-process timings unless noted; exploration files in `lc-opt-explore/convolution_mod_2_64/r3`.
+  - Transform, 5 primes, lg 20, hot (ms): lib/multimod 24.11; with ntt::Product's bottom stage
+    and fused inverse top (problem-local, `product.hpp`) 23.25: tables 0.18, radix-8 level 2.92,
+    subtrees 19.06, inverse top 1.06. Each radix-4 level of the subtrees costs ~2.0 ms whether it
+    runs from L3, L2 or L1: compute-bound, ~14 cycles per radix-4 butterfly (49 vector ops).
+  - Zen 3 throughputs (microbenchmark): `vpmulld` and `vpmuludq` 2 per cycle on the same two
+    pipes; `vpsrlq` 2 per cycle on two others; `vpaddd`, `vpminud`, `vpblendd` 4; a 1:1 mix of
+    multiplies and adds only 3 per cycle. So ~3 vector ops per cycle is the practical bound here.
+  - Radix-8 level on 64-bit input: GCC's loop 62.6 cycles per column (155 vector ops, constants
+    spilled). Generated asm (one column per iteration, lib/ntt's scheduler) 53.5: 2.92 -> 2.55 ms
+    for the 10 calls. Same output, checked word for word. Lost: two columns per iteration
+    57-60 cycles; software pipelining (narrow column j + 1 while column j's butterflies run,
+    through two stack buffers swapped each iteration) 54-62 over 42 knob settings.
+  - Formatter (in memory, 2^20 values; in the program 2.60 -> 1.95 ms): 2.63 ms -> 1.98. GCC -O2
+    kept every `for (h < 2)` loop over halves as a loop, values on the stack, and turned
+    `mullo(tens, 2559)` into 4 ops on the shift pipes. Top's 4 characters from a table instead of
+    14 vector ops per 4 values. Ablations: all three 1.98; without the kept `vpmullw` 2.04; without
+    the unrolling 2.23; table alone 2.32; unrolling and `vpmullw` without the table 2.49; table
+    without the existing software pipelining 2.43 (kept). A pitfall on the way: the harness found
+    a variant header next to its own source before the `-I` directory, so the first "variants"
+    were all one file; the numbers above come from one directory per variant.
+  - CRT: GCC kept the loop over the 5 primes in `combine`, loading and splitting each constant per
+    step. `#pragma GCC unroll 5`: 1.05 -> 0.88 ms.
+  - Phases now (all_same_03, ms, own runner with fork and reap stamps): start 1.05, parse 3.3,
+    transforms 23.9, CRT 0.88, format 1.93, `write()` 7.5, exit 1.45; wall 40.1.
+  - `judge.py bench`, 21 rounds, slowest 3 cases (ms, median): base 42.60; Product + generated
+    radix-8 41.46 (0.9752); + formatter + CRT 40.75 (0.9549). Product alone was 0.9797.
+  - convolution_F_2_64 includes `fields64.hpp`: re-bundled, 51/51 official tests, bench 37.83 ->
+    36.62 (0.9719).
+  - Checks: 44/44 official tests (`lc-amd`); stress 300 rounds (judge flags, lengths to 2^12 + 2:
+    lg 9-14 through `product.hpp`, both top levels) and 60 with ASan/UBSan; `test_fields64.cpp`
+    4.0M values, native and x86-64-v3; ASan/UBSan build on 9 official cases, file and pipe input.
+- Next: variable-width output (no padding before the top; 20.4 instead of 21 bytes per random
+  value) would cut `write()` by ~0.2 ms (a guess), formatter cost unknown. The CRT as a scheduled
+  asm loop (27 -> ~21 cycles per 8 values, a guess: 0.15 ms). The subtrees are at ~3 vector ops
+  per cycle in lib/ntt's kernels.
+
 ## Sources
 
-- lib/ntt (our QPoly-derived kernels) and convolution_mod (radix-8 first level, fixed-width
-  output, preinit start). CRT with a floating-point estimate of the multiple of M: a standard
+- lib/ntt (our QPoly-derived kernels, ntt::Product, the asm generator) and convolution_mod
+  (radix-8 first level, fixed-width output, preinit start). CRT with a floating-point estimate of the multiple of M: a standard
   technique, written here from the formula; no code read.

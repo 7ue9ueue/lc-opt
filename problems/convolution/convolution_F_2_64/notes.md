@@ -173,3 +173,7 @@ same harness: 2.55, 2.1, 2.05, 6.0, 12.1, 4.3, 11.2.
 - 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
   `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
   before (judge flags, `lc-amd`).
+- 2026-10-10, claude (convolution_mod_2_64 #32, round 3): `main.cpp` re-bundled with the faster
+  `../convolution_mod_2_64/fields64.hpp` (top digits from a table, unrolled loops over halves;
+  its notes have the details). `judge.py bench` on `lc-bench`, 21 rounds, slowest 3 cases:
+  37.83 -> 36.62 ms median (ratio 0.9719). 51/51 official tests (`lc-amd`).

@@ -20,7 +20,8 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
 - `product_tree.hpp`: products of many polynomials (issue #74), for multipoint evaluation and
   interpolation; its own tables and transforms (`TreeTransform`) on the transform layer.
   `evaluation.hpp`: multipoint evaluation by the transposed product tree (issue #75), on it.
-  `interpolation.hpp`: interpolation (issue #77) on evaluation.hpp's tree.
+  `interpolation.hpp`: interpolation (issue #77) on evaluation.hpp's tree. `newton.hpp`:
+  conversion to the Newton basis (issue #84), trees of its own that keep right children only.
 - `chirp.hpp`: the sequences c s^k q^(k (k - 1) / 2) of the chirp z-transform (issue #76), for
   evaluation and interpolation on geometric sequences; uses `montgomery` from `calculus.hpp`.
 - `factorials.hpp`: factorials from a generated table (`factorial_table.hpp`,
@@ -559,6 +560,10 @@ exponentiation per call: ~500 cycles, more than a whole transform of 64 words), 
   the coefficients for the doubling then take a buffer of their own. `root(transform)` sees the
   root's product transform. Without them (product_of_polynomial_sequence) the machine code is
   unchanged (objdump, judge flags, `lc-intel`).
+- Right children only (for #84): a Keep with `place_right(lo, mid, hi, words)` gives the room of
+  a node's right child; the left child is built as without a Keep (the upper part of its
+  parent's room when that is twice its length, else the stack). Existing users' `.text` and
+  `.rodata` unchanged (judge flags, `lc-amd`).
 
 ## Multipoint evaluation
 
@@ -639,6 +644,44 @@ R = sum_i w_i Q / (1 - a_i x) (padding points get weight 0: R keeps degree < m).
 - Memory at m = 2^17: RSS 31.4 MB (13 huge pages beyond the input). The first child's sum is
   built in its parent's output; y holds M' before the values; the root's window buffer becomes
   R; lane_state releases the top descent's scratch.
+
+## Newton basis
+
+`newton.hpp`: c with f = sum_k c_k prod_(i < k) (x - p_i) for n points (issue #84).
+- Windows: with F = rev(f) and Q_t = prod_(i < t) (1 - p_i x), c_k = [x^(n-1-k)] F / Q_(k+1).
+  (Node [lo, hi) carries g = (f quo N_lo) rem M_v; rev(h) / Q_v = rev(h quo M_v) + x^(D-s)
+  rev(h rem M_v) / Q_v.) Node [lo, hi) gets W_v = (F / Q_hi)[n - hi, n - lo); its right child's
+  window is W_v[0, s_r), its left child's (W_v Q_r)[s_r, s_v), since F / Q_mid = (F / Q_hi) Q_r.
+  One middle product per node; evaluation's descent has two. The root's window is F / Q mod x^K,
+  K = m8 (evaluation.hpp's divide).
+- Trees: evaluation.hpp's lanes and top tree, but lane l holds points [l C, (l + 1) C), so every
+  node covers consecutive points (input transposed into that order, output back), and padding
+  points go at the end (their c are 0).
+- Descent: the left child as PointTree::descend (product with the right sibling's stored
+  transform, halving to the upper half). The right child needs no product: when the left child
+  fills the upper half (s_l = L/2), its window lies right-aligned in the lower half, and 2 f T(X
+  mod x^(L/2)) = P_lo + T(X mod (x^(L/2) + 1)) (inverse_upper and forward of length L/2, as the
+  halving). Otherwise coefficients, then a forward (one more inverse of length L/2). The top
+  tree's rightmost path has known coefficients (prefixes of the root's window): one forward of
+  L/2 each, doubled to the factor a halving gives (the 8 leaves share one factor).
+- Only right children's transforms are kept (product tree's `place_right`). Scratch [X][Y]: X
+  holds the two trees' split tables, then their stacks (the top tree's ends with Q and its
+  transform); Y the lane products, then the division's scratch; the descent uses X's stacks and
+  Y. At n = 2^17 the computation touches 12 MiB (6 huge pages) instead of 26: RSS 32.8 -> 18.9
+  MiB, whole process 0.931 (`lc-bench`; zeroing huge pages was 11% of the cycles on `lc-intel`,
+  5% after).
+- Padding: C rounded up to a power of two above 0.65 of it. Nodes of more than half their length
+  have full lengths at every level of a balanced tree, so padding adds no transform work, only
+  base work and a longer division, and every right child takes the halving path. In process
+  (`lc-bench`, ms, never / always padded): 126000 11.33 / 10.56, 101656 11.08 / 10.57, 94808
+  10.74 / 10.57, 85000 10.50 / 10.50, 80000 10.39 / 10.57, 65537 8.34 / 10.66; 2^17 10.53.
+- Base (`NewtonBase`, up to 32 slots): BaseDescent's products, but node 0's at each level skipped
+  (no right child needs it); then per pair a middle product (left) and a copy (right).
+- In process at n = 2^17 (`lc-bench`, fresh arena): trees 4.45 ms, division 2.06, descent 3.9
+  (top tree 1.3; lanes 2.6, of which bases 0.54), output order 0.07.
+- Next: a division that keeps T(q0) (the root's right child is its lower half, doubled); the
+  blocked division (B = 4, ~0.8 transforms of 2^17 fewer); the top tree's leaves from the lane
+  root's transform (a lanes-to-standard conversion instead of 8 forwards of 2^15).
 
 ## Chirp
 
@@ -1489,6 +1532,20 @@ header changed. Two `Recurrence` probes, details in the problem's notes:
 - A sink per group of 16, the step's groups processed during the next step's products: no gain
   with `fields.hpp` formatting (both at the same issue rate).
 
+2026-10-10, claude (issue #84, conversion_from_monomial_basis_to_newton_basis; owner and
+product-tree lanes):
+- New `newton.hpp` (Newton basis above); `product_tree.hpp`: the `place_right` protocol (new
+  `if constexpr` branches). multipoint_evaluation, polynomial_interpolation and
+  product_of_polynomial_sequence re-bundled: `.text` and `.rodata` byte-identical (judge flags,
+  `lc-amd`); their official tests pass.
+- Tests (`test_newton`): sizes 1..100, 18 sizes 255..2999 against repeated synthetic division
+  (random points, mostly 0, mostly P - 1, all equal: repeats are allowed); 15 sizes up to 2^17
+  (both sides of the padding threshold, 65534..65538) and 30 random sizes by f(x) = sum c_k
+  N_k(x) at 8 points. -O2 -Wall -Wextra, ASan/UBSan, `-march=x86-64-v3` (`lc-amd`).
+- Versions (`lc-bench`, whole process, 21 rounds, 5 slowest cases): first (PointTree with lane
+  order) 13.90 ms; top tree's rightmost path from coefficients 0.9883; right children only and
+  scratch reuse 0.9271; padding 0.9123 (12.68 ms). Floor 2.23 ms.
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -1545,6 +1602,11 @@ header changed. Two `Recurrence` probes, details in the problem's notes:
   Computer Algebra", chapter 10, from memory; not consulted in this round); the combination as
   the transpose of the descent: Bostan, Lecerf and Schost above. The fused lane pass, the base
   and the code derived and written here; no code read.
+- Monomial to Newton basis by a divide and conquer on the subproduct tree (quotient to one side,
+  remainder to the other): classical (A. Bostan, E. Schost, "Polynomial evaluation and
+  interpolation on special sets of points", J. Complexity 21 (2005), from memory; not consulted
+  in this round). The windows c_k = [x^(n-1-k)] F / Q_(k+1), the descent with one middle product
+  per node and the code derived and written here; no code read.
 - Division with remainder by reversal (rev(q) = rev(f) / rev(g) mod x^(n - d)): the standard
   reduction (von zur Gathen and Gerhard, "Modern Computer Algebra", section 9.1, from memory; not
   consulted in this round). The blocks with tail products, the remainder from q g mod (x^L - 1)

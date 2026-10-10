@@ -435,24 +435,27 @@ template <int L, std::size_t W, std::size_t S, bool Inverse>
 void change_basis(u64* f, std::size_t size);
 
 // The column step of change_basis<L>: rows [0, used) of 2^(L-K) rows, each Tau elements.
-// Rows of at least kGatherWords words: column slices of one cache line are copied into a
-// contiguous buffer, transformed there and copied back (long strides alias in L1 and L2).
-// Shorter contiguous rows are cut into column blocks; all column stages run per block.
-constexpr std::size_t kGatherWords = 256, kLine = 8;
+// Rows of at least kGatherWords words: column slices of two cache lines are copied into two
+// contiguous buffers of one line per row, transformed there and copied back (long strides alias
+// in L1 and L2; fewer, wider visits per row cost less). Shorter contiguous rows are cut into
+// column blocks; all column stages run per block.
+constexpr std::size_t kGatherWords = 256, kLine = 8, kLines = 2;
 
 template <int L, int K, std::size_t W, std::size_t S, bool Inverse>
 void change_columns(u64* f, std::size_t used) {
     constexpr std::size_t tau = std::size_t(1) << K, width = tau * W, rows = std::size_t(1) << (L - K);
     if constexpr (W == S && width >= kGatherWords) {
-        alignas(64) static u64 buf[rows * kLine];
-        for (std::size_t p = 0; p < width; p += kLine) {
+        alignas(64) static u64 buf[kLines][rows * kLine];
+        for (std::size_t p = 0; p < width; p += kLines * kLine) {
             for (std::size_t r = 0; r < used; ++r) {
-                for (std::size_t k = 0; k < kLine; k += 4) store(buf + r * kLine + k, load(f + r * width + p + k));
+                for (std::size_t k = 0; k < kLines * kLine; k += 4) store(buf[k / kLine] + r * kLine + k % kLine, load(f + r * width + p + k));
             }
-            std::memset(buf + used * kLine, 0, (rows - used) * kLine * sizeof(u64));
-            change_basis<L - K, kLine, kLine, Inverse>(buf, used);
+            for (std::size_t h = 0; h < kLines; ++h) {
+                std::memset(buf[h] + used * kLine, 0, (rows - used) * kLine * sizeof(u64));
+                change_basis<L - K, kLine, kLine, Inverse>(buf[h], used);
+            }
             for (std::size_t r = 0; r < used; ++r) {
-                for (std::size_t k = 0; k < kLine; k += 4) store(f + r * width + p + k, load(buf + r * kLine + k));
+                for (std::size_t k = 0; k < kLines * kLine; k += 4) store(f + r * width + p + k, load(buf[k / kLine] + r * kLine + k % kLine));
             }
         }
     } else if constexpr (W == S) {

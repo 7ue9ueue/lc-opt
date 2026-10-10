@@ -30,6 +30,12 @@ convolution problems: `problems/convolution/floor.py`.
   two tokens of each stream, into a buffer; a 4x4 transpose of value pairs then writes each
   stream's values in order. Elsewhere `io::read_bulk` is `Reader::read`; `-DIO_BULK32_TRANSPOSE`
   forces either. Like `bulk64.hpp`, it needs no input end.
+- Fixed-width `uint32_t` read (`fixed32.hpp`, `io::read_fixed(in, dst, n)`; from convolution_mod's
+  round 5): if all tokens have 9 digits (or all 1 digit), each with one separator, token i starts
+  at 10i (2i), so a block of 8 (16) tokens is four (one) 32-byte loads with no separator search,
+  checked by its separator masks: ~37 vector ops per 8 tokens. The first block that fails, and the
+  rest of the array, go to `io::read_bulk`; other inputs cost one failed block. Loads stay within
+  the block's bytes plus 2 (the input's zero padding at the end).
 - Output: 64 KiB buffer, `write(2)`. Integers: 4-digit table (10000 entries), groups placed in a
   vector, `pshufb` drops the leading zeros, one 16-byte store. Digit count from a 32-entry table
   (32-bit) or two 65-entry tables (64-bit). No branches on value size. `write<MaxDigits>()` with
@@ -340,6 +346,20 @@ files on tmpfs.
   Submitted 3: bitwise_xor 409428 13 ms (new best, was 14); bitwise_and 409430 12 ms
   (unchanged); convolution_F_2_64 409429 45 ms with three launch spikes, clean 38 as before.
   Details in their notes.
+
+2026-10-10, claude, issue #156 round 2 (lib extraction): `fixed32.hpp`, `io::read_fixed`, moved
+from convolution_mod's `read_values` (its notes, round 5, have the design measurements). New: an
+early return for count 0. `io.hpp`, `bulk32.hpp` and `bulk64.hpp` are unchanged.
+- Users: convolution_mod (moved) and convolution_mod_large (was `io::read_bulk`; 13 of its 21
+  large inputs have 9-digit tokens, all_same_00 1-digit ones).
+- convolution_mod_large per case, `lc-bench` (EPYC 7B13), medians of 7 interleaved runs (ms),
+  `read_bulk` -> `read_fixed`: fft_killer_01 401.9 -> 390.3, fft_killer_06 400.3 -> 391.2,
+  all_same_00 381.1 -> 351.8, all_same_01 403.3 -> 389.5, max_random_00 402.3 -> 401.7,
+  max_random_01 401.8 -> 403.0, max_ans_zero_00 403.2 -> 401.7. The score stays at the
+  mixed-length inputs (~402 ms): `judge.py bench`, 9 rounds, 8 slowest cases, 0.9957.
+- Tests: `test.cpp` runs the bulk tests through `read_fixed` and a new `test_fixed` (9- and 1-digit
+  tokens, one defect at a random place: another width, CRLF, two spaces, a tab; more input after
+  or none; file and pipe), at -O2 (native and x86-64-v3) and with ASan/UBSan.
 
 ## Sources
 

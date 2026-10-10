@@ -128,3 +128,8 @@ transform (all large tests), else `ntt::Convolution`. `lib/io` input, output by
 - 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
   `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
   before (judge flags, `lc-amd`).
+- 2026-10-10, claude (lib, issue #156 round 2): input by `io::read_fixed` (`lib/io/fixed32.hpp`,
+  from `../convolution_mod`): 9-digit and 1-digit inputs take a fixed-stride path. Per case on
+  `lc-bench`, medians of 7 runs (ms): fft_killer_01 401.9 -> 390.3, all_same_00 381.1 -> 351.8,
+  all_same_01 403.3 -> 389.5; max_random_00/01 and max_ans_zero_00 unchanged (~402), so they set the
+  score. Details in `lib/io/notes.md`.

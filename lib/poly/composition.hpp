@@ -303,6 +303,171 @@ void inverse_with(std::span<std::uint32_t> a, const Tables& tables, const Bottom
     }
 }
 
+// Pruned transforms for the Kronecker layouts, in vectors of 8 coefficients. In a forward
+// transform, vector bit b of the index (x = L, the padding bit) is zero in the input; the levels
+// above b (y) act on each column separately, so they skip the columns with bit b set, and the
+// level with bit b has half its inputs. In an inverse transform whose output is used only on the
+// columns with bit b clear, the y levels compute those, the level with bit b half its outputs.
+// Levels below b are full (Recursion), and so are small groups (kForwardFull, kInverseFull): the
+// bottoms take at least 16 vectors, and narrow columns gain little.
+
+// Butterflies j < h of radix-4 group k (inputs at j + t h) on the columns with bit b of j clear:
+// kernels.hpp's loops (lib/ntt's butterflies), h >= 4 and h > 2^b.
+inline void forward_columns(std::uint32_t* a, std::size_t h, std::size_t b, const std::uint32_t* roots, std::size_t k) {
+    Vec* const v = reinterpret_cast<Vec*>(a);
+    if (b == 0) return kernels::forward_even_columns(v, h, roots + slot(k), roots + slot(2 * k));
+    kernels::forward_columns(v, h, std::size_t(1) << b, roots + slot(k), roots + slot(2 * k));
+}
+
+// The same with inverse butterflies.
+inline void inverse_columns(std::uint32_t* a, std::size_t h, std::size_t b, const std::uint32_t* inverse_roots,
+                            std::size_t k) {
+    Vec* const v = reinterpret_cast<Vec*>(a);
+    if (b == 0) return kernels::inverse_even_columns(v, h, inverse_roots + slot(k), inverse_roots + slot(2 * k));
+    kernels::inverse_columns(v, h, std::size_t(1) << b, inverse_roots + slot(k), inverse_roots + slot(2 * k));
+}
+
+// forward_h1 with the inputs at 2h and 3h zero (high = true) or at h and 3h (high = false).
+inline void forward_half(std::uint32_t* a, std::size_t h, bool high, const Group& w) {
+    for (std::uint32_t* x = a; x < a + 8 * h; x += 8) {
+        const Vec u = low(load(x));
+        if (high) {
+            const Vec b = load(x + 8 * h), yb = times(b, w.y), zb = times(b, w.z);
+            store(x, add(u, yb)), store(x + 8 * h, diff(u, yb));
+            store(x + 16 * h, add(u, zb)), store(x + 24 * h, diff(u, zb));
+        } else {
+            const Vec xc = times(load(x + 16 * h), w.x), sum = low(add(u, xc)), difference = low_difference(u, xc);
+            store(x, sum), store(x + 8 * h, sum), store(x + 16 * h, difference), store(x + 24 * h, difference);
+        }
+    }
+}
+
+// inverse_h1 computing only the outputs at 0 and h (high = true: 2h and 3h unused) or at 0 and 2h.
+inline void inverse_half(std::uint32_t* a, std::size_t h, bool high, const Group& w) {
+    for (std::uint32_t* x = a; x < a + 8 * h; x += 8) {
+        const Vec f0 = load(x), f1 = load(x + 8 * h), f2 = load(x + 16 * h), f3 = load(x + 24 * h);
+        const Vec ab = low(add(f0, f1)), cd = low(add(f2, f3));
+        store(x, low(add(ab, cd)));
+        if (high) store(x + 8 * h, low(add(times(diff(f0, f1), w.y), times(diff(f2, f3), w.z))));
+        else store(x + 16 * h, times(diff(ab, cd), w.x));
+    }
+}
+
+// The pruned forward and inverse below the top level: group k of nv vectors at a.
+template <class Bottom>
+class Pruned {
+public:
+    Pruned(const Tables& tables, const Bottom& bottom, std::size_t b)
+        : recursion_(tables.roots, tables.inverse_roots, bottom), tables_(tables), b_(b) {}
+
+    void forward(std::uint32_t* a, std::size_t nv, std::size_t k) const {
+        const std::size_t h = nv / 4, low = std::size_t(std::countr_zero(h));
+        if (nv <= kForwardFull || low + 1 < b_) return recursion_.visit(a, nv, k);
+        if (low > b_) {
+            forward_columns(a, h, b_, tables_.roots, k);
+            for (std::size_t t = 0; t < 4; ++t) forward(a + 8 * t * h, h, 4 * k + t);
+            return;
+        }
+        forward_half(a, h, low + 1 == b_, Group(tables_.roots, k));
+        for (std::size_t t = 0; t < 4; ++t) recursion_.visit(a + 8 * t * h, h, 4 * k + t);
+    }
+
+    void inverse(std::uint32_t* a, std::size_t nv, std::size_t k) const {
+        const std::size_t h = nv / 4, low = std::size_t(std::countr_zero(h));
+        if (nv <= kInverseFull || low + 1 < b_) return recursion_.visit(a, nv, k);
+        if (low > b_) {
+            for (std::size_t t = 0; t < 4; ++t) inverse(a + 8 * t * h, h, 4 * k + t);
+            return inverse_columns(a, h, b_, tables_.inverse_roots, k);
+        }
+        for (std::size_t t = 0; t < 4; ++t) recursion_.visit(a + 8 * t * h, h, 4 * k + t);
+        inverse_half(a, h, low + 1 == b_, Group(tables_.inverse_roots, k));
+    }
+
+private:
+    static constexpr std::size_t kForwardFull = 64, kInverseFull = 16;  // vectors
+
+    Recursion<Bottom> recursion_;
+    const Tables& tables_;
+    std::size_t b_;
+};
+
+// The forward transform of length a.size() of a[0, size) in place (the rest zero and not read),
+// with vector bit b of the index zero in the input; b lies below the top level's bits. The top
+// level writes zeros to the skipped columns, which the levels above b then leave alone.
+template <class Bottom>
+void forward_pruned(std::span<std::uint32_t> a, std::size_t size, std::size_t b, const Tables& tables,
+                    const Bottom& bottom) {
+    const Pruned<Bottom> pruned(tables, bottom, b);
+    const Source in(a.data(), size, 0);
+    const std::size_t nv = a.size() / 8, width = std::size_t(1) << b;
+    auto* v = reinterpret_cast<Vec*>(a.data());
+    const Vec p = broadcast(kP), zero = _mm256_setzero_si256();
+    if (std::countr_zero(nv) % 2 == 0) {  // radix-4 identity group, as forward_top4
+        const std::size_t h = nv / 4;
+        const Factor z(tables.roots[1], tables.roots[9]);
+        for (std::size_t c = 0; c < h; c += 2 * width) {
+            for (std::size_t j = c; j < c + width; ++j) {
+                const Vec x0 = in(j), x1 = in(j + h), x2 = in(j + 2 * h), x3 = in(j + 3 * h);
+                const Vec ac = add(x0, x2), amc = _mm256_sub_epi32(add(x0, p), x2);
+                const Vec bd = add(x1, x3), zbmd = times(_mm256_sub_epi32(add(x1, p), x3), z);
+                v[j] = add(ac, bd), v[j + h] = diff(ac, bd);
+                v[j + 2 * h] = add(amc, zbmd), v[j + 3 * h] = diff(amc, zbmd);
+            }
+            for (std::size_t j = c + width; j < c + 2 * width; ++j)
+                v[j] = v[j + h] = v[j + 2 * h] = v[j + 3 * h] = zero;
+        }
+        for (std::size_t t = 0; t < 4; ++t) pruned.forward(a.data() + 8 * t * h, h, t);
+    } else {  // radix 2, as forward_top2
+        const std::size_t h = nv / 2;
+        for (std::size_t c = 0; c < h; c += 2 * width) {
+            for (std::size_t j = c; j < c + width; ++j) {
+                const Vec x0 = in(j), x1 = in(j + h);
+                v[j] = add(x0, x1), v[j + h] = _mm256_sub_epi32(add(x0, p), x1);
+            }
+            for (std::size_t j = c + width; j < c + 2 * width; ++j) v[j] = v[j + h] = zero;
+        }
+        pruned.forward(a.data(), h, 0);
+        pruned.forward(a.data() + 8 * h, h, 1);
+    }
+}
+
+// The inverse transform of length a.size() in place, times scale, canonical on the columns with
+// vector bit b clear (the others are left unspecified) of the output half; b lies below the top
+// level's bits.
+template <class Bottom>
+void inverse_pruned(std::span<std::uint32_t> a, std::size_t b, const Tables& tables, const Bottom& bottom,
+                    std::uint32_t scale, Half output = Half::kBoth) {
+    const Pruned<Bottom> pruned(tables, bottom, b);
+    const std::size_t nv = a.size() / 8, width = std::size_t(1) << b;
+    auto* v = reinterpret_cast<Vec*>(a.data());
+    const Factor s(scale);
+    const auto scaled = [&s](Vec x) { return reduce(times(x, s), kP); };
+    const bool lower = output != Half::kUpper, upper = output != Half::kLower;
+    if (std::countr_zero(nv) % 2 == 0) {  // radix-4 identity group, as inverse_top4
+        const std::size_t h = nv / 4;
+        for (std::size_t t = 0; t < 4; ++t) pruned.inverse(a.data() + 8 * t * h, h, t);
+        const Factor z(tables.inverse_roots[1], tables.inverse_roots[9]);
+        for (std::size_t c = 0; c < h; c += 2 * width)
+            for (std::size_t j = c; j < c + width; ++j) {
+                const Vec x0 = v[j], x1 = v[j + h], x2 = v[j + 2 * h], x3 = v[j + 3 * h];
+                const Vec ab = low(add(x0, x1)), cd = low(add(x2, x3));
+                const Vec amb = low(diff(x0, x1)), cmd = times(diff(x2, x3), z);
+                if (lower) v[j] = scaled(add(ab, cd)), v[j + h] = scaled(add(amb, cmd));
+                if (upper) v[j + 2 * h] = scaled(diff(ab, cd)), v[j + 3 * h] = scaled(diff(amb, cmd));
+            }
+    } else {  // radix 2, as inverse_top2
+        const std::size_t h = nv / 2;
+        pruned.inverse(a.data(), h, 0);
+        pruned.inverse(a.data() + 8 * h, h, 1);
+        for (std::size_t c = 0; c < h; c += 2 * width)
+            for (std::size_t j = c; j < c + width; ++j) {
+                const Vec x0 = v[j], x1 = v[j + h];
+                if (lower) v[j] = scaled(add(x0, x1));
+                if (upper) v[j + h] = scaled(diff(x0, x1));
+            }
+    }
+}
+
 // Bump allocation of 64-byte aligned spans from scratch, with Arena's gaps: each take uses at
 // most words(n) words.
 class Carve {

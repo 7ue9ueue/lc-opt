@@ -49,6 +49,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [polynomial_interpolation](problems/polynomial/polynomial_interpolation) | [20 ms](https://judge.yosupo.jp/submission/409545) | 55 ms |
 | [polynomial_taylor_shift](problems/polynomial/polynomial_taylor_shift) | [10 ms](https://judge.yosupo.jp/submission/409534) | 33 ms |
 | [shift_of_sampling_points_of_polynomial](problems/polynomial/shift_of_sampling_points_of_polynomial) | [11 ms](https://judge.yosupo.jp/submission/409556) | 41 ms |
+| [division_of_polynomials](problems/polynomial/division_of_polynomials) | [12 ms](https://judge.yosupo.jp/submission/409561) | 30 ms |
 | [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |
 
 Times are the judge's, for the slowest test, checked against the judge's API on 2026-10-10.

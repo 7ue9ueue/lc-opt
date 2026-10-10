@@ -339,6 +339,25 @@ the same with e = 1/2. log is `Recurrence` on G = n g (taps (d, -f_d), r = n f_n
   (2 MiB at N = 10^6) is in transparent huge pages. The kernel loop runs the next window's batch
   inversion, a half step (two chains of 8 lanes) per block: independent work for the cycles the
   chain from block to block leaves free. The 32 lane totals by a product tree (as `Divider`).
+  Without slopes the half step goes before the triangle, with slopes after it (each 1-3% faster
+  than the other place).
+- Chained kernel (w <= 8; used from w = 5 without slopes and at w = 8 with them, where it wins):
+  blocks of 8. A block's state is the previous block's top w values, T H_prev (T: those rows of
+  F mod x^8), so W = M H_prev and V' S = M' H_prev with M = V T, M' = V' T (8 x 8). The chain
+  from block to block is W, partial step, scale, H, broadcasts, M H: no triangle and no
+  reduction of G on it. G = F H (15 products) comes off the chain; its reduction and store run
+  after the next block's chain products (Zen 3 issues the oldest ready operations first).
+  Per 16 coefficients: 32 + 30 products for M H and F H, against 4w + 46 for the block kernel.
+- Crossed broadcasts (chained kernel): x[k] holds H[k] in its lower 128-bit half and H[k ^ 4] in
+  its upper half, so half of them need no lane crossing (2 `vperm2i128` + 8 `vpshufd` per block
+  of 8); the constant matrices are laid out to match (rows i, i + 2 at column k, rows i + 4, i + 6
+  at column k ^ 4).
+- Costs (`lc-bench`, 10^6 coefficients in chunks of 25600, ms): chained 2.01 without slopes and
+  2.52 with them, flat in w; block kernel without slopes 1.91 (w = 3) .. 2.19 (w = 8), with slopes
+  2.02 (w = 2) .. 2.61 (w = 8). `lc-intel` gives the same crossovers. The chained kernel is
+  latency-bound (2.01 against 1.77 without the dependency from block to block); the block kernel
+  is not (the same time without it). `-DHOLONOMIC_CHAINED=0` or `1` forces it off, or on for
+  every w <= 8 (tests).
 
 `Divider` (`divider.hpp`): g[n] = G[n] / n, called on consecutive ranges (multiples of 64 but
 the last), in place or not. For log: G from `Recurrence` in chunks, divided after the chunk's
@@ -1545,6 +1564,40 @@ product-tree lanes):
 - Versions (`lc-bench`, whole process, 21 rounds, 5 slowest cases): first (PointTree with lane
   order) 13.90 ms; top tree's rightmost path from coefficients 0.9883; right children only and
   scratch reuse 0.9271; padding 0.9123 (12.68 ms). Floor 2.23 ms.
+
+2026-10-10, claude (issue #70 round 2, exp_of_formal_power_series_sparse; sparse lane):
+- `holonomic.hpp`: the chained kernel (Sparse above), chosen per w and slopes; the block kernel
+  without slopes runs the inverter's half step before the triangle. API unchanged. Bundles
+  changed: exp, log, pow, sqrt sparse.
+- In process (`lc-bench`, 10^6 coefficients, chunks of 25600, medians of 11 x 3 interleaved
+  rounds, ms), main -> this: exp w = 3, 4, 5, 6, 7, 8: 1.95, 2.00, 2.05, 2.09, 2.14, 2.20 -> 1.91,
+  1.98, 2.01, 2.01, 2.01, 2.01; slopes (pow shape) w = 2, 4, 6, 7: unchanged (2.01, 2.21, 2.40,
+  2.49); w = 8 (sqrt): 2.61 -> 2.52. `judge.py bench` (`lc-bench`, 21 rounds, 4 slowest cases):
+  exp 7.45 -> 7.36 ms (0.9845), sqrt 7.83 -> 7.82 (1.0003).
+- Zen 3 measurements (`lc-bench`, asm loops): latencies `vpmuludq` 3.0, `vperm2i128` 3.5,
+  `vpermq` 6.6, `vpshufd`, `vpaddq`, `vpsrlq` 1 cycle; `vpmuludq` 2 per cycle with independent
+  inputs, with 8 `vpaddq` or 4 `vpshufd` or 4 `vpsrlq` alongside at no cost. But 8 or 16 products
+  of one broadcast, summed, take 12.1 or 18.6 cycles from the broadcast (about 1.3 products per
+  cycle in such a burst); three independent groups of 8 multiply-adds run at 1.76 per cycle.
+- The chained kernel's chain in isolation (intrinsics loop, cycles per block of 8): partial step
+  and scale 22; with `vperm2i128` + `vpshufd` broadcasts and M H 46, with `vpermq` 48, with crossed
+  broadcasts 42, with a split scale (W y / 2^32 = W_hi y + W_lo (y / 2^32): one Montgomery step
+  instead of two in a row) 36.
+- Kernel versions (exp, ms): chained with broadcasts on the stack (GCC kept the loops rolled)
+  2.67; unrolled 2.32; crossed broadcasts 2.04; G's reduction after the next block's chain 2.01
+  (kept). Probes of the 2.04 version: without the dependency 1.77, without the triangle 1.78,
+  without triangle and inverter step 2.03 (the inversion then runs at window starts).
+- Not kept:
+  - Split scale in the chained kernel: 2.17 (4 more operations per vector of 4; the y / 2^32
+    cost more than the 6 cycles saved on the chain).
+  - The triangle of a block after the next block's chain, broadcasts recomputed: 2.14-2.15 (GCC
+    spilled: 94-104 stack references in the loop, with the broadcasts made lazily as well).
+  - The inverter's half step between the two blocks of 8: +0.5%.
+  - Block kernel with the triangle in consecutive qwords (rows 4i .. 4i + 3; 40 products
+    instead of 46, the block in a permuted order on the chain, `vpermd` to store): exp
+    unchanged, pow w = 6 and sqrt w = 8 2% slower. Removing operations from the block kernel does
+    not help by itself: it runs at about 1 product per cycle.
+  - Inverter half step at the start of each block: 1-2% slower.
 
 ## Sources
 

@@ -33,6 +33,11 @@ scratch): floor (read, fill 10^6 nonzero values, the same output code) median 6.
 ours 8.69 (min 7.42): 1.36 times the floor. In process, small_dense_02 (11 runs): setup 0.13,
 `next` 2.36, format 0.65, `write` 3.4; total 6.6 ms. The gap is the solve.
 
+Round 2, `tools/speed.py bench` (`lc-bench`, 11 rounds, medians, ms; its floor writes the output
+bytes without formatting them): small_dense_00, 01, 02, 04: 7.19, 7.25, 7.18, 7.05 against
+floor 4.63, 4.42, 4.42, 4.40 (1.55-1.64); max_random 3.50-3.71 against 1.41-1.45 (2.5-2.6, not
+the slowest: every block still takes reciprocals and the long-tap path).
+
 ## Log
 
 - 2026-10-09, claude (round 1): first solution, with `lib/poly/holonomic.hpp` (new).
@@ -60,3 +65,21 @@ ours 8.69 (min 7.42): 1.36 times the floor. In process, small_dense_02 (11 runs)
   next window's batch inversion per block (design in `lib/poly/notes.md`). In process (`lc-amd`,
   10^6 coefficients, w = 7 and w = 3): 2.28 -> 2.10 ms, 2.15 -> 1.90. `judge.py bench`
   (`lc-amd`, 21 rounds) against main: 0.9627. 25/25 official tests; `stress.py` 200 rounds.
+- 2026-10-10, claude (round 2): a second kernel in `lib/poly/holonomic.hpp`, chained blocks of 8
+  (design, probes and the attempts that lost in `lib/poly/notes.md`, "Sparse" and the log entry
+  for #70 round 2). Files: `lc-opt-explore/exp_of_formal_power_series_sparse`.
+  - Main re-measured first (`lc-bench`, in process, 10^6 coefficients, ms): w = 3, 4, 5, 7:
+    1.95, 2.00, 2.05, 2.14. The block kernel is throughput-bound (the same time without the
+    dependency from block to block) and runs at about 1 `vpmuludq` per cycle; 6 fewer products
+    per block (consecutive-qword triangle) changed nothing.
+  - Chained kernel: the next block's W = M H from this block's H (M = V T, 8 x 8), so the chain
+    from block to block skips the triangle; broadcasts within 128-bit halves. 2.01 ms for every
+    w <= 8, latency-bound (1.77 without the dependency). Used from w = 5; below, the block kernel
+    with the inverter's half step before the triangle: 1.91 (w = 3), 1.98 (w = 4).
+  - Slowest case in process: 2.14 -> 2.01 ms (w = 7). `judge.py bench` (`lc-bench`, 21 rounds,
+    small_dense_00, 01, 02, 04): 7.45 -> 7.36 ms (0.9845).
+  - Checks: 25/25 official tests (and log 24/24, pow 35/35, sqrt 45/45: their bundles changed);
+    `stress.py` 300 rounds (exp, sqrt, pow); `lib/poly/test.cpp` at -O2 with the default choice,
+    `-DHOLONOMIC_CHAINED=0` and `1`, ASan/UBSan (default and `1`); new tests at the chained
+    kernel's widest (8 taps at P - 1, with and without slopes); mutations of the chained kernel
+    fail them.

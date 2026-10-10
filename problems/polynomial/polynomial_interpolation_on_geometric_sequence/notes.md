@@ -5,8 +5,8 @@ f of degree < N through them. 5 s. Slowest tests: max_random_00..02 and y0_00 (N
 random_00/01 and pow_rN_equal_1_01 (N > 2^18). near_pow2 (N = 2^18 - 2 .. 2^18 + 2) takes the
 same transform length, 2^20. nar_0 has N <= 1 (a, r may be 0), small N <= 5.
 
-Best judged: ours, 15 ms: [409510](https://judge.yosupo.jp/submission/409510) (`main.cpp` of #239),
-clean (`tools/spikes.py`).
+Best judged: ours, 14 ms: [409719](https://judge.yosupo.jp/submission/409719) (`main.cpp` of #349),
+clean (`tools/spikes.py`). Before: 15 ms, [409510](https://judge.yosupo.jp/submission/409510) (#239).
 Record when opened (issue #78): 90 ms.
 
 ## Design
@@ -150,6 +150,13 @@ busier VM). `lc-bench`, same setup: 4.63 ms (31 rounds; #239's `main.cpp` 14.21 
   - Checks: 28/28 official tests (`judge.py test`, `lc-amd` and `lc-intel`); `stress.py` 400
     rounds (`lc-amd`) and 300 (`lc-intel`); ASan/UBSan on all 28 official cases, file and pipe
     input (`lc-amd`); `gen_bottom.py --check`.
+  - Merged as #349. CI, 21 rounds, slowest 3 cases, EPYC 7763 on all three runners:
+    14.67 -> 13.97 ms (0.9533), 14.90 -> 14.27 (0.9553), 14.74 -> 14.03 (0.9496).
+  - Submitted the merged `main.cpp` once (1 of 5 this session):
+    [409719](https://judge.yosupo.jp/submission/409719) AC 14 ms, clean 14 (`spikes.py`; spikes
+    only on example_00 and nar_0_07): max_random_00/01 14, max_random_02 and y0_00 13,
+    random_00/01, near_pow2_01/04 and pow_rN_equal_1_01 12. Not resubmitted: no spike set the
+    score.
 - Next: above the floor (4.6 ms on `lc-bench`) the products take 6.9 ms (`ntt::Product`'s
   kernels; the bottom stage is ~1.3 ms of each, near its uop bound) and the scans 1.5 ms, near
   their compute bound (chain 6 cycles per vector step, multiplies). Memory is at the minimum for

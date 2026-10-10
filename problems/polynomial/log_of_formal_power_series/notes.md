@@ -60,7 +60,10 @@ blocked division 15.26 ms. So log itself takes ~10.5 ms of 15.3.
   - Merged as #131 (CI: exp 0.9983, inv 0.9989, log 0.9997).
   - Submitted the merged `main.cpp` (#131): [409264](https://judge.yosupo.jp/submission/409264)
     AC 15 ms, 17.4 MiB.
-- Next: leaf products take ~2.7 ms of the 10.2 (estimate from the phases: q products 0.8,
-  residuals 1.5, inverse 0.4); a faster leaf product (lib/poly/notes.md) helps inv and exp too.
-  Smaller: 7 buffers instead of 8 (T(q_2) in the work buffer), the text buffer in the scratch
+- 2026-10-09, claude (lib/poly round, issue #95): faster leaf products (#158; lib/poly/notes.md):
+  `inverse_product_sum` of 2 and 3 pairs at 2^19 -14% and -16% (`lc-amd`), -20% and -14%
+  (`lc-intel`). `judge.py bench` (21 rounds): `lc-amd` 15.38 -> 14.52 ms (0.9442), `lc-intel`
+  0.9700; CI 0.9529. Not submitted (0.9 ms).
+- Next: the transform levels (lib/ntt's kernels) are now the largest cost. Smaller: 7 buffers
+  instead of 8 (T(q_2) in the work buffer), the text buffer in the scratch
   (~1.3 MB less first touch; first use costs ~0.5 ms over warm runs).

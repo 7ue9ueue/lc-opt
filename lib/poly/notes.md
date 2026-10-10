@@ -6,6 +6,8 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
 - `calculus.hpp`: coefficient-wise operations: `derivative`, `divide_by_index` (integration).
 - One header per operation on top: `inverse.hpp`, `exp.hpp` (Newton iterations), `log.hpp`
   (division f'/f), `pow.hpp` (c (f / f[0])^e as exp(e log)), `sqrt.hpp` (Newton iteration).
+- `sparse.hpp`: linear recurrences with few taps, for series with few nonzero terms (issues
+  #69-#73); independent of the transform layer.
 
 APIs and usage: the header of each file. Tests: `test.cpp` (O(n^2) references; sizes 1..64,
 powers of two and their neighbours up to 2^20, random sizes; also run under ASan/UBSan in CI).
@@ -29,10 +31,13 @@ powers of two and their neighbours up to 2^20, random sizes; also run under ASan
   products with b, kept as a transform).
 - Sources: the forward top level reads x^shift in[0, size) from any span (in place or not);
   coefficients outside are zero and not read. Outputs: `Half` computes one half only.
-- Leaf product: a window [w a, a] (canonical) gives x^i a mod (x^8 - w) as words [8 - i, 16 - i);
+- Leaf product: a window [w a, a] (words <= P) gives x^i a mod (x^8 - w) as words [8 - i, 16 - i);
   16 `vpmuludq` into 64-bit sums (8 products < P^2 plus the Montgomery term stay below 2^64), one
   Montgomery reduction per lane. The factor 2^-32 is undone by the inverse's scale in
-  `cyclic_product`, and by one Shoup multiplication by 2^32 in `multiply`.
+  `cyclic_product`, and by one Shoup multiplication by 2^32 in `multiply` and `forward_product`.
+  Inline asm in a fixed order (step i: broadcast b[i], two multiplies, the adds of step i - 1).
+  `fill_windows` writes a group's 4 windows: weights y, -y, z, -z with y, z broadcast from the
+  table, -(y a) as 2P - y a. The product bottoms are always inlined and unrolled.
 - Memory: `Arena`, one mapping in transparent huge pages, spans 32-byte aligned with 64 bytes after
   each (the forward kernels read 4 bytes past the end).
 
@@ -181,6 +186,32 @@ negations: the inverse update and the root step both come out with the right sig
   - Harvey's 4/3 M(n) square root (Harvey 2011 below; 8 T(n) with M(n) = 6 T(n)): blocked,
     more leaf products per transform; not tried (as the 13/9 reciprocal, issue #62 below).
 
+## Sparse
+
+`Recurrence`: g[i] = r[i] + sum over taps (d, c) of c g[i - d], at most 16 taps, r sparse;
+`next(out, count)` produces the next coefficients into any window that holds the history before
+it (a ring, or one array). For 1/f: taps (i_k, -a_k / a_0), r = [1 / a_0].
+- Blocks of 16. Short taps (d < 16): the state is the last w = max d values;
+  g[n + t] = sum_(j < w) A[t][j] g[n - 1 - j] + sum_(s <= t) u[t - s] r'[n + s], u the short
+  taps' impulse response, r' = r plus the long taps' terms (16-wide loads at n - d, all before
+  the block). A and u are built once by running the short recurrence on unit states.
+- Where no long tap reaches and r is zero (all of a dense f's output): 64 coefficients per step
+  from one state, in four independent blocks of 16, the block holding the next state first.
+  w products per coefficient and no dependency inside a step. One kernel per w (1..15), fully
+  unrolled.
+- Products: coefficient times 2^32 (Montgomery form) and value, both below P, by `vpmuludq`
+  into 64-bit sums laid out as qwords of the even and odd outputs (no shuffles before the
+  products). Reduction per sum: up to 12 products, one Montgomery step (< 4P) and two
+  subtractions; up to 17 (any sum below 2^64), first 2^32 h + l -> h (2^32 mod P) + l < 2^62.
+- Blocks with long taps or r: r' reduced, the A part reduced, then h 2^32 + U r' (17 products).
+  Without short taps the block is r' itself.
+- Costs (`lc-amd`, in memory): about 0.125 + 0.05 w ns per coefficient for w <= 12 (0.463 at w = 7);
+  each column is 4 `vpmuludq` + 4 `vpaddq` per 16 values, 2.8 cycles.
+- Next, for exp, log, pow and sqrt (#70-#73): their recurrences have coefficients linear in n
+  (log's n g_n is constant-coefficient: G = n g, then a division by n); dense small-tap inputs
+  then need a different block step, and bulk inverses of 1..N (`calculus.hpp` has batch
+  inversion).
+
 ## Measurements
 
 AMD EPYC 7B13 (`lc-amd`, 3.48 GHz), GCC 15.2, judge flags, 2026-10-09. ns per coefficient,
@@ -309,6 +340,79 @@ products 1.77 and 1.69).
 - Merged as #148. Judged [409316](https://judge.yosupo.jp/submission/409316): AC 16 ms with a
   +9 ms launch spike; clean score 12 ms (record 25 ms).
 
+2026-10-09, claude (issue #95, leaf products):
+- Zen 3 costs (`lc-amd`, scratch probes, cycles per instruction, independent streams):
+  `vpaddq`, `vpsubd`, `vpminud`, `vpblendd` 0.25; `vpmuludq`, `vpmulld`, `vpsrlq`, `vpalignr`,
+  `vpshufd`, `vshufps` 0.5; `vperm2i128` 1.0; `vpbroadcastd` from memory uses no vector pipe.
+  Multiplies and shifts use disjoint pipe pairs (6 + 6: 4 per cycle). Multiplies with adds: 4
+  per cycle in the order M M A A, 3.0 in the order M A M A.
+- Leaf product alone (64 leaves in L1, windows stored long before; cycles per leaf): GCC's code
+  15.6, fixed-order asm 14.6, the same without memory operands 13.0, without the Montgomery step
+  9.5 (16 multiplies, 14 adds). Each added op cost ~0.12 (shift), ~0.27 (add, blend), ~0.45
+  (multiply): with half the ops multiplies, ~3.1 ops per cycle. Tree accumulation, two leaves
+  interleaved, the Montgomery chain cut: within 0.5.
+- In `cyclic_product` at 2^19 (ns per coefficient): 3.38; with the leaf product replaced by a
+  copy 2.77, also without the window's w a 2.49. GCC compiled `ProductBottom::prepare` as a call
+  (with `vzeroupper`), kept the loops over the 4 leaves rolled with stack round trips, and built
+  the odd leaves' weights P - w in general registers (`vmovd`, `vpbroadcastd`).
+- Changes: the product bottoms always inlined and unrolled; `fill_windows` for a group (y, z
+  broadcast from the table, -(y a) as 2P - y a); `leaf_product` in inline asm (step i: broadcast
+  b[i], two multiplies, the adds of step i - 1); unroll pragmas on `ForwardBottom`'s stores and in
+  `InverseProductSumBottom`. API and transform format unchanged. Tests: `leaf_product` against
+  scalar sums for windows with any words in [0, P] (all 0, all P - 1, all P, mixes) and canonical
+  b; `fill_windows` against w a for groups 0 .. 999 and random; -O2 and ASan/UBSan,
+  `-march=native` and `-march=x86-64-v3` (`lc-intel`). Mutations (no negation, a wrong window
+  offset, no final reduction) fail them.
+- In process at 2^19, ns per coefficient, medians of 40, same session, `lc-amd` (`lc-intel`),
+  main -> this: `cyclic_product` 3.38 -> 3.07 (4.00 -> 3.92), `inverse_product` 2.14 -> 1.95
+  (2.51 -> 2.47), `inverse_product_sum` of 2 3.13 -> 2.69 (3.93 -> 3.15), of 3 4.12 -> 3.46
+  (4.47 -> 3.84), `forward_product` 2.35 -> 2.06 (2.67 -> 2.58), `forward` 1.24 -> 1.20
+  (1.75 -> 1.74), `inverse` unchanged. Steps (`lc-amd`, `cyclic_product`): inlining and
+  unrolling 3.19, asm leaf product 3.13, `fill_windows` 3.07. On `lc-intel` the first two steps
+  made `inverse_product_sum` of 2 slower (3.85 -> 3.97); its unroll pragmas fixed that.
+- Tried, not kept (`cyclic_product` at 2^19 unless noted):
+  - Windows built in registers (`vperm2i128` + 6 `vpalignr` from a and w a): 31 vs 23 cycles per
+    leaf in isolation (long chain from w a to the products; GCC spilled).
+  - Windows prepared two groups ahead: no change (store forwarding is not the limit).
+  - Four leaf products in one asm block on fixed registers: 1-3% slower than one leaf per block
+    (the clobbers spill the surrounding code).
+  - Two leaves interleaved in one asm block: -0.6%, `forward_product` -3.6%; not worth a second
+    kernel.
+  - Instruction orders: M A alternating, E or O first, `vshufps` + `vpshufd` for the final
+    interleave: within 1% of the kept order. Intrinsics with the same bottoms: 2-5% slower.
+- Counted, not built: Karatsuba (the wrap needs w-scaled and plain halves of the same
+  sub-products: 64 products again); leaves mod x^4 - w (an in-register level costs ~14 ops per
+  vector in every transform, the product saves ~8 per vector); FMA on doubles (30-bit operands
+  need two limbs: 32 FMAs against 30 integer ops); one Montgomery step for K products in
+  `inverse_product_sum` (16 P^2 + 2^32 P > 2^64); q by one `vpmulld` (-1 multiply, +2 shifts,
+  +1 blend; estimated neutral).
+- Whole process (`judge.py bench`, 21 rounds, ratios new/main): `lc-amd` inv 0.9550, exp 0.9407,
+  log 0.9442, pow 0.9311, sqrt 0.9490 (exp 18.65 -> 17.53 ms, pow 29.33 -> 27.33 ms); `lc-intel`
+  inv 0.9800, exp 0.9841, log 0.9700, pow 0.9768, sqrt 0.9826. All official tests pass
+  (`judge.py test`, `lc-amd`).
+- Merged as #158 (CI: exp 0.9384, inv 0.9493, log 0.9529, pow 0.9402, sqrt 0.9561; all 5
+  0.9473). Judged: exp [409327](https://judge.yosupo.jp/submission/409327) AC 18 ms (one case
+  at 18, the rest <= 17); pow [409328](https://judge.yosupo.jp/submission/409328) AC 32 ms
+  with two launch spikes, large cases 25-27 ms (clean 27, was 29).
+
+2026-10-09, claude (issue #69, inv_of_formal_power_series_sparse):
+- New `sparse.hpp` (above) and its tests: the recurrence against its definition for 3000 random
+  tap sets (short, long, mixed, block edges, 16 taps at P - 1), next() in random lengths into an
+  array and into a ring; each width 1..15 over 20000 coefficients; the reduction at its bounds
+  (12 (P - 1)^2 unfolded, 2^64 - 1 folded). With the unfolded bound raised to 14 the tests fail;
+  random recurrences alone did not catch it.
+- Kernel steps, solve phase of small_dense_02 (w = 7, 10^6 coefficients) in process, ms: sums in
+  a struct by reference and a call per block (GCC kept them on the stack) 2.16; sums in
+  registers, 32 per step 0.85; 64 per step, unrolled per width, an empty asm after each column
+  (GCC otherwise formed all products first and spilled 14 per block) 0.68; the block holding
+  the next state first (it was ~285 instructions into a step, past the 256-entry reorder
+  buffer) 0.53. In memory, w = 7: 0.711 -> 0.557 -> 0.463 ns per coefficient.
+- Not kept: the state in registers, lanes broadcast by `vpermd` (0.711 at 32 per step, 0.766 at
+  64; GCC spilled the state); broadcasts from memory cost no vector uop and their store
+  forwarding is off the critical path once the state block comes first. Each column as asm in
+  the order M M A A (the leaf product's finding above): w = 7 0.480 against 0.466 for GCC's
+  M A M A, two alternated runs (the multiplies here take their column from memory).
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -326,3 +430,7 @@ products 1.77 and 1.69).
   division and square root", ACM TOMS 23 (1997) (the idea, as described by Hanrot and
   Zimmermann above). The blocked form (residuals by middle products of stored transforms) is
   the usual blockwise division; derived and written here, no code read.
+- Linear recurrences in blocks by jump matrices (the state times A = M^t rows) and the impulse
+  response of the short part: standard linear algebra, derived here; no code read.
+- Montgomery reduction: P. Montgomery, "Modular multiplication without trial division",
+  Math. Comp. 44 (1985).

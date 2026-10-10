@@ -14,6 +14,7 @@
 #include "lib/poly/inverse.hpp"
 #include "lib/poly/log.hpp"
 #include "lib/poly/pow.hpp"
+#include "lib/poly/sparse.hpp"
 #include "lib/poly/sqrt.hpp"
 #include "lib/poly/transform.hpp"
 
@@ -117,6 +118,47 @@ std::vector<std::size_t> leaves_to_check(std::size_t n) {
     ps = {0, 1, 2, 3, n / 16, n / 8 - 1};
     for (int i = 0; i < 20; ++i) ps.push_back(pick(n / 8));
     return ps;
+}
+
+// The leaf kernels against scalar code: leaf_product on windows with any words in [0, P] (the
+// kernel reads only words 1 .. 16) and canonical b, including all-zero, all-(P - 1) and all-P
+// inputs; fill_windows on canonical leaves, including 0 and P - 1.
+void test_leaf_kernels(Fixture& fx) {
+    using poly::detail::Vec;
+    const u32 inverse_r = power(u32((u64(1) << 32) % P), P - 2);  // 2^-32
+    const auto word = [](int kind) {
+        const u64 r = rng();
+        return kind == 0 ? u32(r % (P + 1)) : kind == 1 ? 0 : kind == 2 ? P - 1 : kind == 3 ? P : u32(r % 2 ? P : r % 3);
+    };
+    for (int trial = 0; trial < 20000; ++trial) {
+        const int kind = trial < 100 ? trial % 5 : 0;
+        poly::detail::Window window;
+        for (u32& x : window.word) x = word(kind);
+        alignas(32) u32 b[8], out[8];
+        for (u32& x : b) x = kind == 3 || kind == 4 ? (rng() % 2 ? P - 1 : 0) : std::min(word(kind), P - 1);
+        poly::detail::store(out, poly::detail::leaf_product(window, b));
+        for (int j = 0; j < 8; ++j) {
+            u64 s = 0;
+            for (int i = 0; i < 8; ++i) s = (s + u64(b[i]) * window.word[8 - i + j]) % P;
+            expect(out[j] < 2 * P && out[j] % P == mul(u32(s), inverse_r), "leaf_product", trial, j);
+        }
+    }
+    for (int trial = 0; trial < 2000; ++trial) {
+        const std::size_t g = trial < 1000 ? std::size_t(trial) : pick(std::size_t(1) << (kLgMax - 5));
+        alignas(32) u32 a[4][8];
+        for (auto& leaf : a)
+            for (u32& x : leaf) x = trial % 3 == 0 ? u32(rng() % 2 ? 0 : P - 1) : u32(rng() % P);
+        const Vec f[4] = {poly::detail::load(a[0]), poly::detail::load(a[1]), poly::detail::load(a[2]), poly::detail::load(a[3])};
+        poly::detail::Window window[4];
+        poly::detail::fill_windows(window, f, fx.roots.data(), g);
+        for (int t = 0; t < 4; ++t) {
+            const u32 r = fx.roots[ntt::detail::slot(2 * g + t / 2)], w = t % 2 ? P - r : r;
+            for (int j = 0; j < 8; ++j) {
+                expect(window[t].word[8 + j] == a[t][j], "fill_windows: leaf", g, j);
+                expect(window[t].word[j] <= P && window[t].word[j] % P == mul(w, a[t][j]), "fill_windows: w a", g, j);
+            }
+        }
+    }
 }
 
 void test_transforms(Fixture& fx) {
@@ -632,10 +674,125 @@ void test_sqrt(Fixture& fx) {
     }
 }
 
+// sparse::detail::reduce on 8 sums each, up to its bounds: 12 (P - 1)^2 unfolded, 2^64 - 1 folded.
+template <bool kFold>
+void check_sparse_reduce() {
+    const u64 max = kFold ? ~u64(0) : poly::sparse::detail::kUnfolded * u64(P - 1) * (P - 1);
+    const u32 unscale = poly::sparse::inverse(poly::sparse::detail::kR);  // 2^-32 mod P
+    std::vector<u64> values = {0, 1, P - 1, P, max, max - 1, max - P, max / 2, u64(P) << 32, (u64(P) << 32) - 1};
+    for (int i = 0; i < 4000; ++i) values.push_back(i % 2 ? max - rng() % (u64(1) << 40) : rng() % max);
+    for (std::size_t i = 0; i + 8 <= values.size(); i += 8) {
+        const u64* x = values.data() + i;
+        const __m256i even = _mm256_setr_epi64x(x[0], x[2], x[4], x[6]), odd = _mm256_setr_epi64x(x[1], x[3], x[5], x[7]);
+        alignas(32) u32 got[8];
+        _mm256_store_si256(reinterpret_cast<__m256i*>(got), poly::sparse::detail::reduce<kFold>(even, odd));
+        for (int k = 0; k < 8; ++k) expect(got[k] == mul(u32(x[k] % P), unscale), "sparse reduce", x[k], kFold);
+    }
+}
+
+using poly::sparse::Recurrence;
+using Terms = std::vector<poly::sparse::Term>;
+
+// g[i] = r[i] + sum over taps (d, c) of c g[i - d], i < n.
+std::vector<u32> recurrence_reference(const Terms& taps, const Terms& rhs, std::size_t n) {
+    std::vector<u32> g(n, 0);
+    for (const auto [i, r] : rhs)
+        if (i < n) g[i] = r;
+    for (std::size_t i = 0; i < n; ++i)
+        for (const auto [d, c] : taps)
+            if (d <= i) g[i] = add(g[i], mul(c, g[i - d]));
+    return g;
+}
+
+// The recurrence solved by next() calls of random lengths (multiples of kBlock but the last):
+// into one array, and, when the taps reach back at most `chunk`, into a ring of history() +
+// chunk words whose last history() words move to its front after each call.
+void check_recurrence(const Terms& taps, const Terms& rhs, std::size_t n) {
+    const auto want = recurrence_reference(taps, rhs, n);
+    const std::size_t padded = (n + Recurrence::kBlock - 1) / Recurrence::kBlock * Recurrence::kBlock;
+    {
+        Recurrence recurrence(taps, rhs);
+        std::vector<u32> g(Recurrence::kPadding + padded, 0);
+        for (std::size_t i = 0; i < n;) {
+            const std::size_t m = std::min(n - i, Recurrence::kBlock * (1 + pick(40)));
+            recurrence.next(g.data() + Recurrence::kPadding + i, m);
+            i += m;
+        }
+        expect(std::equal(want.begin(), want.end(), g.begin() + Recurrence::kPadding), "sparse recurrence, array", n,
+               taps.size());
+    }
+    const std::size_t chunk = Recurrence::kBlock * (1 + pick(64));
+    Recurrence recurrence(taps, rhs);
+    const std::size_t history = recurrence.history();
+    if (history > chunk) return;
+    std::vector<u32> ring(history + chunk, 0), got;
+    for (std::size_t i = 0; i < n; i += chunk) {
+        const std::size_t m = std::min(chunk, n - i);
+        recurrence.next(ring.data() + history, m);
+        got.insert(got.end(), ring.begin() + history, ring.begin() + history + m);
+        std::copy(ring.begin() + chunk, ring.end(), ring.begin());
+    }
+    expect(got == want, "sparse recurrence, ring", n, taps.size());
+}
+
+// count distinct distances from pool, coefficients random or P - 1.
+Terms random_taps(std::vector<u32> pool, std::size_t count, bool worst) {
+    std::shuffle(pool.begin(), pool.end(), rng);
+    Terms taps;
+    for (std::size_t k = 0; k < std::min(count, pool.size()); ++k)
+        taps.push_back({pool[k], worst ? P - 1 : u32(pick(P))});
+    return taps;
+}
+
+std::vector<u32> range(u32 first, u32 last) {
+    std::vector<u32> v(last - first);
+    for (u32 i = first; i < last; ++i) v[i - first] = i;
+    return v;
+}
+
+void test_recurrence() {
+    check_sparse_reduce<false>();
+    check_sparse_reduce<true>();
+    const std::vector<u32> edges = {1, 2, 7, 8, 12, 13, 14, 15, 16, 17, 31, 32, 33, 47, 48, 63, 64, 65, 100, 1000};
+    for (int round = 0; round < 3000; ++round) {
+        const std::size_t n = round < 200 ? std::size_t(round + 1) : 1 + pick(round % 10 ? 700 : 5000);
+        const std::size_t count = round % 7 == 0 ? Recurrence::kMaxTaps : 1 + pick(10);
+        const bool worst = round % 5 == 0;
+        Terms taps;
+        switch (round % 5) {
+            case 0: taps = random_taps(range(1, 16), count, worst); break;     // short only
+            case 1: taps = random_taps(range(16, 3000), count, worst); break;  // long only
+            case 2: taps = random_taps(range(1, 200), count, worst); break;    // mixed
+            case 3: taps = random_taps(edges, count, worst); break;
+            default: taps = {}; break;
+        }
+        Terms rhs;  // distinct indices
+        const bool at_zero = round % 3 == 0;
+        if (at_zero) rhs.push_back({0, worst ? P - 1 : u32(pick(P))});
+        if (round % 4 != 0) {
+            const Terms more = random_taps(range(at_zero, u32(std::min<std::size_t>(n, 3000))), 1 + pick(4), worst);
+            rhs.insert(rhs.end(), more.begin(), more.end());
+        }
+        std::ranges::sort(rhs, {}, &poly::sparse::Term::index);
+        check_recurrence(taps, rhs, n);
+    }
+    // Each width, 1 .. 15, over a long range; and the widest sums: 15 short taps or 16 long or
+    // mixed taps at P - 1.
+    for (u32 w = 1; w < 16; ++w) {
+        Terms taps = {{w, u32(pick(P))}};
+        if (w > 1) taps.push_back({1, u32(pick(P))});
+        check_recurrence(taps, {{0, 1}}, 20000);
+    }
+    check_recurrence(random_taps(range(1, 16), 15, true), {{0, P - 1}}, 20000);
+    check_recurrence(random_taps(range(16, 40), 16, true), {{0, P - 1}, {5, P - 1}}, 20000);
+    check_recurrence(random_taps(range(1, 40), 16, true), {{0, P - 1}, {30, P - 1}}, 20000);
+}
+
 }  // namespace
 
 int main() {
     static Fixture fx;
+    test_leaf_kernels(fx);
     test_transforms(fx);
     test_inverse(fx);
     test_derivative();
@@ -644,6 +801,7 @@ int main() {
     test_log(fx);
     test_power(fx);
     test_sqrt(fx);
+    test_recurrence();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

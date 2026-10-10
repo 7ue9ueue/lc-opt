@@ -3,7 +3,8 @@
 N <= 500000 coefficients of f mod 998244353, f[0] = 0; print the first N coefficients of exp(f).
 10 s. Largest tests: max_* (N = 500000, transforms up to 2^19).
 
-Best judged: ours, 18 ms: [409300](https://judge.yosupo.jp/submission/409300) (`main.cpp` of #131).
+Best judged: ours, 18 ms: [409327](https://judge.yosupo.jp/submission/409327) (`main.cpp` of #158),
+also [409300](https://judge.yosupo.jp/submission/409300) (#131).
 Earlier: 19 ms, [409248](https://judge.yosupo.jp/submission/409248) (#116).
 Record when opened (issue #63): 38 ms.
 
@@ -53,6 +54,11 @@ faults on ~9 MB of scratch).
   [409293](https://judge.yosupo.jp/submission/409293) AC 27 ms (1/5), one spike (random_01 27,
   others <= 19); [409300](https://judge.yosupo.jp/submission/409300) AC 18 ms (2/5), large cases
   17-18 against 18.8 expected (`judge.py bench`).
-- Next: the leaf products are ~3.5 ms of the 13.5 (3.5 per step at ~1.0 ms per length-2m
-  unit); a scheduled asm leaf product (lib/poly/notes.md) is the largest item left. The
-  division (0.45 ms) could halve with a stored inverse table folded into the transform's scale.
+- 2026-10-09, claude (lib/poly round, issue #95): faster leaf products (#158: product bottoms
+  inlined, asm leaf product, `fill_windows`; lib/poly/notes.md). `judge.py bench` (21 rounds):
+  `lc-amd` 18.65 -> 17.53 ms (0.9407), `lc-intel` 0.9841; CI 0.9384. Submitted the merged
+  `main.cpp`: [409327](https://judge.yosupo.jp/submission/409327) AC 18 ms, 17.0 MiB
+  (max_random_00 18, all other cases <= 17; 409300 had six cases at 18).
+- Next: the transform levels (lib/ntt's kernels) are now the largest cost; the leaf product
+  runs at ~16 cycles per leaf in place (multiply-pipe bound ~12). The division (0.45 ms) could
+  halve with a stored inverse table folded into the transform's scale.

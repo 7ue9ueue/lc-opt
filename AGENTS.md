@@ -112,7 +112,7 @@ AGENTS.md                    rules (CLAUDE.md imports it)
 STATUS.md                    foundations (per-problem status is in GitHub issues)
 tools/                       judge copy, CI verdict, submission, round brief (prompt.md)
 .claude/commands/work.md     /work: run rounds on ready issues with subagents
-lib/                         shared code: I/O, modint, NTT, ...
+lib/                         shared code: I/O, NTT, multimod, poly
 problems/<category>/<name>/  category as in library-checker-problems
   solution.cpp               source; includes lib/ headers
   main.cpp                   current best submission, bundled from solution.cpp

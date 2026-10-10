@@ -3,7 +3,7 @@
 N, M <= 2^19; a convex, 0 <= a_i, b_i <= 10^9; print c_k = min_{i+j=k} a_i + b_j (N + M - 1 values,
 each < 2^31). 5 s.
 
-Best judged: ours, 11 ms: [409229](https://judge.yosupo.jp/submission/409229) (`main.cpp` of #92).
+Best judged: ours, 9 ms: [409564](https://judge.yosupo.jp/submission/409564) (`main.cpp` of #277).
 Record when opened: 38 ms (issue #28).
 I/O floor (`../floor.py`, `lib/io/notes.md`): 11.36 ms on `lc-amd`.
 
@@ -126,6 +126,13 @@ I/O floor (`../floor.py`, `lib/io/notes.md`): 11.36 ms on `lc-amd`.
   - Checks: 41/41 official tests; `stress.py` 1500 rounds; `stress_big.py` 300 rounds (N, M up to
     20000; random, sparse-minimum, random-walk, sorted and noisy-sorted b; six kinds of convex a);
     ASan/UBSan on all 41 cases, file and pipe input.
+  - CI (#277): geomean 0.8475 (EPYC 7763 0.8537 and 0.8514, EPYC 9V45 0.8374).
+  - Submitted the merged `main.cpp` 3 times (3 of 5 this round), launch spikes re-rolled
+    (`tools/spikes.py`): [409562](https://judge.yosupo.jp/submission/409562) AC 18 ms (spike on
+    monotone_01; near_power_of_2_04 13 also looks like one, its 4-5 ms peers);
+    [409563](https://judge.yosupo.jp/submission/409563) AC 19 ms (spike on monotone_02, clean 9);
+    [409564](https://judge.yosupo.jp/submission/409564) AC 9 ms (spike only on example_00). Large
+    cases 7-9 ms (409229: 9-11). New best (was 11 ms).
 
 ## Next
 

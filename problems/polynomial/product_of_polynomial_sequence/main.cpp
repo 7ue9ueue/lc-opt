@@ -6052,6 +6052,9 @@ struct LaneLayout {
     static constexpr std::size_t kWords = 8;  // words per coefficient
     static constexpr std::uint32_t kBase = 32;  // nodes up to this degree by schoolbook
     using Value = detail::Vec;
+    struct Node {
+        Value degree, lead;
+    };
 
     static void multiply(const std::uint32_t* a, std::size_t m, const std::uint32_t* b, std::size_t k, std::uint32_t* c) {
         detail::multiply_lanes_any(a, m, b, k, c);
@@ -6087,6 +6090,9 @@ struct StandardLayout {
     static constexpr std::size_t kWords = 1;
     static constexpr std::uint32_t kBase = 0;
     using Value = std::uint32_t;
+    struct Node {
+        Value degree, lead;
+    };
 
     static void multiply(const std::uint32_t*, std::size_t, const std::uint32_t*, std::size_t, std::uint32_t*) {}
 
@@ -6114,7 +6120,7 @@ struct DropTransforms {
 // The product tree over the leaves of a Leaves source:
 //   std::size_t count() const;                 // leaves, >= 1
 //   std::uint32_t degree(std::size_t k) const;  // degree of leaf k, >= 1 (lanes: the largest)
-//   Node load(std::size_t k, std::uint32_t* c) const;
+//   Layout::Node load(std::size_t k, std::uint32_t* c) const;
 //       // writes the degree(k) + 1 coefficients of leaf k at c (kWords words each, Montgomery
 //       // form, zero past a lane's degree) and returns its degrees and leading coefficients.
 // Keep(lo, hi, transform) sees each node but the root once its transform (at its parent's
@@ -6123,9 +6129,7 @@ template <class Layout, class Leaves, class Keep = DropTransforms>
 class ProductTree {
 public:
     using Value = typename Layout::Value;
-    struct Node {
-        Value degree, lead;
-    };
+    using Node = typename Layout::Node;
     struct Root {
         std::span<std::uint32_t> coefficients;  // Layout::kWords * (length + 1) words, Montgomery form
         Node node;
@@ -6545,9 +6549,9 @@ struct Slots {
     std::size_t count() const { return (size + 7) / 8; }
     u32 degree(std::size_t k) const { return tokens[order[8 * k]]; }
 
-    poly::ProductTree<poly::LaneLayout, Slots>::Node load(std::size_t k, u32* c) const {
+    poly::LaneLayout::Node load(std::size_t k, u32* c) const {
         const std::size_t d = degree(k);
-        if (d == 1 && 8 * k + 8 <= size) return load_linear(order + 8 * k, c);
+        if (8 * k + 8 <= size && tokens[order[8 * k + 7]] == d) return d == 1 ? load_linear(order + 8 * k, c) : load_uniform(order + 8 * k, d, c);
         std::fill_n(c, 8 * (d + 1), 0);
         alignas(32) u32 degrees[8], leads[8];
         for (std::size_t l = 0; l < 8; ++l) {
@@ -6563,8 +6567,20 @@ struct Slots {
         return {pd::load(degrees), pd::to_montgomery(pd::load(leads))};
     }
 
+    // 8 polynomials of degree d: coefficient j of each gathered.
+    poly::LaneLayout::Node load_uniform(const u32* at, std::size_t d, u32* c) const {
+        const pd::Vec index = _mm256_add_epi32(pd::load_unaligned(at), pd::broadcast(1));
+        const auto* base = reinterpret_cast<const int*>(tokens);
+        pd::Vec v{};
+        for (std::size_t j = 0; j <= d; ++j) {
+            v = pd::to_montgomery(_mm256_i32gather_epi32(base, _mm256_add_epi32(index, pd::broadcast(u32(j))), 4));
+            pd::store(c + 8 * j, v);
+        }
+        return {pd::broadcast(u32(d)), v};
+    }
+
     // 8 polynomials of degree 1: their coefficient pairs gathered as qwords, then even and odd words.
-    poly::ProductTree<poly::LaneLayout, Slots>::Node load_linear(const u32* at, u32* c) const {
+    poly::LaneLayout::Node load_linear(const u32* at, u32* c) const {
         const pd::Vec index = _mm256_add_epi32(pd::load_unaligned(at), pd::broadcast(1));
         const auto* base = reinterpret_cast<const long long*>(tokens);
         const __m256 lo = _mm256_castsi256_ps(_mm256_i32gather_epi64(base, _mm256_castsi256_si128(index), 4));
@@ -6591,7 +6607,7 @@ struct Items {
     std::size_t count() const { return items.size(); }
     u32 degree(std::size_t k) const { return items[k].degree; }
 
-    poly::ProductTree<poly::StandardLayout, Items>::Node load(std::size_t k, u32* c) const {
+    poly::StandardLayout::Node load(std::size_t k, u32* c) const {
         const Item& item = items[k];
         std::copy_n(item.c, item.degree + 1, c);
         return {item.degree, item.c[item.degree]};

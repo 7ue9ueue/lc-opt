@@ -1,6 +1,6 @@
 // Tests for lib/poly against O(n^2) references: transforms leaf by leaf against their definition,
 // products against schoolbook multiplication, the inverse, exp, log, power and sqrt against their recurrences,
-// composition against Horner's rule and identities,
+// composition against Horner's rule and identities, product trees against naive products,
 // coefficient-wise operations against scalar code. Long results are checked at random
 // coefficients (each an O(n) sum).
 #include <algorithm>
@@ -19,6 +19,7 @@
 #include "lib/poly/inverse.hpp"
 #include "lib/poly/log.hpp"
 #include "lib/poly/pow.hpp"
+#include "lib/poly/product_tree.hpp"
 #include "lib/poly/projection.hpp"
 #include "lib/poly/sparse.hpp"
 #include "lib/poly/sqrt.hpp"
@@ -1261,6 +1262,311 @@ void test_divider() {
 
 }  // namespace
 
+// Product trees (product_tree.hpp). Montgomery form: x 2^32 mod P.
+u32 to_m(u32 x) { return u32((u64(x) << 32) % P); }
+u32 from_m(u32 x) { return mul(x, power(to_m(1), P - 2)); }
+
+std::vector<u32> naive_product(const std::vector<std::vector<u32>>& polys) {
+    std::vector<u32> f{1};
+    for (const auto& g : polys) {
+        std::vector<u32> h(f.size() + g.size() - 1, 0);
+        for (std::size_t i = 0; i < f.size(); ++i)
+            for (std::size_t j = 0; j < g.size(); ++j) h[i + j] = add(h[i + j], mul(f[i], g[j]));
+        f = h;
+    }
+    return f;
+}
+
+u32 evaluate(std::span<const u32> f, u32 x) {
+    u32 v = 0;
+    for (std::size_t i = f.size(); i-- > 0;) v = add(mul(v, x), f[i]);
+    return v;
+}
+
+// A random polynomial of degree d with a nonzero leading coefficient; kind as random_poly.
+std::vector<u32> random_degree(std::size_t d, int kind) {
+    auto a = random_poly(d + 1, kind);
+    if (a[d] == 0) a[d] = 1 + u32(rng() % (P - 1));
+    return a;
+}
+
+// TreeTransform against Transform's definition, 8 words (one leaf) up to 2^15.
+void test_tree_transform(Fixture& fx) {
+    static poly::Arena arena(poly::TreeTransform::words(16) + 8 * poly::Arena::footprint(1 << 16));
+    static const poly::TreeTransform t(arena, 16);
+    static std::span<u32> buf[4] = {arena.take(1 << 16), arena.take(1 << 16), arena.take(1 << 16), arena.take(1 << 16)};
+    for (int lg = 3; lg <= 15; ++lg) {
+        const std::size_t n = std::size_t(1) << lg;
+        for (int kind = 0; kind < 3; ++kind) {
+            const auto a = random_poly(n, kind), b = random_poly(n, (kind + 1) % 3);
+            const std::size_t shift = kind == 0 ? 0 : pick(n), size = kind == 0 ? n : pick(n - shift + 1);
+            std::vector<u32> shifted(2 * n, 0);
+            for (std::size_t i = 0; i < size; ++i) shifted[shift + i] = a[i];
+            const std::vector<u32> low(shifted.begin(), shifted.begin() + std::ptrdiff_t(n));
+            std::copy(a.begin(), a.begin() + std::ptrdiff_t(size), buf[1].begin());
+            auto out = buf[0].first(n);
+            t.forward(buf[1].first(size), shift, out);
+            for (std::size_t p : leaves_to_check(n)) {
+                const auto want = leaf(low, p, fx.roots.data());
+                expect(std::equal(want.begin(), want.end(), out.begin() + 8 * p), "TreeTransform forward leaf", lg, p);
+            }
+            if (lg < 15) {
+                auto upper = buf[2].first(n);
+                t.forward_upper(buf[1].first(size), shift, upper);
+                for (std::size_t p : leaves_to_check(n)) {
+                    const auto want = leaf(shifted, n / 8 + p, fx.roots.data());
+                    expect(std::equal(want.begin(), want.end(), upper.begin() + 8 * p), "TreeTransform forward_upper leaf", lg, p);
+                }
+            }
+            const u32 c = kind == 2 ? P - 1 : kind == 1 ? u32(rng() % P) : 1;
+            t.inverse(out, buf[3].first(n), c);
+            bool ok = true;
+            for (std::size_t i = 0; i < n; ++i) ok &= buf[3][i] == mul(c, low[i]);
+            expect(ok, "TreeTransform inverse, times c", lg, kind);
+            t.inverse(out, out);
+            expect(equal(out, low), "TreeTransform inverse in place", lg, kind);
+
+            // Products of transforms carry 2^-32: Montgomery-form inputs give Montgomery-form products.
+            std::vector<u32> am(n), bm(n);
+            for (std::size_t i = 0; i < n; ++i) am[i] = to_m(a[i]), bm[i] = to_m(b[i]);
+            auto ta = fx.load(0, am), tb = fx.load(1, bm);
+            t.forward(ta, 0, ta);
+            t.forward(tb, 0, tb);
+            t.leaf_products(ta.data(), tb.data(), ta);
+            t.inverse(ta, ta);
+            for (std::size_t i : {std::size_t(0), n - 1, pick(n), pick(n)})
+                expect(from_m(ta[i]) == cyclic_coefficient(a, b, i), "TreeTransform leaf_products", lg, i);
+            auto pa = fx.load(2, am), pb = fx.load(3, bm);
+            poly::TreeTransform::pointwise_products(pa.data(), pb.data(), pa);
+            for (std::size_t i : {std::size_t(0), n - 1, pick(n)}) expect(pa[i] == to_m(mul(a[i], b[i])), "pointwise_products", lg, i);
+        }
+    }
+}
+
+// multiply_lanes against schoolbook, every m + k <= 32, coefficients random, 0 or P - 1.
+void test_multiply_lanes() {
+    alignas(32) static u32 a[8 * 33], b[8 * 33], c[8 * 65];
+    const u32 inverse_r = power(to_m(1), P - 2);
+    for (int kind = 0; kind < 3; ++kind) {
+        for (std::size_t m = 0; m <= 32; ++m) {
+            for (std::size_t k = 0; m + k <= 32; ++k) {
+                // kind 2: near P - 1, so the sums come close to their bound with varied low words
+                const auto value = [kind] { return kind == 2 ? P - 1 - u32(rng() % 1024) : kind == 1 && rng() % 2 ? 0 : u32(rng() % P); };
+                for (std::size_t i = 0; i < 8 * (m + 1); ++i) a[i] = value();
+                for (std::size_t i = 0; i < 8 * (k + 1); ++i) b[i] = kind == 1 ? u32(rng() % P) : value();
+                poly::detail::multiply_lanes_any(a, m, b, k, c);
+                bool ok = true;
+                for (std::size_t l = 0; l < 8; ++l)
+                    for (std::size_t t = 0; t <= m + k; ++t) {
+                        u32 s = 0;
+                        for (std::size_t i = t > k ? t - k : 0; i <= std::min(t, m); ++i) s = add(s, mul(a[8 * i + l], b[8 * (t - i) + l]));
+                        ok &= c[8 * t + l] == mul(s, inverse_r);
+                    }
+                expect(ok, "multiply_lanes", m, k);
+            }
+        }
+    }
+}
+
+// Lanes: slot k, lane l holds polys[8k + l] (constant 1 past the end), lanes in any order of degree.
+struct TestSlots {
+    const std::vector<std::vector<u32>>* polys;
+
+    std::size_t count() const { return (polys->size() + 7) / 8; }
+    std::size_t lane_degree(std::size_t k, std::size_t l) const { return 8 * k + l < polys->size() ? (*polys)[8 * k + l].size() - 1 : 0; }
+    u32 degree(std::size_t k) const {
+        std::size_t d = 0;
+        for (std::size_t l = 0; l < 8; ++l) d = std::max(d, lane_degree(k, l));
+        return u32(d);
+    }
+    poly::LaneLayout::Node load(std::size_t k, u32* c) const {
+        alignas(32) u32 degrees[8], leads[8];
+        std::fill_n(c, 8 * (degree(k) + 1), 0);
+        for (std::size_t l = 0; l < 8; ++l) {
+            const std::vector<u32> one{1};
+            const auto& f = 8 * k + l < polys->size() ? (*polys)[8 * k + l] : one;
+            for (std::size_t j = 0; j < f.size(); ++j) c[8 * j + l] = to_m(f[j]);
+            degrees[l] = u32(f.size() - 1), leads[l] = to_m(f.back());
+        }
+        return {poly::detail::load(degrees), poly::detail::load(leads)};
+    }
+};
+
+struct TestItems {
+    const std::vector<std::vector<u32>>* polys;  // Montgomery form
+
+    std::size_t count() const { return polys->size(); }
+    u32 degree(std::size_t k) const { return u32((*polys)[k].size() - 1); }
+    poly::StandardLayout::Node load(std::size_t k, u32* c) const {
+        const auto& f = (*polys)[k];
+        std::copy(f.begin(), f.end(), c);
+        return {u32(f.size() - 1), f.back()};
+    }
+};
+
+// Each lane's product against the naive one (or at random points when long).
+void check_lane_tree(const std::vector<std::vector<u32>>& polys) {
+    static poly::Arena arena(poly::TreeTransform::words(18) + poly::Arena::footprint(std::size_t(1) << 22));
+    static const poly::TreeTransform t(arena, 18);
+    static const std::span<u32> scratch = arena.take(std::size_t(1) << 22);
+    const TestSlots slots{&polys};
+    std::size_t total = 0;
+    for (std::size_t k = 0; k < slots.count(); ++k) total += slots.degree(k);
+    if (8 * poly::LaneLayout::length(u32(total)) > (std::size_t(1) << 18) ||
+        poly::ProductTree<poly::LaneLayout, TestSlots>::scratch_words(slots.count(), total) > scratch.size())
+        std::abort();
+    poly::ProductTree<poly::LaneLayout, TestSlots> tree(t, slots, scratch);
+    const auto root = tree.root();
+    alignas(32) u32 degrees[8];
+    poly::detail::store(degrees, root.node.degree);
+    for (std::size_t l = 0; l < 8; ++l) {
+        std::vector<std::vector<u32>> lane;
+        for (std::size_t i = l; i < polys.size(); i += 8) lane.push_back(polys[i]);
+        std::size_t degree = 0;
+        for (const auto& f : lane) degree += f.size() - 1;
+        expect(degrees[l] == degree, "lane tree degree", l, degrees[l]);
+        std::vector<u32> got(root.length + 1);
+        for (std::size_t j = 0; j <= root.length; ++j) got[j] = from_m(root.coefficients[8 * j + l]);
+        bool ok = true;
+        for (std::size_t j = degree + 1; j <= root.length; ++j) ok &= got[j] == 0;
+        if (degree <= 3000) {
+            const auto want = naive_product(lane);
+            ok &= std::equal(want.begin(), want.end(), got.begin());
+        } else {
+            for (int trial = 0; trial < 3; ++trial) {
+                const u32 x = u32(rng() % P);
+                u32 want = 1;
+                for (const auto& f : lane) want = mul(want, evaluate(f, x));
+                ok &= evaluate(got, x) == want;
+            }
+        }
+        expect(ok, "lane tree product", polys.size(), l);
+    }
+}
+
+// The product against the naive one; every node's kept transform against the forward of its product.
+void check_standard_tree(const std::vector<std::vector<u32>>& polys, Fixture& fx) {
+    static poly::Arena arena(poly::TreeTransform::words(18) + poly::Arena::footprint(std::size_t(1) << 22));
+    static const poly::TreeTransform t(arena, 18);
+    static const std::span<u32> scratch = arena.take(std::size_t(1) << 22);
+    std::vector<std::vector<u32>> montgomery = polys;
+    for (auto& f : montgomery)
+        for (auto& x : f) x = to_m(x);
+    const TestItems items{&montgomery};
+    struct Keep {
+        const std::vector<std::vector<u32>>* polys;
+        const u32* roots;
+        int* checked;
+        void operator()(std::size_t lo, std::size_t hi, std::span<const u32> transform) const {
+            const std::size_t n = transform.size();
+            std::size_t degree = 0;
+            for (std::size_t k = lo; k < hi; ++k) degree += (*polys)[k].size() - 1;
+            if (n > 4096 || degree > 2000) return;
+            std::vector<u32> node = naive_product({polys->begin() + std::ptrdiff_t(lo), polys->begin() + std::ptrdiff_t(hi)});
+            for (std::size_t i = n; i < node.size(); ++i) node[i % n] = add(node[i % n], node[i]);  // mod x^n - 1
+            node.resize(n);
+            bool ok = true;
+            for (std::size_t p = 0; p < n / 8; ++p) {
+                const auto want = leaf(node, p, roots);
+                for (std::size_t i = 0; i < 8; ++i) ok &= from_m(transform[8 * p + i]) == want[i];
+            }
+            expect(ok, "kept transform", lo, hi);
+            ++*checked;
+        }
+    };
+    int checked = 0;
+    poly::ProductTree<poly::StandardLayout, TestItems, Keep> tree(t, items, scratch, Keep{&polys, fx.roots.data(), &checked});
+    const auto root = tree.root();
+    std::size_t degree = 0;
+    for (const auto& f : polys) degree += f.size() - 1;
+    expect(root.node.degree == degree, "standard tree degree", degree, root.node.degree);
+    std::vector<u32> got(root.length + 1);
+    for (std::size_t j = 0; j <= root.length; ++j) got[j] = from_m(root.coefficients[j]);
+    bool ok = true;
+    for (std::size_t j = degree + 1; j <= root.length; ++j) ok &= got[j] == 0;
+    if (degree <= 3000) {
+        const auto want = naive_product(polys);
+        ok &= std::equal(want.begin(), want.end(), got.begin());
+    } else {
+        for (int trial = 0; trial < 3; ++trial) {
+            const u32 x = u32(rng() % P);
+            u32 want = 1;
+            for (const auto& f : polys) want = mul(want, evaluate(f, x));
+            ok &= evaluate(got, x) == want;
+        }
+    }
+    expect(ok, "standard tree product", polys.size(), degree);
+    expect(polys.size() == 1 || checked > 0, "kept transforms seen", polys.size());
+}
+
+// Degrees for a tree test: linear factors (often 2^k of them: wraps at every level), equal
+// degrees, random small degrees, one large and many small, sizes near the base.
+std::vector<std::size_t> tree_degrees(int shape, std::size_t total) {
+    std::vector<std::size_t> d;
+    switch (shape) {
+        case 0: d.assign(total, 1); break;
+        case 1: d.assign(std::max<std::size_t>(1, total / 7), 7); break;
+        case 2:
+            while (total) d.push_back(std::min<std::size_t>(total, 1 + rng() % 5)), total -= d.back();
+            break;
+        case 3:
+            d.push_back(total * 3 / 4);
+            for (std::size_t rest = total - total * 3 / 4; rest; --rest) d.push_back(1);
+            break;
+        default:
+            while (total) d.push_back(std::min<std::size_t>(total, 1 + rng() % 70)), total -= d.back();
+    }
+    std::erase(d, 0);
+    if (d.empty()) d.push_back(1);
+    std::shuffle(d.begin(), d.end(), rng);
+    if (shape == 4) std::sort(d.rbegin(), d.rend());
+    return d;
+}
+
+void test_product_tree(Fixture& fx) {
+    test_tree_transform(fx);
+    test_multiply_lanes();
+    const std::size_t sizes[] = {1, 2, 3, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 100, 127, 128, 129, 255, 256, 257, 1000, 1024, 3000};
+    for (std::size_t total : sizes) {
+        for (int shape = 0; shape < 5; ++shape) {
+            const auto degrees = tree_degrees(shape, total);
+            std::vector<std::vector<u32>> polys;
+            for (std::size_t d : degrees) polys.push_back(random_degree(d, int(rng() % 3)));
+            check_standard_tree(polys, fx);
+            std::vector<std::vector<u32>> lanes;  // 8 lanes, each about this total
+            for (int l = 0; l < 8; ++l)
+                for (std::size_t d : tree_degrees(shape, total)) lanes.push_back(random_degree(d, int(rng() % 3)));
+            std::stable_sort(lanes.begin(), lanes.end(), [](const auto& x, const auto& y) { return x.size() > y.size(); });
+            check_lane_tree(lanes);
+            std::shuffle(lanes.begin(), lanes.end(), rng);  // slots with mixed lane degrees
+            check_lane_tree(lanes);
+        }
+    }
+    for (std::size_t total : {std::size_t(1) << 12, (std::size_t(1) << 14) + 1, std::size_t(30000)}) {
+        for (int shape : {0, 2, 3}) {
+            std::vector<std::vector<u32>> polys;
+            for (std::size_t d : tree_degrees(shape, total)) polys.push_back(random_degree(d, 0));
+            check_standard_tree(polys, fx);
+            std::vector<std::vector<u32>> lanes;
+            for (int l = 0; l < 8; ++l)
+                for (std::size_t d : tree_degrees(shape, total)) lanes.push_back(random_degree(d, 0));
+            std::stable_sort(lanes.begin(), lanes.end(), [](const auto& x, const auto& y) { return x.size() > y.size(); });
+            check_lane_tree(lanes);
+        }
+    }
+    // lane_columns
+    alignas(32) static u32 c[8 * 100];
+    for (std::size_t i = 0; i < 8 * 100; ++i) c[i] = u32(i);
+    static u32 out[8][104];
+    u32 size[8] = {100, 0, 1, 7, 8, 9, 64, 99};
+    u32* const columns[8] = {out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7]};
+    poly::lane_columns(c, 100, size, columns);
+    bool ok = true;
+    for (std::size_t l = 0; l < 8; ++l)
+        for (std::size_t j = 0; j < size[l]; ++j) ok &= out[l][j] == 8 * j + l;
+    expect(ok, "lane_columns");
+}
+
 int main() {
     static Fixture fx;
     test_leaf_kernels(fx);
@@ -1279,6 +1585,7 @@ int main() {
     test_compose();
     test_projection();
     test_compositional_inverse();
+    test_product_tree(fx);
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

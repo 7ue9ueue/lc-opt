@@ -4,7 +4,8 @@ f of N <= 2^19 coefficients mod 998244353; print the N + 1 coefficients of g wit
 g(n) = sum_(i < n) f(i). 5 s. Slowest tests: max_random_00/01 (N = 2^19), then random_00/01
 (N > 2^18, the same transform lengths). small (N <= 100), medium (N ~ 10^4), examples.
 
-Best judged: none yet.
+Best judged: ours, 13 ms: [409571](https://judge.yosupo.jp/submission/409571) (`main.cpp` of #282),
+clean (`tools/spikes.py`).
 Record when opened (issue #89): 143 ms.
 
 ## Design
@@ -60,6 +61,9 @@ case (21 rounds).
     N <= 1500 against `brute.cpp` (values by Horner, Newton's forward differences, expanded),
     larger N up to 2^19 by g(x + 1) - g(x) = f(x) and g(0) = 0 at random x; coefficients random,
     in {0, 1, P - 1}, or zero; ASan/UBSan on all 26 official cases, file and pipe input.
+  - Merged as #282 (new problem: CI checks only).
+  - Submitted the merged `main.cpp` once (1 of 5): [409571](https://judge.yosupo.jp/submission/409571)
+    AC 13 ms, 15.0 MiB; `spikes.py`: clean 13 ms, P(clean run) = 0.77. Not resubmitted.
 - Next:
   - The two products (3.7 ms) and E (4.2 ms) are 86% of the time above the floor. E is input-
     independent; a faster reciprocal (Harvey's 13/9 M(n)) or a cheaper blockwise division would

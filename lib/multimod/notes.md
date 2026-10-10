@@ -34,8 +34,9 @@ joined by the CRT. API and usage: the headers of `transform.hpp` (`Transform`, a
 `Product<K>` is lib/ntt's `ntt::Product` (`lib/ntt/notes.md`, "Product") on lib/multimod's tables
 and recursion, for factors of at most half the transform, 9 <= lg <= 20. `Subtrees<K>` runs two
 bottom groups per kernel; the top levels are fused as in ntt::Product. The kernel set K supplies the
-kernels, the first levels (in its order of a and b, which sets the in-place rules) and the last
-level for odd lg:
+kernels, each factor's first level, the last level for odd lg, and `kBFirst`: whether b's first
+level runs before a's, which sets the in-place rules (Lazy: out may hold a with b in its upper
+half; Wide: work may be a's storage):
 
 | Set | Primes | Factors | Kernels |
 |---|---|---|---|
@@ -104,26 +105,28 @@ apart from the kernels, the first levels and the last level for odd lg. Their ge
 here unchanged but for paths and namespaces (same asm text). Exploration files:
 `lc-opt-explore/lib-extract/r3`.
 - Compiled code (judge flags, GCC 15.2 image, `lc-amd`), against main, function by function with
-  addresses, symbol names and trailing alignment padding normalized: every function of the three
-  programs is instruction-identical except `Product::multiply` (setup and the calls around the
-  subtrees: other registers and stack slots, 697 -> 699 instructions for Lazy, 631 -> 627 for
-  Wide; stack frame 0x240 -> 0x220 bytes) and, in cyclic, `solve()` (two compares with swapped
-  operands). Turning `lazy::Product` alone into a template gives a byte-identical `.text`; the
-  rest comes from passing the tables to K's first levels as a value (no reload after the kernels'
-  memory clobbers). Passing them by reference instead: same instructions, other registers and
-  stack slots; not kept, as it would make the interface depend on aliasing.
+  addresses, symbol names and trailing alignment padding normalized. Kernels, tiles, bottom stage
+  and `visit` are instruction-identical in all three programs. `Product::multiply`: Lazy 697
+  instructions as before, with registers permuted in one block of calls; Wide 631 -> 630, other
+  registers in the setup. cyclic's `solve()`: two compares with swapped operands.
+- Interfaces tried (same tests): first levels of both factors in one K function, the tables
+  passed as a value: `multiply` 697 -> 699 (Lazy), 631 -> 627 (Wide), other registers and stack
+  slots, as the tables were no longer reloaded after the kernels' memory clobbers; CI 1.0003 and,
+  re-run, 1.0029 (noise around unchanged hot code, but the gate failed twice). Kept: one factor
+  per K function, the order in `Product` (`kBFirst`), the radix-8 constants as an array from K
+  (above). Explicit `if constexpr` branches instead of the `first_levels` helper: Wide 628.
+  Turning `lazy::Product` alone into a template gives a byte-identical `.text`.
 - Kernels named by reference in K (`static constexpr auto&`): direct calls at -O2, same inlining
   as calls by name (checked on a small program and on the three programs above).
-- `judge.py bench` on `lc-bench` (EPYC 7B13), slowest 3 cases, against main's `main.cpp`
-  (median ms, ratio): 21 rounds: 1e9+7 22.30 -> 22.19 (0.9928), 2_64 41.19 -> 41.32 (1.0032),
-  cyclic 10.76 -> 10.71 (0.9972); 61 rounds: 22.30 -> 22.34 (1.0020), 40.83 -> 40.80 (1.0013),
-  10.33 -> 10.32 (1.0004). Noise.
+- `judge.py bench` on `lc-bench` (EPYC 7B13), slowest 3 cases, against main's `main.cpp`, 61
+  rounds (median ms, ratio): 1e9+7 21.95 -> 21.97 (1.0009), 2_64 40.38 -> 40.55 (1.0004), cyclic
+  10.07 -> 10.09 (1.0015). Noise. CI (#333): 0.9998 (1.0049, 0.9918, 1.0028).
 - Checks (`lc-amd`): `test.cpp` (new: the lazy kernels against scalar models, from
   convolution_mod_1000000007's `test_product.cpp`; both products against Transform at lg 9..20,
   every in-place layout, garbage past the factors' halves, inputs at the bounds 4p and 2^64 - 1)
-  at -O2 native and x86-64-v3 and with ASan/UBSan; swapping the order of the first levels fails
-  it for each set (72 and 36 failures). Official tests 48/48, 44/44, 24/24; stress 200 rounds
-  each; ASan/UBSan builds on 6, 7 and 7 official cases, file and pipe input.
+  at -O2 native and x86-64-v3 and with ASan/UBSan; flipping `kBFirst` fails it for each set (108
+  and 36 failures). Official tests 48/48, 44/44, 24/24; stress 200 rounds each; ASan/UBSan
+  builds on 6, 7 and 7 official cases, file and pipe input.
 
 ## Sources
 

@@ -7,16 +7,16 @@
 //   mod m. m >= k, m | P - 1.
 // - Split: a few outer variables by schoolbook over their digits, the rest graded with fewer
 //   grades and shorter transforms (transform.hpp). A cost model picks it or the graded method.
-#include <sys/mman.h>
-
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <vector>
 
 #include "lib/io/io.hpp"
+#include "lib/mem/huge.hpp"
 #include "lib/ntt/ntt.hpp"
 #include "lib/run/early.hpp"
 #include "../convolution_mod/fields.hpp"
@@ -24,7 +24,7 @@
 #include "transform.hpp"
 
 #ifndef BLOCK_BYTES
-#define BLOCK_BYTES (320 << 10)  // the ranked method's working set per top point: half of Zen 3's L2
+#define BLOCK_BYTES (640 << 10)  // the ranked method's working set per top point (320 KiB: +2.5%)
 #endif
 
 namespace {
@@ -92,23 +92,21 @@ Vec montgomery_multiply(Vec x, Vec y) {
     return reduce<false>(even, odd);
 }
 
-// Zero-filled memory, never freed (the process ends with _exit). Blocks of 256 KiB or more are
-// aligned to 2 MiB and in huge pages where the kernel allows; smaller ones take small pages, so a
-// small block does not fault in (and zero) a whole huge page.
+// Zero-filled memory, never freed (the process ends with _exit). Blocks (64 bytes apart, plus 64
+// spare bytes each) follow each other in one region of huge pages, so the process faults in and
+// zeroes little more than it uses. Each 2 MiB page is written once when a block first reaches it:
+// a huge page read before it is written maps the shared zero page, and on Linux 6.8 the first
+// write then splits it into small pages.
+constexpr std::size_t kRegionBytes = std::size_t(1) << 28;  // address space only; pages fault in on use
+std::uintptr_t region_next = 0, region_touched = 0;
+
 template <class T>
 T* allocate(std::size_t count) {
-    constexpr std::size_t kHuge = std::size_t(1) << 21, kPage = std::size_t(1) << 12;
-    const std::size_t bytes = count * sizeof(T) + 64;
-    const bool huge = bytes >= kHuge / 8;
-    const std::size_t mapped = huge ? (bytes + kHuge - 1) / kHuge * kHuge + kHuge : (bytes + kPage - 1) / kPage * kPage;
-    void* p = ::mmap(nullptr, mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) std::abort();
-    if (!huge) return static_cast<T*>(p);
-    void* aligned = reinterpret_cast<void*>((reinterpret_cast<std::uintptr_t>(p) + kHuge - 1) & ~(kHuge - 1));
-#ifdef MADV_HUGEPAGE
-    ::madvise(aligned, mapped - kHuge, MADV_HUGEPAGE);
-#endif
-    return static_cast<T*>(aligned);
+    if (region_next == 0) region_next = region_touched = reinterpret_cast<std::uintptr_t>(mem::map_huge(kRegionBytes));
+    T* block = reinterpret_cast<T*>(region_next);
+    region_next += (count * sizeof(T) + 64 + 63) & ~std::size_t(63);
+    for (; region_touched < region_next; region_touched += mem::kHugePage) *reinterpret_cast<char*>(region_touched) = 0;
+    return block;
 }
 
 std::size_t round8(std::size_t n) { return (n + 7) & ~std::size_t(7); }
@@ -538,19 +536,26 @@ void variable_step(Vec* p, std::size_t sa, std::size_t sb, int first, int last) 
     }
 }
 
-// dst +-= src over `count` vectors.
-void add_row(Vec* dst, const Vec* src, std::size_t count, bool negative) {
-    if (negative)
+// dst +-= src over `count` vectors, or dst = +-src if first.
+void add_row(Vec* dst, const Vec* src, std::size_t count, bool negative, bool first) {
+    const Vec zero = _mm256_setzero_si256();
+    if (first && negative)
+        for (std::size_t i = 0; i < count; ++i) dst[i] = sub_mod(zero, load(src + i));
+    else if (first)
+        for (std::size_t i = 0; i < count; ++i) dst[i] = load(src + i);
+    else if (negative)
         for (std::size_t i = 0; i < count; ++i) dst[i] = sub_mod(dst[i], load(src + i));
     else
         for (std::size_t i = 0; i < count; ++i) dst[i] = add_mod(dst[i], load(src + i));
 }
 
-// One row of a top evaluation or interpolation: row index, sign, total degree of the row's digits.
+// One row of a top evaluation or interpolation: row index, sign, total degree of the row's digits;
+// first: the evaluation's first row of its rank.
 struct Term {
     u32 row;
     bool negative;
     std::uint8_t rank;
+    bool first = false;
 };
 
 class Ranked {
@@ -580,35 +585,36 @@ public:
         for (std::size_t l = bottom_; l < k; ++l) top_rank += int(size_of_[l]) - 1;
         planes_ = top_rank + 1;
 
-        // Position in our order -> input index, unless the orders agree.
+        // Unless the orders agree, they differ only within blocks of the variables up to the last
+        // lane: lane w of vector u of a block is its input position block_base_[u] + lane_offset_[w].
         if (!std::ranges::is_sorted(order)) {
-            std::vector<u32> stride(k);
-            for (std::size_t l = 0, s = 1; l < k; s *= n[l], ++l) stride[l] = u32(s);
-            origin_.resize(size_);
-            std::vector<u32> digit(k, 0);
-            u32 origin = 0;
-            for (std::size_t i = 0; i < size_; ++i) {
-                origin_[i] = origin;
-                for (std::size_t j = 0; j < k; ++j) {
-                    const u32 v = order[j];
-                    if (++digit[j] < n[v]) {
-                        origin += stride[v];
-                        break;
-                    }
-                    digit[j] = 0, origin -= (n[v] - 1) * stride[v];
-                }
+            std::vector<u32> stride(k + 1);
+            for (std::size_t l = 0, s = 1; l <= k; s *= l < k ? n[l] : 1, ++l) stride[l] = u32(s);
+            for (int w = 0; w < 8; ++w)
+                lane_offset_[w] = (w & 1 ? stride[order[0]] : 0) + (w & 2 ? stride[order[1]] : 0) + (w & 4 ? stride[order[2]] : 0);
+            std::vector<u32> base{0};
+            for (u32 l = 0; l < order[2]; ++l) {
+                if (l == order[0] || l == order[1]) continue;
+                const std::size_t count = base.size();
+                for (u32 d = 1; d < n[l]; ++d)
+                    for (std::size_t i = 0; i < count; ++i) base.push_back(base[i] + d * stride[l]);
             }
+            block_base_ = std::move(base);
         }
         describe_vectors();
         describe_ranges();
         describe_top();
     }
 
-    void multiply(const u32* f, const u32* g, u32* c) {
-        const u32* fo = to_our_order(f);
-        const u32* go = to_our_order(g);
-        u32* co = origin_.empty() ? c : allocate<u32>(size_);
+    // c = f g; f and g are permuted in place.
+    void multiply(u32* f, u32* g, u32* c) {
+        u32* scratch = reordered() ? allocate<u32>(8 * block_base_.size()) : nullptr;
+        to_our_order(f, scratch);
+        to_our_order(g, scratch);
+        const u32 *fo = f, *go = g;
+        u32* co = c;
         const std::size_t vectors = bottom_size_ / 8, plane = std::size_t(planes_) * vectors;
+        const std::size_t rows = vectors / group_;
         Vec* top_f = allocate<Vec>(plane);
         Vec* top_g = allocate<Vec>(plane);
         Vec* a = allocate<Vec>(std::size_t(rank_ + 1) * vectors);
@@ -620,32 +626,71 @@ public:
                 const Vec factor = all(montgomery(power_mod(2, z)));
                 for (std::size_t i = 0; i < plane; ++i) top_f[i] = montgomery_multiply(top_f[i], factor);
             }
-            spread(top_f, a);
-            spread(top_g, b);
-            bottom_transform<false>(a, top_cap_[t]);
-            bottom_transform<false>(b, top_cap_[t]);
-            pointwise(a, b, top_cap_[t], top_nz_[t]);
-            bottom_transform<true>(a, top_cap_[t]);
-            gather(a, top_f);
+            const int forward_extra = top_cap_[t] + 3, inverse_extra = planes_ + 2;
+            // Each group of vectors [s, s + group_) and each column {s + group_ j} stays in L1
+            // through all its steps.
+            for (std::size_t s = 0; s < vectors; s += group_) {
+                spread(top_f, a, s);
+                steps<false>(a, forward_, 0, forward_.split, s, 1, group_, forward_extra);
+                spread(top_g, b, s);
+                steps<false>(b, forward_, 0, forward_.split, s, 1, group_, forward_extra);
+            }
+            for (std::size_t s = 0; s < group_; ++s) {
+                steps<false>(a, forward_, forward_.split, forward_.steps.size(), s, group_, rows, forward_extra);
+                steps<false>(b, forward_, forward_.split, forward_.steps.size(), s, group_, rows, forward_extra);
+                pointwise(a, b, s, group_, rows, top_cap_[t], top_nz_[t]);
+                steps<true>(a, inverse_, 0, inverse_.split, s, group_, rows, inverse_extra);
+            }
+            for (std::size_t s = 0; s < vectors; s += group_) {
+                steps<true>(a, inverse_, inverse_.split, inverse_.steps.size(), s, 1, group_, inverse_extra);
+                gather(a, top_f, s);
+            }
             interpolate_top(top_f, t, co);
         }
         // Scale: the products carry 2^-32, interpolation along each variable of size 3 a factor 2.
         const Vec scale = all(montgomery(multiply_mod(power_mod(2, 32), power_mod(inverse_mod(2), threes_))));
-        for (std::size_t i = 0; i < size_; i += 8) store(co + i, montgomery_multiply(load(co + i), scale));
-        if (!origin_.empty())
-            for (std::size_t i = 0; i < size_; ++i) c[origin_[i]] = co[i];
+        if (!reordered()) {
+            for (std::size_t i = 0; i < size_; i += 8) store(c + i, montgomery_multiply(load(c + i), scale));
+            return;
+        }
+        const std::size_t block = 8 * block_base_.size();
+        for (std::size_t s = 0; s < size_; s += block) {
+            std::memcpy(scratch, c + s, block * sizeof(u32));
+            for (std::size_t u = 0; u < block_base_.size(); ++u) {
+                alignas(32) u32 x[8];
+                store(x, montgomery_multiply(load(scratch + 8 * u), scale));
+                for (int w = 0; w < 8; ++w) c[s + block_base_[u] + lane_offset_[w]] = x[w];
+            }
+        }
     }
 
 private:
     struct Range {
         std::uint8_t first, span;
     };
+    struct Step {
+        u32 first, width;    // variables first, ..., first + width - 1
+        std::size_t stride;  // vector stride of variable first
+    };
+    struct Pass {
+        std::vector<Step> steps;    // forward: low then high variables; inverse: high then low
+        std::size_t split = 0;      // steps before the switch between low and high variables
+        std::vector<Range> ranges;  // [step * Nb / 8 + u]
+    };
 
-    const u32* to_our_order(const u32* x) const {
-        if (origin_.empty()) return x;
-        u32* y = allocate<u32>(size_);
-        for (std::size_t i = 0; i < size_; ++i) y[i] = x[origin_[i]];
-        return y;
+    bool reordered() const { return !block_base_.empty(); }
+
+    // Input order -> our order in place; scratch holds a block.
+    void to_our_order(u32* x, u32* scratch) const {
+        if (!reordered()) return;
+        const std::size_t block = 8 * block_base_.size();
+        const Vec offset = load(lane_offset_.data());
+        for (std::size_t s = 0; s < size_; s += block) {
+            std::memcpy(scratch, x + s, block * sizeof(u32));
+            for (std::size_t u = 0; u < block_base_.size(); ++u)
+                store(x + s + 8 * u,
+                      _mm256_i32gather_epi32(reinterpret_cast<const int*>(scratch + block_base_[u]), offset, 4));
+        }
     }
 
     // Digit sum (coefficient side), cap and nz (point side) of each vector of the block.
@@ -656,7 +701,6 @@ private:
         int sum = 0, cap = 0, nz = 0;
         for (std::size_t u = 0; u < count; ++u) {
             vector_sum_[u] = std::uint8_t(sum), vector_cap_[u] = std::uint8_t(cap), vector_nz_[u] = std::uint8_t(nz);
-            pointwise_order_.push_back(u32(u));
             for (std::size_t l = 3; l < bottom_; ++l) {
                 const int n = int(size_of_[l]);
                 if (++digit[l] < u32(n)) {
@@ -667,41 +711,61 @@ private:
                 digit[l] = 0, sum -= n - 1, cap -= n - 1, --nz;
             }
         }
-        std::ranges::stable_sort(pointwise_order_, {}, [this](u32 u) { return vector_cap_[u] * 64 + vector_nz_[u]; });
     }
 
-    // Steps of the block transforms: variables l, l + 1 together (the inverse only if both have
-    // size 2: a pair's rank range is the union of its positions' ranges, wider for larger sizes).
-    // Rank ranges of the step along variables l..e at group base u (digits l..e zero).
+    // Steps of the block transforms. The low block variables (group_ vectors, the smallest prefix
+    // with group_^2 >= Nb / 8) are transformed one group of consecutive vectors at a time, the high
+    // ones one column at a time. A step takes variables l, l + 1 together within the low or the high
+    // part (the inverse only if both have size 2: a pair's rank range is the union of its
+    // positions' ranges, wider for larger sizes). Forward steps run low to high, inverse steps high
+    // to low. Rank ranges of the step along variables l..e at group base u (digits l..e zero):
     // Forward: positions are points in variables below l, digits from l on; the group's nonzero
     // ranks are [first, first + span + top cap + 3] with first the digit sum above e and span the
     // sum of n - 1 over l..e and over nonzero point coordinates below l (the lanes add up to 3).
-    // Inverse: positions are digits below l, points from l on; the group's ranks read later are
-    // [first, first + span + planes + 2] with first the digit sum below l and span the sum of
-    // n - 1 from l on (output ranks of position d: sum(d) plus top rank plus lanes, < planes + 3).
+    // Inverse: positions are digits above e, points up to e; the group's ranks read later are
+    // [first, first + span + planes + 2] with first the digit sum above e and span the sum of
+    // n - 1 up to e (output ranks of position d: sum(d) plus top rank plus lanes, < planes + 3).
     void describe_ranges() {
-        for (const bool inverse : {false, true}) {
-            Pass& pass = inverse ? inverse_ : forward_;
-            for (std::size_t l = 3; l < bottom_;) {
-                const bool pair = l + 1 < bottom_ && (!inverse || (size_of_[l] == 2 && size_of_[l + 1] == 2));
-                pass.steps.push_back({u32(l), pair ? 2u : 1u});
+        const std::size_t count = bottom_size_ / 8;
+        std::size_t boundary = 3;
+        for (group_ = 1; group_ * group_ < count; group_ *= size_of_[boundary++]) {
+        }
+        const auto pairs = [this](std::size_t from, std::size_t to, bool inverse) {
+            std::vector<Step> steps;
+            for (std::size_t l = from; l < to;) {
+                const bool pair = l + 1 < to && (!inverse || (size_of_[l] == 2 && size_of_[l + 1] == 2));
+                steps.push_back({u32(l), pair ? 2u : 1u, 0});
                 l += pair ? 2 : 1;
             }
-            const std::size_t count = bottom_size_ / 8;
+            if (inverse) std::ranges::reverse(steps);
+            return steps;
+        };
+        forward_.steps = pairs(3, boundary, false);
+        forward_.split = forward_.steps.size();
+        std::ranges::copy(pairs(boundary, bottom_, false), std::back_inserter(forward_.steps));
+        inverse_.steps = pairs(boundary, bottom_, true);
+        inverse_.split = inverse_.steps.size();
+        std::ranges::copy(pairs(3, boundary, true), std::back_inserter(inverse_.steps));
+        for (const bool inverse : {false, true}) {
+            Pass& pass = inverse ? inverse_ : forward_;
+            for (Step& step : pass.steps) {
+                step.stride = 1;
+                for (std::size_t m = 3; m < step.first; ++m) step.stride *= size_of_[m];
+            }
             pass.ranges.resize(pass.steps.size() * count);
             std::vector<u32> digit(bottom_, 0);
             for (std::size_t u = 0; u < count; ++u) {
                 for (std::size_t k = 0; k < pass.steps.size(); ++k) {
                     const std::size_t l = pass.steps[k].first, e = l + pass.steps[k].width - 1;
-                    int above = 0, below = 0, cap = 0, rest = 0, own = 0;
+                    int above = 0, cap = 0, own = 0, up_to = 0;
                     for (std::size_t m = 3; m < bottom_; ++m) {
                         const int d = int(digit[m]), n = int(size_of_[m]);
                         if (m > e) above += d;
-                        if (m < l) below += d, cap += d ? n - 1 : 0;
-                        if (m >= l) rest += n - 1;
+                        if (m < l) cap += d ? n - 1 : 0;
                         if (m >= l && m <= e) own += n - 1;
+                        if (m <= e) up_to += n - 1;
                     }
-                    pass.ranges[k * count + u] = inverse ? Range{std::uint8_t(below), std::uint8_t(rest)}
+                    pass.ranges[k * count + u] = inverse ? Range{std::uint8_t(above), std::uint8_t(up_to)}
                                                          : Range{std::uint8_t(above), std::uint8_t(own + cap)};
                 }
                 for (std::size_t l = 3; l < bottom_ && ++digit[l] == size_of_[l]; ++l) digit[l] = 0;
@@ -750,6 +814,8 @@ private:
                 extend(evaluate, kEvaluate[three][p], kEvaluateCount[three][p]);
                 extend(interpolate, kInterpolate[three][p], kInterpolateCount[three][p]);
             }
+            std::vector<bool> seen(planes_, false);
+            for (Term& term : evaluate) term.first = !seen[term.rank], seen[term.rank] = true;
             terms_.insert(terms_.end(), evaluate.begin(), evaluate.end());
             evaluate_start_.push_back(u32(terms_.size()));
             inverse_terms_.insert(inverse_terms_.end(), interpolate.begin(), interpolate.end());
@@ -760,14 +826,15 @@ private:
         }
     }
 
-    // Planes [top rank][Nb / 8] of x (our order) evaluated at top point t.
+    // Planes [top rank][Nb / 8] of x (our order) evaluated at top point t. Its rows have ranks
+    // 0 to top_cap_[t]; the planes above are zero.
     void evaluate_top(const u32* x, std::size_t t, Vec* planes) const {
-        const std::size_t vectors = bottom_size_ / 8;
-        std::memset(static_cast<void*>(planes), 0, std::size_t(planes_) * vectors * sizeof(Vec));
+        const std::size_t vectors = bottom_size_ / 8, filled = top_cap_[t] + std::size_t(1);
+        std::memset(static_cast<void*>(planes + filled * vectors), 0, (planes_ - filled) * vectors * sizeof(Vec));
         for (u32 i = evaluate_start_[t]; i < evaluate_start_[t + 1]; ++i) {
             const Term& term = terms_[i];
             add_row(planes + term.rank * vectors, reinterpret_cast<const Vec*>(x + term.row * bottom_size_), vectors,
-                    term.negative);
+                    term.negative, term.first);
         }
     }
 
@@ -785,48 +852,50 @@ private:
         }
     }
 
-    // Along the block's variables above the lanes, by steps, on the ranks that can be nonzero
-    // (forward) or are read later (inverse): see describe_ranges().
+    // Steps [begin, end) of a pass on the vectors o + sigma q, q < count (whole groups of each
+    // step), on the ranks that can be nonzero (forward) or are read later (inverse): see
+    // describe_ranges(). extra: top cap + 3 (forward) or planes + 2 (inverse).
     template <bool Inverse>
-    void bottom_transform(Vec* x, int top_cap) const {
-        const int extra = Inverse ? planes_ + 2 : top_cap + 3;
-        const std::size_t count = bottom_size_ / 8;
-        const Pass& pass = Inverse ? inverse_ : forward_;
-        for (std::size_t k = 0, step = 1; k < pass.steps.size(); ++k) {
-            const Range* range = pass.ranges.data() + k * count;
-            const std::size_t l = pass.steps[k].first;
-            const u32 a = size_of_[l], b = pass.steps[k].width == 2 ? size_of_[l + 1] : 1;
+    void steps(Vec* x, const Pass& pass, std::size_t begin, std::size_t end, std::size_t o, std::size_t sigma,
+               std::size_t count, int extra) const {
+        for (std::size_t k = begin; k < end; ++k) {
+            const Step& s = pass.steps[k];
+            const Range* range = pass.ranges.data() + k * (bottom_size_ / 8);
+            const u32 a = size_of_[s.first], b = s.width == 2 ? size_of_[s.first + 1] : 1;
             switch (a * 4 + b) {
-            case 9: block_step<Inverse, 2, 1>(x, step, range, extra); break;
-            case 13: block_step<Inverse, 3, 1>(x, step, range, extra); break;
-            case 10: block_step<Inverse, 2, 2>(x, step, range, extra); break;
-            case 11: block_step<Inverse, 2, 3>(x, step, range, extra); break;
-            case 14: block_step<Inverse, 3, 2>(x, step, range, extra); break;
-            default: block_step<Inverse, 3, 3>(x, step, range, extra); break;
+            case 9: block_step<Inverse, 2, 1>(x, s.stride, range, extra, o, sigma, count); break;
+            case 13: block_step<Inverse, 3, 1>(x, s.stride, range, extra, o, sigma, count); break;
+            case 10: block_step<Inverse, 2, 2>(x, s.stride, range, extra, o, sigma, count); break;
+            case 11: block_step<Inverse, 2, 3>(x, s.stride, range, extra, o, sigma, count); break;
+            case 14: block_step<Inverse, 3, 2>(x, s.stride, range, extra, o, sigma, count); break;
+            default: block_step<Inverse, 3, 3>(x, s.stride, range, extra, o, sigma, count); break;
             }
-            step *= a * b;
         }
     }
 
-    // One step along block variables of sizes A and B (B = 1: one variable); step: the position
-    // stride of the first.
+    // One step along block variables of sizes A and B (B = 1: one variable) on the vectors
+    // o + sigma q, q < count; stride: the vector stride of the first variable, a multiple of sigma.
     template <bool Inverse, int A, int B>
-    void block_step(Vec* x, std::size_t step, const Range* range, int extra) const {
-        const std::size_t ranks = std::size_t(rank_ + 1), count = bottom_size_ / 8;
-        for (std::size_t base = 0; base < count; base += step * A * B)
-            for (std::size_t u = base; u < base + step; ++u)
-                variable_step<Inverse, A, B>(x + u * ranks, step * ranks, step * A * ranks, range[u].first,
+    void block_step(Vec* x, std::size_t stride, const Range* range, int extra, std::size_t o, std::size_t sigma,
+                    std::size_t count) const {
+        const std::size_t ranks = std::size_t(rank_ + 1), inner = stride / sigma;
+        for (std::size_t base = 0; base < count; base += inner * A * B)
+            for (std::size_t q = base; q < base + inner; ++q) {
+                const std::size_t u = o + sigma * q;
+                variable_step<Inverse, A, B>(x + u * ranks, stride * ranks, stride * A * ranks, range[u].first,
                                              std::min(rank_, range[u].first + range[u].span + extra));
+            }
     }
 
-    // Top-rank planes -> ranks [Nb / 8][R + 1] with the lane variables evaluated: rank r of
-    // position 8u + v is top rank r - sum(u) - popcount(v).
-    void spread(const Vec* planes, Vec* out) const {
+    // Top-rank planes -> ranks [Nb / 8][R + 1] with the lane variables evaluated, for vectors
+    // [s, s + group_): rank r of position 8u + v is top rank r - sum(u) - popcount(v).
+    // (Zeroing loops stay loops: as memset calls they cost more than the transform; same in gather.)
+    [[gnu::optimize("no-tree-loop-distribute-patterns")]] void spread(const Vec* planes, Vec* out, std::size_t s) const {
         const std::size_t vectors = bottom_size_ / 8;
         const Vec zero = _mm256_setzero_si256();
         Vec p[kMaxRank + 8];  // p[3 + rho]: plane rho; zero around
         for (int i = 0; i < 3; ++i) p[i] = p[3 + planes_ + i] = zero;
-        for (std::size_t u = 0; u < vectors; ++u) {
+        for (std::size_t u = s; u < s + group_; ++u) {
             for (int rho = 0; rho < planes_; ++rho) p[3 + rho] = planes[rho * vectors + u];
             const int d = vector_sum_[u], last = std::min(rank_, d + planes_ + 2);
             Vec* ranks = out + u * (rank_ + 1);
@@ -841,10 +910,10 @@ private:
     }
 
     // Inverse of spread for the ranks that positions read: top-rank planes from rank planes.
-    void gather(const Vec* in, Vec* planes) const {
+    [[gnu::optimize("no-tree-loop-distribute-patterns")]] void gather(const Vec* in, Vec* planes, std::size_t s) const {
         const std::size_t vectors = bottom_size_ / 8;
         Vec m[kMaxRank + 4];
-        for (std::size_t u = 0; u < vectors; ++u) {
+        for (std::size_t u = s; u < s + group_; ++u) {
             const int d = vector_sum_[u], last = std::min(rank_, d + planes_ + 2);
             for (int r = d; r <= last; ++r) m[r - d] = lanes_transform<true>(in[u * (rank_ + 1) + r]);
             for (int k = last - d + 1; k < planes_ + 3; ++k) m[k] = _mm256_setzero_si256();  // ranks above R
@@ -852,12 +921,14 @@ private:
         }
     }
 
-    // a[r] <- sum_{i + j = r} a[i] b[j] (times 2^-32) for the ranks some position reads.
-    void pointwise(Vec* a, const Vec* b, int top_cap, int top_nz) const {
+    // a[r] <- sum_{i + j = r} a[i] b[j] (times 2^-32) for the ranks some position reads, at the
+    // vectors o + sigma q, q < count.
+    void pointwise(Vec* a, const Vec* b, std::size_t o, std::size_t sigma, std::size_t count, int top_cap,
+                   int top_nz) const {
         const Vec zero = _mm256_setzero_si256();
         Vec ae[kMaxRank], ao[kMaxRank], be[kMaxRank + 2 * kPad], bo[kMaxRank + 2 * kPad];
         for (int i = 0; i < kPad; ++i) be[i] = bo[i] = zero;
-        for (const u32 u : pointwise_order_) {
+        for (std::size_t u = o; u < o + sigma * count; u += sigma) {
             const int cap = std::min(rank_, top_cap + vector_cap_[u] + 3);
             const int first = top_nz + vector_nz_[u], last = std::min(rank_, 2 * cap);
             Vec* x = a + u * (rank_ + 1);
@@ -868,49 +939,63 @@ private:
             }
             for (int i = cap + 1; i <= cap + kPad; ++i) be[kPad + i] = bo[kPad + i] = zero;
             for (int r = first; r <= last; r += kBlock) {
+                const int lo = std::max(0, r - cap), count = std::min(r + kBlock - 1, cap) - lo + 1;
                 Vec even[kBlock], odd[kBlock];
-                block_sums(ae, be + kPad, r, cap, even);
-                block_sums(ao, bo + kPad, r, cap, odd);
+                block_sums(ae + lo, be + kPad + r - lo, count, even);
+                block_sums(ao + lo, bo + kPad + r - lo, count, odd);
                 for (int k = 0; k < kBlock && r + k <= last; ++k) x[r + k] = reduce<true>(even[k], odd[k]);
             }
         }
     }
 
-    // sum[k] = sum_i x[i] y[r + k - i] (64-bit lanes 0, 2, 4, 6) for k < kBlock, i <= cap; y is
-    // zero outside [0, cap] for kPad entries on each side.
-    static constexpr int kBlock = 4, kPad = kBlock - 1;
-    static void block_sums(const Vec* x, const Vec* y, int r, int cap, Vec* sum) {
-        const Vec low = _mm256_set1_epi64x(0xFFFFFFFF), fold = _mm256_set1_epi64x(k2To32);
-        Vec s[kBlock];
-#pragma GCC unroll 4
-        for (int k = 0; k < kBlock; ++k) s[k] = _mm256_setzero_si256();
-        for (int i = std::max(0, r - cap), end = std::min(r + kPad, cap), terms = 0; i <= end; ++i) {
-            if (++terms == 16) {  // at most 15 products < P^2 per sum; a folded sum is < 2^61
-                terms = 1;
-#pragma GCC unroll 4
-                for (int k = 0; k < kBlock; ++k)
-                    s[k] = _mm256_add_epi64(_mm256_and_si256(s[k], low), _mm256_mul_epu32(_mm256_srli_epi64(s[k], 32), fold));
+    // sum[k] = sum_{i < count} x[i] y[k - i] (64-bit lanes 0, 2, 4, 6) for k < kBlock. The window
+    // y[k - i] slides down one entry per term; reads y[-count .. 3].
+    static constexpr int kBlock = 4, kPad = kBlock;
+    static void block_sums(const Vec* x, const Vec* y, int count, Vec* sum) {
+        Vec s0 = _mm256_setzero_si256(), s1 = s0, s2 = s0, s3 = s0;
+        Vec w0 = y[0], w1 = y[1], w2 = y[2], w3 = y[3];
+        const auto term = [&](Vec a, Vec y0, Vec y1, Vec y2, Vec y3) __attribute__((always_inline)) {
+            s0 = _mm256_add_epi64(s0, _mm256_mul_epu32(a, y0));
+            s1 = _mm256_add_epi64(s1, _mm256_mul_epu32(a, y1));
+            s2 = _mm256_add_epi64(s2, _mm256_mul_epu32(a, y2));
+            s3 = _mm256_add_epi64(s3, _mm256_mul_epu32(a, y3));
+            asm("" : "+x"(s0), "+x"(s1), "+x"(s2), "+x"(s3));  // keeps GCC from reassociating the sums (it spills)
+        };
+        // Terms in fours, the window renamed instead of moved; a final run may end with 1-3 terms.
+        const auto run = [&](int n) __attribute__((always_inline)) {
+            for (; n >= 4; n -= 4, x += 4, y -= 4) {
+                term(x[0], w0, w1, w2, w3), w3 = y[-1];
+                term(x[1], w3, w0, w1, w2), w2 = y[-2];
+                term(x[2], w2, w3, w0, w1), w1 = y[-3];
+                term(x[3], w1, w2, w3, w0), w0 = y[-4];
             }
-            const Vec* yj = y + r - i;
-#pragma GCC unroll 4
-            for (int k = 0; k < kBlock; ++k) s[k] = _mm256_add_epi64(s[k], _mm256_mul_epu32(x[i], yj[k]));
+            if (n >= 1) term(x[0], w0, w1, w2, w3);
+            if (n >= 2) term(x[1], y[-1], w0, w1, w2);
+            if (n >= 3) term(x[2], y[-2], y[-1], w0, w1);
+        };
+        // Products are < P^2 < 2^59.8: 18 fit in 64 bits. Longer sums fold once after 16 terms
+        // (low half + high half 2^32 mod P < 2^60.2, then at most 8 more terms).
+        if (count <= 18) {
+            run(count);
+        } else {
+            run(16);
+            const auto fold = [](Vec s) {
+                return _mm256_add_epi64(_mm256_and_si256(s, _mm256_set1_epi64x(0xFFFFFFFF)),
+                                        _mm256_mul_epu32(_mm256_srli_epi64(s, 32), _mm256_set1_epi64x(k2To32)));
+            };
+            s0 = fold(s0), s1 = fold(s1), s2 = fold(s2), s3 = fold(s3);
+            run(count - 16);
         }
-#pragma GCC unroll 4
-        for (int k = 0; k < kBlock; ++k) sum[k] = s[k];
+        sum[0] = s0, sum[1] = s1, sum[2] = s2, sum[3] = s3;
     }
 
     std::size_t size_, bottom_size_ = 0, top_size_ = 0, bottom_ = 0;
     int rank_ = 0, planes_ = 0, threes_ = 0;
-    std::vector<u32> size_of_, origin_;
+    std::vector<u32> size_of_;
+    alignas(32) std::array<u32, 8> lane_offset_{};
+    std::vector<u32> block_base_;  // empty if the orders agree
     std::vector<std::uint8_t> vector_sum_, vector_cap_, vector_nz_;
-    std::vector<u32> pointwise_order_;  // vectors by (cap, nz): equal loop bounds in a row
-    struct Step {
-        u32 first, width;  // variables first, ..., first + width - 1
-    };
-    struct Pass {
-        std::vector<Step> steps;
-        std::vector<Range> ranges;  // [step * Nb / 8 + u]
-    };
+    std::size_t group_ = 1;  // vectors per group of low block variables (also the number of columns)
     Pass forward_, inverse_;  // block transforms
     std::vector<std::uint8_t> top_cap_, top_nz_, top_zeros3_;
     std::vector<Term> terms_, inverse_terms_;
@@ -919,8 +1004,8 @@ private:
 
 // ---------------------------------------------------------------------------------------------
 
-// f g mod (x_1^n_1, ..., x_k^n_k); f may be overwritten.
-const u32* multiply(const std::vector<u32>& n, std::size_t size, u32* f, const u32* g) {
+// f g mod (x_1^n_1, ..., x_k^n_k); f and g may be overwritten.
+const u32* multiply(const std::vector<u32>& n, std::size_t size, u32* f, u32* g) {
     u32* c = nullptr;
 #if !defined(FORCE_GRADED) && !defined(FORCE_SPLIT)
     if (Ranked::fits(n)) {

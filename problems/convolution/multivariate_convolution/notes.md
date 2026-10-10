@@ -30,8 +30,11 @@ small, k0.
   zeta transform of subset convolution, extended to size 3.
   - Digit order: three size-2 variables first: the 8 lanes of a vector, evaluated in registers
     (shuffle, blend, add). Then the block: the next variables up to Nb positions such that the
-    R + 1 ranks of f and g fit 320 KiB. Ranks are stored position-major ([u][r]), so a transform
-    along a block variable is one pass over blocks of R + 1 vectors.
+    R + 1 ranks of f and g fit 640 KiB (round 3; 320 before). Ranks are stored position-major
+    ([u][r]), so a transform along a block variable is one pass over blocks of R + 1 vectors.
+  - Order change (round 3): the orders differ only within blocks of the variables up to the last
+    lane variable, so f and g are permuted in place, block by block (`vpgatherdd` from a copy of
+    the block, offsets from a table of S / 8 bases), and c back the same way with the final scale.
   - Top variables (above the block): for each top point t, the block is evaluated at t straight
     from the rows of f and g it depends on (3^T2 7^T3 row additions in all, signed, per top rank),
     multiplied, interpolated, and added into the rows of c that depend on t. Nothing larger than
@@ -46,10 +49,22 @@ small, k0.
   - Block transforms (round 2): two variables per step in registers (forward always, inverse only
     for 2 x 2), each group only on its rank range: forward, the ranks that can be nonzero
     ([digit sum above the step, + n - 1 of the step and of nonzero point coordinates below,
-    + top cap + 3]); inverse, the ranks read later ([digit sum below, + n - 1 from the step on,
-    + planes + 2]). Ranges per step and vector in u8 tables.
+    + top cap + 3]); inverse, the ranks read later ([digit sum above the step, + n - 1 up to the
+    step, + planes + 2], inverse steps running high to low since round 3). Ranges per step and
+    vector in u8 tables.
+  - Passes per top point (round 3): the low block variables form groups of G consecutive vectors
+    (smallest prefix with G^2 >= Nb / 8: 32 for twos, 27 for threes), the high ones columns
+    {s + G j}. Pass 1 per group: spread, forward low steps (f, then g). Pass 2 per column:
+    forward high steps on f and g, pointwise, inverse high steps. Pass 3 per group: inverse low
+    steps, gather. Each group or column stays in L1 through its steps (before: 11 passes over the
+    block per top point, now 3).
   - Pointwise (round 2): four ranks at a time per parity (even lanes, then odd), so each f rank is
-    loaded once per four products and the 4 sums stay in registers; g is zero-padded by 3.
+    loaded once per four products and the 4 sums stay in registers; g is zero-padded (by 4 since
+    round 3). Round 3: the window of g ranks rotates by renaming in groups of four terms; an empty
+    `asm` after each term keeps GCC from reassociating the sums (it spilled them); sums of up to 18
+    products need no fold (P^2 < 2^59.8).
+  - Top evaluation (round 3): each plane's first row is copied instead of added to zero; planes
+    above the point's cap are zeroed.
   - Spread and gather (round 2): lane v of rank r is top plane r - sum(u) - popcount(v): three
     `vpblendd` per rank instead of masked OR chains through memory. Lane evaluation by shifts
     (`vpsllq`, `vpslldq`, `vperm2i128`) instead of shuffle + blend.
@@ -70,13 +85,18 @@ small, k0.
   - Planner: all multisets of outer sizes with Q <= 4096 and lg <= 15; cost = m (3 Q 2^lg lg
     0.107 + pairs 2^lg c_block + N), c_block = 0.094 ns (block 3-5), 0.13 (2), 0.19 (1); graded:
     m 2^lg lg 0.25. Constants fitted on lc-amd (log below).
-- Memory: blocks of 256 KiB or more are 2 MiB aligned with `MADV_HUGEPAGE`; smaller ones take
-  small pages (round 1 rounded every block to 2 MiB pages, faulting in a whole huge page for each).
+- Memory (round 3): every block comes from one region in huge pages (`mem::map_huge`), 64 bytes
+  apart, so blocks share huge pages; each 2 MiB page is written once when the region first reaches
+  it (a huge page read before it is written maps the shared zero page, which Linux 6.8 splits into
+  small pages on the first write; c is read first). Before: blocks of 256 KiB or more each in
+  their own huge pages, smaller ones in small pages.
 - Output: `../convolution_mod/fields.hpp` (judge-specific padding), its text in g (dead by then).
   `.preinit_array` start and `_exit`.
 - `-DFORCE_GRADED` forces the graded method, `-DFORCE_SPLIT` the cheapest split;
   `-DBLOCK_BYTES=1` makes every non-lane variable a top one. `stress.py` runs all three and the
-  default build against `brute.cpp`.
+  default build against `brute.cpp`. Spread and gather carry
+  `gnu::optimize("no-tree-loop-distribute-patterns")`: GCC turned their zeroing loops into memset
+  calls (one per vector).
 
 Sources: the ranked transform is the subset-convolution technique of Björklund, Husfeldt, Kaski,
 Koivisto, "Fourier meets Möbius: fast subset convolution", STOC 2007 (recalled). The chi grading
@@ -160,12 +180,54 @@ no sources read.
 - 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
   `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
   before (judge flags, `lc-amd`).
+- 2026-10-10, claude (round 3): one memory region, fused ranked passes, in-place order change,
+  pointwise window by renaming, 640 KiB block. Scratch files: `lc-opt-explore/multivariate_convolution/`.
+  - Checks: 17/17 official tests (`judge.py test`, lc-amd); `stress.py` 600 rounds (four builds,
+    lc-amd); ASan/UBSan (`-O1`) on all official cases in four builds, file and pipe input.
+  - `judge.py bench`, lc-bench, 21 rounds, slowest 8 cases: 13.53 -> 12.07 ms (0.898).
+  - lc-k68 (Linux 6.8, judge build, `bench.py`, 11 rounds, median ms): twos_00 14.51 -> 12.56,
+    threes_00 13.84 -> 11.10, max_random_01 11.81 -> 11.69, threes_01 10.99 -> 8.74,
+    max_random_00 10.66 -> 10.39, dim2_01 9.63 -> 9.26, twos_01 7.45 -> 6.67; score 0.866.
+    The same source built `-static` runs ~1 ms faster on lc-k68 (twos_00 13.38): the judge's
+    dynamic build loads libstdc++ (NEEDED even for an empty program); compare dynamic builds.
+  - Phases on lc-bench after the round (ms, in-process TSC, median of 5): twos_00 read 0.88,
+    evaluate 0.74, spread 1.52, forward low 0.67, forward high 0.74, pointwise 3.01, inverse high
+    0.48, inverse low 0.52, gather 0.62, interpolate 0.27, ctor 0.18, write 1.01, total 10.7.
+    threes_00: setup (order change) 0.22, ctor 0.11, final scale and order 0.15, total 9.4.
+    max_random_01: split run 8.3 of 10.0.
+  - Steps (phases, lc-bench, ms unless noted):
+    - Pointwise window by renaming (`block_sums`): twos_00 pointwise 3.18 -> 2.99. Without the
+      empty `asm`, GCC reassociated the 16 adds of a group and spilled: 10.4.
+    - Fused passes (groups and columns in L1): forward 1.46 -> 0.51 + 0.71, inverse 0.91 -> 0.44 +
+      0.40; twos_00 total 11.73 -> 11.43. Spread unchanged (1.86): it is instruction-bound.
+    - Order change: `origin_` table (one entry per position) -> block-local `vpgatherdd`: threes_00
+      ctor 0.85 -> 0.14; into new arrays the gathers cost 0.38 (huge-page zeroing), in place 0.19;
+      final scatter 0.27 -> 0.15. threes_00 total 10.96 -> 10.09.
+    - One memory region (lc-k68, 9 rounds): twos_00 14.06 -> 12.96, threes_00 12.17 -> 11.26,
+      max_random_01 12.27 -> 11.80, dim2_01 9.77 -> 9.29 (0.928). lc-intel: `kernel_init_pages`
+      6.8% -> 1.2% of cycles on twos_00. lc-amd (Linux 7.0) twos_00 about unchanged.
+    - Block bytes (lc-k68, score twos_00): 640 KiB 0.975 against 320; 1.25 MiB 1.04, 2.5 MiB
+      1.10, 200 KiB 1.11 (against 640 or 320).
+    - First row of each plane copied in the top evaluation: 0.989 (lc-k68, 11 rounds).
+  - No gain, reverted:
+    - Lanes split by popcount ({0,1,2,4} and {3,5,6,7}, `vpermd`) instead of parity, each half on
+      its own rank range: 28% fewer products on twos_00, 16% on threes_00 (counted), time 1.0002
+      (lc-k68). Products are not the limit: lc-intel shows 144M instructions at IPC 3.7 and 42K
+      branch misses for twos_00; the pointwise's setup and reductions cost more than its products.
+    - Top evaluation and interpolation in chunks of 128-512 vectors (planes in L1, fused with
+      spread and gather): 1.04-1.06 (lc-k68). Whole rows stream better.
+    - `#pragma GCC unroll 4` on the spread's rank loop: 0.998. Memset calls removed from spread
+      and gather: spread 1.865 -> 1.80 (kept, small).
+  - Measured: `vpmuludq` ymm 0.51 cycles each on Zen 3 (2 per cycle; lc-bench, core clock).
+  - lc-intel instruction shares, twos_00: spread 16%, pointwise 16% + `block_sums` 12%, forward
+    steps 11%, top evaluation and interpolation 10%, inverse steps 7%, gather 5%, parser 12%.
 
 ## Next
 
-- Ranked pointwise is the largest phase (twos_00 3.05 of ~11 ms compute): a third is the per-rank
-  reduction; lanes widen each vector's cap by 3 (~35% extra products, estimate).
-- Ranked: fuse spread with the first forward step and the pointwise with the first inverse step
-  (one L2 pass each); three variables per step for size 2.
-- Split: `forward_bottom` is ~20% of max_random (intrinsics, per-lane twiddle loads); the
-  arena's huge pages still cost ~0.3 ms of zeroing (estimate).
+- twos_00 sets the score (lc-k68 12.6, lc-amd 12.2). It is instruction-bound: spread (lane
+  transform: 3 blends + 12 ops per output rank) and the pointwise's per-vector setup and
+  reductions (~21 instructions per output rank) are the largest; products are only part of it.
+- Ranked: fewer reductions per output (e.g. fold the inverse's first step into the 64-bit sums);
+  three variables per step for size 2 (fewer loads and stores per variable).
+- Split (max_random_01, 11.7 on lc-k68, next in line): `forward_bottom` with per-lane twiddle
+  loads; a generated kernel (`lib/ntt/gen_*.py`) is an option.

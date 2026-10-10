@@ -6,7 +6,8 @@ roots), all_same ((x - a)^4000), max_random (m random linear factors over k valu
 polynomial of degree 4000 - m; odd seeds repeat roots: 03 has 1158 roots and 920 multiple zeros
 on H, nearly all repeated roots; 05 has 1186 and 1023). The checker compares root multisets.
 
-Best judged: none yet. Record when opened (issue #85): 151 ms.
+Best judged: ours, 9 ms reported, clean score 2 ms ([409630](https://judge.yosupo.jp/submission/409630),
+`main.cpp` of #301; every case 0-2 ms but three launch spikes). Record when opened (issue #85): 151 ms.
 
 ## Design
 
@@ -78,6 +79,21 @@ practical floor here.
     build on all official tests (root sets compared).
   - `speed.py bench` (`lc-bench`, 9 rounds, main 2cee7dab): max_random_05 2.90 ms, 03 2.77,
     07 2.33, all_distinct 2.12-2.15, all_same 1.87, other max_random 1.84-1.99, small 1.04-1.16.
+  - Climb stages on max_random_05 (`lc-bench`, in process): level 7 550 us (1023 points, xA'
+    and B only for lane groups with two zeros in a lane), level 0 469 us (1035 points): ~4 us
+    per group of 8 roots per stage, about 2/3 of it the fold (multiplier-bound).
+  - Merged as #301 (CI: all tests pass; new problem, no timing comparison).
+  - Submitted the merged `main.cpp` five times, all AC, each with launch spikes (36 cases: a run
+    is clean with probability ~0.15, `tools/spikes.py`):
+    [409620](https://judge.yosupo.jp/submission/409620) 10 ms (spikes: example_00,
+    small_random_01, small_random_06, max_random_02), clean 2;
+    [409622](https://judge.yosupo.jp/submission/409622) 10 ms (all_distinct_06, all_same_00),
+    clean 2; [409624](https://judge.yosupo.jp/submission/409624) 10 ms (small_random_01,
+    max_random_02), clean 3; [409627](https://judge.yosupo.jp/submission/409627) 10 ms
+    (small_random_02), clean 3; [409630](https://judge.yosupo.jp/submission/409630) 9 ms
+    (example_03, small_random_02, small_random_07), clean 2. Unspiked cases across the five runs:
+    max_random_05 2-3 ms, max_random_03 2, all_distinct 1-2, the rest 0-2 (judge times read
+    ~0.6-1 ms below `lc-bench`'s).
   - Next: the repeated-root climb (1.1 ms on max_random_05; the radical route costs about the
     same, ~0.6 ms jump + a second pipeline at N ~ 1200, unless repeats are detected before the
     Graeffe pass); the leaf pass (~40K TSC cycles per step against ~400 multiplies' worth);

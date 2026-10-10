@@ -746,8 +746,9 @@ one middle product between two chirp-weighted sequences (no square root of r nee
   alignment; the last partial step goes through a 32-word buffer.
 - Cost (`lc-amd`, in a 2^20-term fill): 6.3 cycles per vector, near the bound of its 10
   multiplies (8 `vpmuludq`, 2 `vpmulld`) on two pipes. A split x_(32v+l) = D_v E_l(v) (per-lane
-  geometric E, scalar D_v whose Shoup quotient is computed on the scalar side) needs 8; not
-  built.
+  geometric E, scalar D_v whose Shoup quotient is computed on the scalar side) needs 8: built
+  in #76 round 2, warm at 2^19 terms (`lc-bench`) fill 0.116 -> 0.110 ms, `multiply_chirp`
+  0.194 -> 0.204, an output pass 0.203 -> 0.199. Not kept.
 - Tests: terms against the recurrence x_(k+1) = x_k s q^k, sizes 0..99, random up to 3000 and
   2^16 + small, c, s, q in {0, 1, 2, P - 1} or random, aligned and unaligned spans.
 

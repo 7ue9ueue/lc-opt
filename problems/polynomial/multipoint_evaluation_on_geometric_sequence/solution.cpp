@@ -7,9 +7,9 @@
 // at the conjugate of a node is a mirror of the node's (Subtrees), so b's forward transform runs
 // for about half of the nodes.
 // The convolution is ntt::Product's (lib/ntt/product.hpp: radix-8 top, Subtrees, bottom kernels)
-// with these changes: the radix-8 pass of B reads its lower half twice; nodes come in conjugate
-// pairs; the last inverse level computes only the outputs, times r^(g i - t(i)) and in reverse
-// order. L >= 2 max(N, M), so A and the outputs each lie in one half.
+// with these changes: the radix-8 pass of B reads only its lower half; b's transform runs for one
+// node of each conjugate pair; the last inverse level computes only the outputs, times
+// r^(g i - t(i)) and in reverse order. L >= 2 max(N, M), so A and the outputs each lie in one half.
 // Output in fixed-width fields (problems/convolution/convolution_mod/fields.hpp).
 #include <sys/mman.h>
 
@@ -89,12 +89,12 @@ void forward_radix8_palindrome(Vec* f, std::size_t q, const std::uint32_t* roots
     }
 }
 
-// ntt::detail::Subtrees (lib/ntt/product.hpp) for a palindromic b, whose nodes pair up. Node k of
-// a level holds b mod x^s - z_k with z_k = r[k]^2 (Recursion's numbering: children 4k + t). For a
-// palindrome, b mod x^s - 1/z = z rev(b mod x^s - z), rev reversing the s coefficients. With
-// r[k] = w^bitrev(k), node k's conjugate is 3 2^e - 1 - k for 2^e <= k < 2^(e+1): the mirror of
-// a node's groups (bottom-level nodes of 4 vectors) is its conjugate's groups in reverse order.
-// So b's forward levels run for one node of each pair; mirror() derives the other's groups and
+// ntt::detail::Subtrees (lib/ntt/product.hpp) for a palindromic b. Node k of a level holds
+// b mod x^s - z_k, z_k = r[k]^2 (Recursion's numbering: children 4k + t). For a palindrome of
+// length L, b mod x^s - 1/z = z rev(b mod x^s - z), rev reversing the s coefficients. As r[k] =
+// w^bitrev(k), 1/z_k = z_c for the conjugate c = 3 * 2^e - 1 - k of 2^e <= k < 2^(e + 1): the
+// groups of 4 vectors (s = 32) of a node, in reverse order, are those of its conjugate. So b's
+// forward levels run for one node of each pair; mirror() derives the other's groups and
 // visit<false> skips its b levels. Only nodes 0 and 1 are their own conjugates (z = 1, -1); their
 // children pair up as 2 and 3 (node 0) or 4 and 7, 5 and 6 (node 1). Subtrees of at least 16
 // vectors, so tiles start at even group indices.

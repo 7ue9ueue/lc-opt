@@ -5,12 +5,14 @@
 // C_j = 1 / (2j)!, S_j = 1 / (2j + 1)!. With abar_t = a_t t! / 2^t this is
 //   g_(k+1) = 2^k / (k+1)! sum_j abar_(k+2j) E_j - a_(k+1) / 2:
 // for even and for odd k a product with E of half the length.
-// E to K >= N / 2 terms: sigma = 1 / S mod w^(K/2) by Newton (lib/poly/inverse.hpp), then one
-// division step (A. Karp, P. Markstein): q0 = C sigma mod w^(K/2), r = (C - S q0) / w^(K/2),
-// E = q0 + w^(K/2) (r sigma mod w^(K/2)). Products by lib/poly's transforms; factorials and the
-// weights from product chains in 32 lanes (lib/poly/factorials.hpp). Output in fixed-width fields
+// E to K >= N / 2 terms by division in 4 blocks of b = K / 4: with sigma = 1 / S mod w^b
+// (Newton, lib/poly/inverse.hpp), block j of E is Q_j = sigma (C_j - R_j) mod w^b, C_j the block
+// of C and R_j = sum_(t=1..j) (W_t Q_(j-t))[b, 2b) over the windows W_t = S[(t-1) b, (t+1) b), from
+// stored transforms of length 2b. Products by lib/poly's transforms; factorials and the weights
+// from product chains in 32 lanes (lib/poly/factorials.hpp). Output in fixed-width fields
 // (problems/convolution/convolution_mod/fields.hpp).
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <span>
@@ -65,29 +67,28 @@ std::uint32_t mont(std::uint32_t x) { return multiply_mod(x, kR); }  // x 2^32 m
 
 // The prefix sum of f for n >= 1 coefficients. Scans over the n positions t (or k) run in 32 lanes
 // of C positions, C = scan_chunk(n), so up to 1023 positions past n. Products of length 2K, K a
-// power of two >= max(64, ceil(n / 2)): the even and the odd abar reversed, pe[K - 1 - i] =
+// power of two >= max(128, ceil(n / 2)): the even and the odd abar reversed, pe[K - 1 - i] =
 // abar_(2i) and po[K - 1 - i] = abar_(2i+1), times E in [0, K): the sums for k = 2m and
-// k = 2m + 1 sit at pe[K - 1 - m] and po[K - 1 - m]. One mapping in huge pages, never freed.
+// k = 2m + 1 sit at pe[K - 1 - m] and po[K - 1 - m].
+// Memory: one mapping in huge pages, never freed: a (f, then g), three zones of 2K words that
+// E's computation uses first: x (s, then T(Q_0..2) and a block buffer, then pe), y (the inverse's
+// scratch, then T(sigma) and T(W_1..3), then po), z (c, turned into E in place, and sigma; then
+// T(E)), with room for the scans before and after them.
 class PrefixSum {
 public:
     explicit PrefixSum(std::size_t n)
-        : chunk_(scan_chunk(n)), k_(std::max<std::size_t>(64, std::bit_ceil((n + 1) / 2))), arena_(words(chunk_, k_)),
+        : chunk_(scan_chunk(n)), k_(std::max<std::size_t>(32 * kBlocks, std::bit_ceil((n + 1) / 2))), arena_(words(chunk_, k_)),
           transform_(arena_, std::countr_zero(2 * k_)) {
-        const std::size_t k = k_, h = k / 2;
+        const std::size_t k = k_, b = k / kBlocks, block = Arena::footprint(2 * b), half = Arena::footprint(half_scan(k));
         a_ = arena_.take(32 * chunk_ + 16).data();
-        c_ = arena_.take(half_scan(k)).data();
-        s_ = arena_.take(half_scan(k)).data();
-        sigma_ = arena_.take(h);
-        scratch_ = arena_.take(poly::inverse_scratch(h));
-        st_ = arena_.take(k);
-        e_ = arena_.take(k);
-        qt_ = arena_.take(k);
-        w_ = arena_.take(k);
-        et_ = arena_.take(2 * k);
-        arena_.take(kPadding);
-        pe_ = arena_.take(2 * k);
-        arena_.take(kPadding);
-        po_ = arena_.take(2 * k);
+        std::uint32_t* const x = arena_.take(kPadding + 2 * half).data() + kPadding;
+        std::uint32_t* const y = arena_.take(kPadding + 2 * k + 16 * kBlocks).data() + kPadding;
+        std::uint32_t* const z = arena_.take(z_words(k)).data();
+        s_ = x, c_ = z;
+        for (std::size_t j = 0; j + 1 < kBlocks; ++j) tq_[j] = {x + j * block, 2 * b}, tw_[j] = {y + (j + 1) * block, 2 * b};
+        buffer_ = {x + (kBlocks - 1) * block, 2 * b}, pe_ = {x, 2 * k};
+        scratch_ = {y, poly::inverse_scratch(b)}, ts_ = {y, 2 * b}, po_ = {y, 2 * k};
+        e_ = {z, k}, sigma_ = {z + half, b}, et_ = {z, 2 * k};
         text_ = reinterpret_cast<char*>(arena_.take(kTextWords).data());
     }
 
@@ -109,6 +110,9 @@ public:
     }
 
 private:
+    using Arena = poly::Arena;
+
+    static constexpr std::size_t kBlocks = 4;  // at most 3 residual products: inverse_product_sum
     // Words before pe and po: the scans reach 512 words below them (16 C <= K + 512).
     static constexpr std::size_t kPadding = 1024;
     static constexpr std::size_t kTextWords = fields::kTextBytes / sizeof(std::uint32_t);
@@ -116,12 +120,13 @@ private:
     // Words of c and s: the scan over 2K positions writes 16 C' + 4 of each.
     static std::size_t half_scan(std::size_t k) { return 16 * scan_chunk(2 * k) + 8; }
 
+    // Words of z: c (or E, then T(E)) and sigma after c.
+    static std::size_t z_words(std::size_t k) { return std::max(2 * k, Arena::footprint(half_scan(k)) + k / kBlocks); }
+
     static std::size_t words(std::size_t chunk, std::size_t k) {
-        using poly::Arena;
         return poly::Transform::words(std::countr_zero(2 * k)) + Arena::footprint(32 * chunk + 16) +
-               2 * Arena::footprint(half_scan(k)) + Arena::footprint(k / 2) + poly::inverse_scratch(k / 2) +
-               4 * Arena::footprint(k) + 3 * Arena::footprint(2 * k) + 2 * Arena::footprint(kPadding) +
-               Arena::footprint(kTextWords);
+               Arena::footprint(kPadding + 2 * Arena::footprint(half_scan(k))) + Arena::footprint(kPadding + 2 * k + 16 * kBlocks) +
+               Arena::footprint(z_words(k)) + Arena::footprint(kTextWords);
     }
 
     // factorial_[s] = (s C)!, inverse_factorial_[s] = 1 / (s C)! for s <= 32.
@@ -153,24 +158,35 @@ private:
         }, chain);
     }
 
-    // e = E mod w^K = C / S by one division step from sigma = 1 / S mod w^h, h = K / 2.
+    // e = E mod w^K = C / S in place of c, block by block (see the top of the file).
     void bernoulli() {
         const poly::Transform& t = transform_;
-        const std::size_t k = k_, h = k / 2;
-        const std::span<const std::uint32_t> c(c_, k), s(s_, k);
-        poly::inverse(t, s.first(h), sigma_, scratch_);
-        t.forward(sigma_, 0, st_);
-        t.cyclic_product(c.first(h), 0, e_, st_, Half::kLower);  // e[0, h) = q0
-        t.forward(e_.first(h), 0, qt_);
-        t.cyclic_product(s, 0, w_, qt_, Half::kUpper);  // w[h, K) = (S q0)[h, K)
-        for (std::size_t i = h; i < k; i += 8)
-            store_unaligned(w_.data() + i, difference(load(w_.data() + i), load_unaligned(c_ + i)));  // -r
-        t.cyclic_product(w_.subspan(h), h, w_, st_, Half::kUpper, kP - 1);  // w[h, K) = r sigma mod w^h
-        std::copy(w_.begin() + std::ptrdiff_t(h), w_.end(), e_.begin() + std::ptrdiff_t(h));
+        const std::size_t b = k_ / kBlocks;
+        const std::span<const std::uint32_t> s(s_, k_);
+        poly::inverse(t, s.first(b), sigma_, scratch_);
+        t.forward(sigma_, 0, ts_);
+        for (std::size_t j = 0; j + 1 < kBlocks; ++j) t.forward(s.subspan(j * b, 2 * b), 0, tw_[j]);
+        std::uint32_t* const buffer = buffer_.data();
+        for (std::size_t j = 0; j < kBlocks; ++j) {
+            const std::span<std::uint32_t> block = e_.subspan(j * b, b);  // C_j, then Q_j
+            if (j > 0) {
+                std::array<poly::Transform::Pair, kBlocks - 1> pairs;
+                for (std::size_t i = 0; i < j; ++i) pairs[i] = {tw_[i], tq_[j - 1 - i]};
+                t.inverse_product_sum(std::span(pairs).first(j), buffer_, Half::kUpper);  // R_j at [b, 2b)
+                for (std::size_t i = 0; i < b; i += 8)
+                    poly::detail::store(buffer + i, difference(load(block.data() + i), load(buffer + b + i)));
+                t.cyclic_product(buffer_.first(b), 0, buffer_, ts_, Half::kLower);
+            } else {
+                t.cyclic_product(block, 0, buffer_, ts_, Half::kLower);
+            }
+            std::copy_n(buffer, b, block.begin());
+            if (j + 1 < kBlocks) t.forward(block, 0, tq_[j]);
+        }
     }
 
     // abar_t = a_t t! / 2^t into pe and po: a chain of t! / 2^t 2^32 from each lane's start s C,
-    // multipliers (t + 1) / 2. Positions past n read zeros.
+    // multipliers (t + 1) / 2. Positions past n read zeros. The scan fills [K - 16 C, K) of pe and
+    // po; the rest of [0, K) held E's transforms and is cleared.
     void weights() {
         Lanes start, base;
         for (int s = 0; s < 32; ++s) {
@@ -189,6 +205,9 @@ private:
             const Vec abar = reduce(montgomery(load(a + t), x), kP);
             store_halves(pe + i, po + i, _mm256_permutevar8x32_epi32(abar, order));
         }, chain);
+        const std::size_t filled = std::min(k_, 16 * chunk);
+        std::fill(pe_.begin(), pe_.begin() + std::ptrdiff_t(k_ - filled), 0);
+        std::fill(po_.begin(), po_.begin() + std::ptrdiff_t(k_ - filled), 0);
     }
 
     // g_(k+1) = z_k sum_k - a_(k+1) / 2 in place of a_(k+1), z_k = 2^k / (k+1)!: a reversed chain
@@ -219,7 +238,7 @@ private:
     poly::Arena arena_;
     poly::Transform transform_;
     std::uint32_t *a_, *c_, *s_;
-    std::span<std::uint32_t> sigma_, scratch_, st_, e_, qt_, w_, et_, pe_, po_;
+    std::span<std::uint32_t> scratch_, ts_, tw_[kBlocks - 1], tq_[kBlocks - 1], buffer_, e_, sigma_, et_, pe_, po_;
     char* text_;
     std::array<std::uint32_t, 33> factorial_, inverse_factorial_;
 };

@@ -10,8 +10,8 @@ Record when opened: 29 ms (another user). Best judged: ours, 31 ms:
 - Three NTT primes below 2^30 with 2^20 | p - 1: 998244353, 985661441, 976224257. Product
   2^89.6 > 2^19 (10^9 + 6)^2 = 2^78.8. Inputs < 10^9 + 7 < 2p, so one conditional subtract
   makes them canonical.
-- `transform.hpp`, `kernels.hpp`, `gen_kernels.py`: convolution_mod_2_64's run-time-modulus copy
-  of lib/ntt, with 32-bit input (radix-8 first level reads the input and reduces it on the fly).
+- `lib/multimod` (run-time-modulus lib/ntt) with `Padded` 32-bit input (the radix-8 first level
+  reads the input and reduces it on the fly).
   The last prime transforms b in place (b holds 2^lg words) and puts a's result in the scratch
   array: one 4 MiB array fewer.
 - CRT straight to mod 10^9 + 7: y_k = c / M_k mod p_k (factor folded into the transform's scale),
@@ -72,6 +72,10 @@ Record when opened: 29 ms (another user). Best judged: ours, 31 ms:
   submissions: clean score 23, 23, 23, 24, 24 ms (409262, 409263, 409297, 409302, 409306).
   23 cases sit within 9 ms of the slowest, so a run is clean with P = 0.948^23 = 0.29;
   all 5 spiking has P = 0.71^5 = 0.18.
+- 2026-10-10, claude (issue #156): the local transform moved to `lib/multimod` (`Padded`).
+  At odd lg (2^7..2^19) a sparse input is now reduced and transformed in one pass; lg 20 is the
+  same logic. Transforms alone at lg 20: ratio 1.0009; at lg 19: 0.9837. `judge.py bench`,
+  31 rounds, `lc-amd`: 0.9991. 48/48 official tests. Details: `lib/multimod/notes.md`.
 - Next: everything left is in the transforms (14.2 of ~23 ms, lib/ntt's kernels) and fixed I/O.
   No problem-local idea left that is worth more than noise.
 

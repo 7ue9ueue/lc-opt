@@ -21,8 +21,7 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   prime-power parts: the largest power of each prime to factor 0, the next to factor 1, ...).
   Point (i_1..) maps to y_r = sum i_j w_jr mod D_r. Then per point of the short axes' spectrum:
   Kronecker substitution with factor r padded to 2 D_r - 1, the product over Z mod three NTT
-  primes (`transform.hpp`, `kernels.hpp`: convolution_mod_1000000007's run-time-modulus copy of
-  lib/ntt), CRT straight to residues mod p (Montgomery, p odd), fold j + D_r onto j.
+  primes (`lib/multimod`, `Bounded` input), CRT straight to residues mod p (Montgomery, p odd), fold j + D_r onto j.
   Coefficients < 2^18 p^2 < 2^78; the primes' product is 2^89.6.
 - One cyclic factor (all long tests): the places are [0, D), so a and b need no clearing and the
   CRT folds as it reads (c_j + c_{j+D}). One long axis of stride 1 (dim1, dim2_00): the
@@ -83,6 +82,10 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   - Submitted the merged `main.cpp` (#150): [409317](https://judge.yosupo.jp/submission/409317)
     AC 17 ms; [409318](https://judge.yosupo.jp/submission/409318) AC 19 ms. Both above round 1's
     15 ms despite `lc-amd` 11.4 vs 11.8: judge jitter (see `tools/spikes.md`). Best stays 409314.
+- 2026-10-10, claude (issue #156): the local transform moved to `lib/multimod` (`Bounded`); the
+  AVX2 helpers are `multimod::add` etc., no longer in `detail`. The reduction state now stays in
+  registers in the first level: transforms alone at lg 20, ratio 0.9945. `judge.py bench`,
+  31 rounds, `lc-amd`: 0.9944. 24/24 official tests. Details: `lib/multimod/notes.md`.
 - Next: dim2_01 still pays ~0.5 ms for gather and scatter over dim1. The transforms (about
   6.5 ms) are the floor of this method; a gain there needs faster lib/ntt kernels.
 

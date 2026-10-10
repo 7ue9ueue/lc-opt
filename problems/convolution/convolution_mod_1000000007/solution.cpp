@@ -1,4 +1,4 @@
-// a * b mod 1000000007: the product modulo three NTT primes (transform.hpp: lib/ntt's transform
+// a * b mod 1000000007: the product modulo three NTT primes (lib/multimod: lib/ntt's transform
 // with the modulus set at run time), the Chinese remainder theorem straight to residues mod
 // 10^9 + 7 by one Montgomery reduction, fixed-width output: 10 bytes per value (fields10.hpp),
 // or 11 in the rare blocks with a value >= 10^9 (fields11.hpp).
@@ -10,7 +10,7 @@
 #include "lib/io/io.hpp"
 #include "fields10.hpp"
 #include "fields11.hpp"
-#include "transform.hpp"
+#include "lib/multimod/transform.hpp"
 
 namespace {
 
@@ -169,7 +169,7 @@ void solve() {
         const Modulus mod(kPrimeList[k][0], kPrimeList[k][1]);
         const bool last = k + 1 == kPrimes;
         auto* r = last ? work : arena.take<std::uint32_t>(words);
-        transform.multiply(a, n, b, m, r, last ? b : work, mod, kCrt.scale[k]);
+        transform.multiply(multimod::Padded{a, n}, multimod::Padded{b, m}, r, last ? b : work, mod, kCrt.scale[k]);
         residues[k] = r;
     }
 

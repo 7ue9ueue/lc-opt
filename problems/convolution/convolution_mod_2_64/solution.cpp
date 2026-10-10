@@ -1,4 +1,4 @@
-// a * b mod 2^64: the product modulo five NTT primes (transform.hpp: lib/ntt's transform with the
+// a * b mod 2^64: the product modulo five NTT primes (lib/multimod: lib/ntt's transform with the
 // modulus set at run time), the Chinese remainder theorem in 64-bit arithmetic, fixed-width output
 // (fields64.hpp).
 #include <sys/mman.h>
@@ -9,7 +9,7 @@
 #include "lib/io/bulk64.hpp"
 #include "lib/io/io.hpp"
 #include "fields64.hpp"
-#include "transform.hpp"
+#include "lib/multimod/transform.hpp"
 
 namespace {
 
@@ -158,7 +158,8 @@ void solve() {
         const Modulus mod(kPrimeList[k][0], kPrimeList[k][1]);
         const bool last = k + 1 == kPrimes;
         auto* r = last ? work : arena.take<std::uint32_t>(words);
-        transform.multiply(a, n, b, m, r, last ? reinterpret_cast<std::uint32_t*>(a) : work, mod, kCrt.scale[k]);
+        transform.multiply(multimod::Wide{a, n}, multimod::Wide{b, m}, r,
+                           last ? reinterpret_cast<std::uint32_t*>(a) : work, mod, kCrt.scale[k]);
         residues[k] = r;
     }
 

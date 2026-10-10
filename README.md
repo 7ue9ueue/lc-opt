@@ -25,7 +25,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [mul_modp_convolution](problems/convolution/mul_modp_convolution) | [12 ms](https://judge.yosupo.jp/submission/409350) | 45 ms |
 | [min_plus_convolution_convex_convex](problems/convolution/min_plus_convolution_convex_convex) | [13 ms](https://judge.yosupo.jp/submission/409301) | 20 ms |
 | [min_plus_convolution_convex_arbitrary](problems/convolution/min_plus_convolution_convex_arbitrary) | [11 ms](https://judge.yosupo.jp/submission/409229) | 38 ms |
-| [min_plus_convolution_concave_arbitrary](problems/convolution/min_plus_convolution_concave_arbitrary) | [27 ms](https://judge.yosupo.jp/submission/409359) | 117 ms |
+| [min_plus_convolution_concave_arbitrary](problems/convolution/min_plus_convolution_concave_arbitrary) | [24 ms](https://judge.yosupo.jp/submission/409555) | 117 ms |
 | [multivariate_convolution](problems/convolution/multivariate_convolution) | [14 ms](https://judge.yosupo.jp/submission/409322) | 117 ms |
 | [multivariate_convolution_cyclic](problems/convolution/multivariate_convolution_cyclic) | [12 ms](https://judge.yosupo.jp/submission/409321) | 117 ms |
 | [inv_of_formal_power_series](problems/polynomial/inv_of_formal_power_series) | [11 ms](https://judge.yosupo.jp/submission/409370) | 25 ms |
@@ -48,6 +48,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [polynomial_interpolation_on_geometric_sequence](problems/polynomial/polynomial_interpolation_on_geometric_sequence) | [15 ms](https://judge.yosupo.jp/submission/409510) | 90 ms |
 | [polynomial_interpolation](problems/polynomial/polynomial_interpolation) | [20 ms](https://judge.yosupo.jp/submission/409545) | 55 ms |
 | [polynomial_taylor_shift](problems/polynomial/polynomial_taylor_shift) | [10 ms](https://judge.yosupo.jp/submission/409534) | 33 ms |
+| [shift_of_sampling_points_of_polynomial](problems/polynomial/shift_of_sampling_points_of_polynomial) | [11 ms](https://judge.yosupo.jp/submission/409556) | 41 ms |
 | [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |
 
 Times are the judge's, for the slowest test, checked against the judge's API on 2026-10-10.

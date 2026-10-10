@@ -1,8 +1,9 @@
 // Tests for lib/poly against O(n^2) references: transforms leaf by leaf against their definition,
 // products against schoolbook multiplication, the inverse, exp, log, power and sqrt against their recurrences,
 // composition against Horner's rule and identities, product trees against naive products, chirps
-// against their recurrence, coefficient-wise operations against scalar code. Long results are
-// checked at random coefficients (each an O(n) sum).
+// against their recurrence, multipoint evaluation against Horner's rule, coefficient-wise
+// operations against scalar code. Long results are checked at random coefficients (each an O(n)
+// sum).
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -16,6 +17,7 @@
 #include "lib/poly/composition.hpp"
 #include "lib/poly/compositional_inverse.hpp"
 #include "lib/poly/divider.hpp"
+#include "lib/poly/evaluation.hpp"
 #include "lib/poly/exp.hpp"
 #include "lib/poly/holonomic.hpp"
 #include "lib/poly/inverse.hpp"
@@ -1653,6 +1655,132 @@ void test_chirp() {
     }
 }
 
+// Multipoint evaluation (evaluation.hpp).
+
+// middle_lanes against scalar sums, every k <= 16 and k + count <= 32, and middle_lanes<D, D, B>
+// for the blocks middle_level uses; coefficients random, 0 or near P - 1.
+void test_middle_lanes() {
+    alignas(32) static u32 w[8 * 32], q[8 * 17], out[8 * 32];
+    const u32 inverse_r = power(to_m(1), P - 2);
+    for (int kind = 0; kind < 3; ++kind) {
+        for (std::size_t k = 0; k <= 16; ++k) {
+            for (std::size_t count = 1; k + count <= 32; ++count) {
+                const auto value = [kind] { return kind == 2 ? P - 1 - u32(rng() % 1024) : kind == 1 && rng() % 2 ? 0 : u32(rng() % P); };
+                for (std::size_t i = 0; i < 8 * (k + count); ++i) w[i] = value();
+                for (std::size_t i = 0; i < 8 * (k + 1); ++i) q[i] = value();
+                namespace pd = poly::detail;
+                const bool fixed = k == count && std::has_single_bit(k) && pd::middle_block(k);
+                if (fixed) pd::with_degree(k, [&]<std::size_t D>() { if constexpr (pd::middle_block(D)) pd::middle_lanes<D, D, pd::middle_block(D)>(w, q, out); });
+                else pd::middle_lanes(w, k, q, count, out);
+                bool ok = true;
+                for (std::size_t l = 0; l < 8; ++l)
+                    for (std::size_t t = 0; t < count; ++t) {
+                        u32 s = 0;
+                        for (std::size_t j = 0; j <= k; ++j) s = add(s, mul(w[8 * (k + t - j) + l], q[8 * j + l]));
+                        ok &= out[8 * t + l] == mul(s, inverse_r);
+                    }
+                expect(ok, fixed ? "middle_lanes<D, D, B>" : "middle_lanes", k, count);
+            }
+        }
+    }
+}
+
+// Points of a kind: random, many zeros and repeats, small values, near P - 1.
+std::vector<u32> random_points(std::size_t m, int kind) {
+    std::vector<u32> a(m);
+    for (auto& x : a) {
+        const u64 r = rng();
+        x = kind == 1 ? (r % 3 == 0 ? 0 : u32(r % 5)) : kind == 2 ? u32(r % 64) : kind == 3 ? P - 1 - u32(r % 16) : u32(r % P);
+    }
+    return a;
+}
+
+// The tree's values against Horner's rule (all points, or 42 when n m is large), and evaluate().
+void check_evaluation(std::size_t n, std::size_t m, int kind) {
+    auto f = random_poly(n, kind == 1 ? 1 : 0);
+    if (f.back() == 0) f.back() = 1;
+    const auto points = random_points(m, kind);
+    std::vector<u32> got(m), direct(m);
+    {
+        poly::Arena arena(poly::detail::evaluate_tree_words(n, m));
+        poly::detail::evaluate_tree(arena, f, points, got);
+    }
+    {
+        poly::Arena arena(poly::evaluate_words(n, m));
+        poly::evaluate(arena, f, points, direct);
+    }
+    std::vector<std::size_t> at;
+    if (n * m <= (std::size_t(1) << 22)) {
+        for (std::size_t i = 0; i < m; ++i) at.push_back(i);
+    } else {
+        at = {0, m - 1};
+        for (int i = 0; i < 40; ++i) at.push_back(pick(m));
+    }
+    bool ok = true, same = true;
+    for (std::size_t i : at) ok &= got[i] == evaluate(f, points[i]), same &= direct[i] == got[i];
+    expect(ok, "evaluate_tree", n, m);
+    expect(same, "evaluate", n, m);
+    if (m % 8 == 0) {  // values aligned: written in place
+        poly::Arena arena(poly::detail::evaluate_tree_words(n, m) + poly::Arena::footprint(m));
+        const auto aligned = arena.take(m);
+        poly::detail::evaluate_tree(arena, f, points, aligned);
+        expect(equal(aligned, got), "evaluate_tree, aligned values", n, m);
+    }
+}
+
+// The tree's product against the naive one.
+void check_point_product(std::size_t m) {
+    const auto points = random_points(m, int(rng() % 4));
+    poly::Arena arena(poly::PointTree::words(m));
+    poly::PointTree tree(arena, points);
+    std::vector<std::vector<u32>> factors;
+    for (u32 a : points) factors.push_back({1, a ? P - a : 0});
+    auto want = naive_product(factors);
+    want.resize(tree.size() + 1, 0);
+    bool ok = tree.product().size() == want.size();
+    for (std::size_t i = 0; ok && i < want.size(); ++i) ok &= from_m(tree.product()[i]) == want[i];
+    expect(ok, "PointTree product", m);
+}
+
+// TreeTransform::inverse_upper undoes forward_upper (times c), in place and not, 8 .. 2^15 words.
+void test_inverse_upper() {
+    static poly::Arena arena(poly::TreeTransform::words(16) + 3 * poly::Arena::footprint(1 << 15));
+    static const poly::TreeTransform t(arena, 16);
+    static std::span<u32> buf[3] = {arena.take(1 << 15), arena.take(1 << 15), arena.take(1 << 15)};
+    for (int lg = 3; lg <= 15; ++lg) {
+        const std::size_t n = std::size_t(1) << lg;
+        for (int kind = 0; kind < 3; ++kind) {
+            const auto a = random_poly(n, kind);
+            std::copy(a.begin(), a.end(), buf[0].begin());
+            const auto upper = buf[1].first(n), out = buf[2].first(n);
+            t.forward_upper(buf[0].first(n), 0, upper);
+            const u32 c = kind == 0 ? 1 : kind == 1 ? P - 1 : u32(rng() % P);
+            t.inverse_upper(upper, out, c);
+            bool ok = true;
+            for (std::size_t i = 0; i < n; ++i) ok &= out[i] == mul(c, a[i]);
+            t.inverse_upper(upper, upper, c);
+            ok &= std::equal(upper.begin(), upper.end(), out.begin());
+            expect(ok, "TreeTransform inverse_upper", lg, kind);
+        }
+    }
+}
+
+void test_evaluation() {
+    test_inverse_upper();
+    test_middle_lanes();
+    for (std::size_t m : {1, 2, 7, 8, 9, 64, 255, 256, 257, 300, 1000, 1024}) check_point_product(m);
+    const std::size_t sizes[] = {1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 263, 264,
+                                 511, 512, 513, 1000, 1024, 2047, 2048, 2049, 4095, 4096, 4097};
+    for (std::size_t n : sizes)
+        for (std::size_t m : sizes) check_evaluation(n, m, int(rng() % 4));
+    const std::pair<std::size_t, std::size_t> large[] = {{1 << 17, 1 << 17}, {(1 << 17) - 20, 1 << 17}, {1 << 17, (1 << 17) - 1},
+                                                         {100000, 77777}, {77777, 100000}, {1, 1 << 17}, {1 << 17, 1},
+                                                         {5, 1 << 17}, {1 << 17, 9}, {65537, 65537}, {12345, 8193}};
+    for (const auto& [n, m] : large)
+        for (int kind = 0; kind < 4; ++kind) check_evaluation(n, m, kind);
+    for (int trial = 0; trial < 40; ++trial) check_evaluation(1 + pick(20000), 1 + pick(20000), trial % 4);
+}
+
 int main() {
     static Fixture fx;
     test_leaf_kernels(fx);
@@ -1675,6 +1803,7 @@ int main() {
     test_compositional_inverse();
     test_product_tree(fx);
     test_chirp();
+    test_evaluation();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

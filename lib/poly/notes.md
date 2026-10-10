@@ -18,6 +18,7 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
   and `pow.hpp`.
 - `product_tree.hpp`: products of many polynomials (issue #74), for multipoint evaluation and
   interpolation next; its own tables and transforms (`TreeTransform`) on the transform layer.
+  `evaluation.hpp`: multipoint evaluation by the transposed product tree (issue #75), on it.
 - `chirp.hpp`: the sequences c s^k q^(k (k - 1) / 2) of the chirp z-transform (issue #76), for
   evaluation and interpolation on geometric sequences; uses `montgomery` from `calculus.hpp`.
 
@@ -461,6 +462,58 @@ exponentiation per call: ~500 cycles, more than a whole transform of 64 words), 
   1x1 17, 2x2 31, 4x4 68, 8x8 196, 16x16 734.
 - Keep(lo, hi, transform) sees every node's final transform at its parent's length: for the
   downward passes of multipoint evaluation (#75) and interpolation (#77).
+- `TreeTransform::inverse_upper` (for #75): the inverse of forward_upper, times c. Radix-2 case:
+  groups 2 and 3, then (u + w, (u - w) / z) with the scale; radix-4 case: groups 4 .. 7 below
+  group 1, then group 1's butterfly with the scale. The bottom reads leaves by their index in the
+  transform of length 2n, so it gets in - n.
+- Placement (for #75): a Keep with `place(lo, mid, hi, words)` gives the room where a node's
+  two children are built, so kept transforms need no copy (a copy of ~12 MB cost ~0.4 ms there);
+  the coefficients for the doubling then take a buffer of their own. `root(transform)` sees the
+  root's product transform. Without them (product_of_polynomial_sequence) the machine code is
+  unchanged (objdump, judge flags, `lc-intel`).
+
+## Multipoint evaluation
+
+`evaluation.hpp`: f(a_i) for m points (issue #75). `PointTree` builds Q = prod (1 - a_i x) with
+the two product trees (lanes: point 8k + l is slot k of lane l, factors 1 - a x of degree 1 even
+for a = 0; top: the 8 lane products), each node's transform at its parent's length built in place
+(`TransformStore`: the children of a node in one room, found by the node's split point).
+- Transposed evaluation (Tellegen's principle; Bostan, Lecerf and Schost): with K = max(n, m8)
+  and G = x^(K-n) rev(f), f(a_i) = [x^(K-1)] G / (1 - a_i x). Node v's window is
+  W_v = (G / Q_v)[K - s_v, K), s_v = deg Q_v; a child's is W_c = (W_v Q_d)[s_d, s_v), exact in a
+  cyclic product of length L >= s_v; a point's window is its value.
+- Root (`divide`): G / Q mod x^K by Karp and Markstein's division with k = ceil(K / 2):
+  h = 1 / Q mod x^k (`inverse`), q0 = G h mod x^k, r = (G - Q q0)[k, K), q1 = h r mod x^(K-k),
+  all products cyclic of length L >= max(2k - 1, K); T_L(Q) is the top tree's root product when
+  the lengths agree. Q in Montgomery form: the quotient carries 2^-32, undone by the descent's c.
+  At K = 2^17: inverse to 2^16 and 7 transforms of 2^17, against inverse to 2^17, 3 transforms
+  of 2^18 and the root's forward (1.7 + 1.17 + 0.12 ms -> 2.3 ms).
+- State of node v (length L): the transform of the window right-aligned in L coefficients, any
+  terms below it. For child x with sibling y, P = state times T_L(Q_y) (stored) is the transform
+  of X = W'_v Q_y mod (x^L - 1); X's top s_x coefficients are W_x (terms below the window stay
+  below: s_x + s_y <= L). Halving: T_(L/2)(X[L/2, L)) = (P_lo - T_(L/2)(X mod (x^(L/2) + 1)))
+  / 2, the second term by `inverse_upper` of P_hi and a forward of length L/2. Per level 2
+  transforms of the level's total length (1 inverse_upper + 1 forward per child) and 2
+  products, against 3 transforms for forward of the window plus an inverse per child. The 1/2
+  becomes a factor 2 per level (u = 1 / factor passed down), undone in the inverse scales where
+  coefficients are needed: X_lo = A - B, X_hi = A + B with A = inverse(P_lo, u / 2),
+  B = inverse_upper(P_hi, -u / 2). Children shorter than L/2 (sizes not powers of two) and the
+  top tree's leaves take coefficients, then a forward.
+- Top tree leaves to lanes: X_hi's top lane_length coefficients per lane, an 8 x 8 transpose per
+  8 coefficients, one lanes forward.
+- Base (lane nodes of degree <= 32): the sub-nodes' products again by `multiply_lanes`
+  (halves), then middle products by schoolbook (`middle_lanes`: 64-bit sums of up to 17
+  products, one Montgomery step, as multiply_lanes) down to single slots, whose windows are the
+  values. Powers of two run level by level (`product_level<D>`, `middle_level<D>`, D fixed);
+  other counts by recursion with loops. Middle products in blocks of B outputs (sums in
+  registers, odd lanes shifted once); `lc-amd`, cycles per level of a 32-slot base, unrolled
+  K + 1 terms per output -> best: D = 16 3366 -> 1269 (plain loops, not inlined; blocks of 3:
+  1375), D = 8 758 -> 580 (B = 3), D = 4 419 -> 374 (B = 4), D = 2 274 -> 255 (B = 2), D = 1 230.
+  A 32-slot base: 7270 -> 4382 cycles (products 1090 of it).
+- Direct (`evaluate_direct`): Horner, 4 chains of 8 points, when n m <= 2^22.
+- Memory at N = M = 2^17: 13 huge pages touched (stored transforms ~12.5 MB: ~1 MB per lane
+  level, ~1 MB per top level). The division and the descent share one scratch; the values go
+  straight into the caller's span when it is 32-byte aligned and m is a multiple of 8.
 
 ## Chirp
 
@@ -933,6 +986,33 @@ products 1.77 and 1.69).
   (problem notes).
 - Checks: `test.cpp` PASS at -O2 (`-march=native` and `-march=x86-64-v3`) and ASan/UBSan
   (`lc-intel`).
+2026-10-10, claude (issue #75, multipoint_evaluation):
+- New `evaluation.hpp` (Multipoint evaluation above); `product_tree.hpp` gains
+  `TreeTransform::inverse_upper` and the placement and root hooks of Keep
+  (product_of_polynomial_sequence: same machine code on `lc-intel`, objdump of judge-flag builds,
+  after keeping its statement order in build(); its tests pass). Tests: inverse_upper against
+  forward_upper (8 .. 2^15 words, c = 1, -1, random; in place); middle_lanes (runtime k, count
+  and the blocks middle_level uses) against scalar sums at the bounds; the tree's product against the
+  naive one; evaluate_tree and evaluate against Horner for all pairs of 34 sizes 1 .. 4097 (four
+  kinds of points: random, zeros and repeats, small, near P - 1), 11 large pairs up to 2^17
+  (N < M, N > M, 1, odd sizes), 40 random. -O2 and ASan/UBSan, `-march=native` and
+  `-march=x86-64-v3` (`lc-intel`).
+- Steps (`lc-amd`, in process, N = M = 2^17, ms; problem notes for whole-process times):
+  descent with a forward of the window and an inverse per child 6.9; halving (inverse_upper +
+  forward per child) 5.85 with the factors 1/2, -8/n in the stored transforms (their copy
+  +0.4); the factors in inverse_upper's scale instead (a factor 2 per level) 6.05 descent, tree
+  -0.3; base level by level with fixed degrees: 1.27 -> 1.06; Karp-Markstein root: inverse +
+  product 2.85 -> 2.48, with the root's product transform 2.28; transforms built in place: tree
+  5.1 -> 4.65; middle products in blocks: base 1.06 -> 0.68, descent 5.7 -> 5.3; division and
+  descent in one scratch: 14 -> 13 huge pages (whole process 0.9802).
+- Profile (rdtsc, warm process, fresh arena, last version): total 10.5; lane tree 2.61, top tree
+  1.20, division ~2.3, descent: top 1.38 (leaf products 0.73), lanes 2.80 (products 0.48,
+  base 0.68, inverse_upper + forward of both trees 1.83).
+- Not kept: the stored transforms' halves scaled by 1/2 and -8/n at copy time (descent 5.85,
+  the copy +0.4 ms: ~3.5 cycles per vector for the Shoup products); middle_lanes<D, D> fully
+  unrolled with all operands in arrays (D = 16: 1035 cycles per call against 621 for plain loops;
+  GCC spilled).
+- Huge-page first touch on `lc-amd`: 0.05-0.075 ms per 2 MB (0.12 for the first); 14 pages here.
 
 2026-10-10, claude (issue #95, owner-lane backlog):
 - `times()` with per-lane factors (#67): new `Factors` (a factor per lane) with its own `times`
@@ -1056,3 +1136,8 @@ products 1.77 and 1.69).
   discrete Fourier transform", 1968; L. Rabiner, R. Schafer, C. Rader, "The chirp z-transform
   algorithm", IEEE Trans. Audio Electroacoustics 17 (1969). The identity i j = t(i + j) - t(i)
   - t(j) (no square root of r) is standard; derived and written here, no code read.
+- Multipoint evaluation as the transpose of the sum of fractions sum_i v_i / (1 - a_i x),
+  middle products down the product tree: A. Bostan, G. Lecerf, E. Schost, "Tellegen's principle
+  into practice", ISSAC 2003 (from memory; not consulted in this round). The halving of a
+  product's transform (P_lo and the transform of X mod (x^(L/2) + 1)), the right-aligned
+  windows and the code derived and written here; no code read.

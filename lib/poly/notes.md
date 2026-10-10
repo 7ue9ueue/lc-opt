@@ -1598,6 +1598,8 @@ product-tree lanes):
     unchanged, pow w = 6 and sqrt w = 8 2% slower. Removing operations from the block kernel does
     not help by itself: it runs at about 1 product per cycle.
   - Inverter half step at the start of each block: 1-2% slower.
+- Merged as #300. CI: exp 0.9904, log 0.9940, pow 0.9971, sqrt 0.9878; all 4 0.9923. exp
+  sparse judged 6-7 ms per dense case (was 7), every run with a launch spike (log in its notes).
 
 ## Sources
 

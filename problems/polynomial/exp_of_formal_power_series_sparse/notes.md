@@ -4,7 +4,9 @@ f with K <= 10 nonzero terms (f[0] = 0), N <= 10^6; print the first N coefficien
 mod 998244353. 10 s. Input is tiny; output up to 10 MB.
 
 Best judged: ours, 7 ms: [409367](https://judge.yosupo.jp/submission/409367) (`main.cpp` of
-#169); no launch spike, clean score 7 ms. Record when opened (issue #70): 39 ms.
+#169); no launch spike, clean score 7 ms. Record when opened (issue #70): 39 ms. `main.cpp` of
+#300 judged 15, 11, 11, 10 ms, each set by launch spikes; its dense cases take 6-7 ms (clean
+score 6 ms in [409631](https://judge.yosupo.jp/submission/409631)).
 
 ## Tests
 
@@ -83,3 +85,18 @@ the slowest: every block still takes reciprocals and the long-tap path).
     `-DHOLONOMIC_CHAINED=0` and `1`, ASan/UBSan (default and `1`); new tests at the chained
     kernel's widest (8 taps at P - 1, with and without slopes); mutations of the chained kernel
     fail them.
+  - Merged as #300. CI: exp 0.9904, log 0.9940, pow 0.9971, sqrt 0.9878; all 4 0.9923.
+  - Submitted (13.8-14.3 MiB, all AC; dense cases 00, 01, 02, 04 in ms; `tools/spikes.py`):
+    [409625](https://judge.yosupo.jp/submission/409625) 15 ms: 15 (spike, peers 7), 6, 6, 6;
+    min_K_00 10 (spike). [409628](https://judge.yosupo.jp/submission/409628) 11 ms: 7, 6, 6, 6;
+    max_random_03 11 (spike), clean 7. [409631](https://judge.yosupo.jp/submission/409631) 11 ms:
+    6, 6, 6, 6; random_00 11 and small_N_04 9 (spikes), clean 6.
+    [409632](https://judge.yosupo.jp/submission/409632) 10 ms: 7, 7, 6, 6; small_N_01 10
+    (spike), clean 7. Was 7 on all four (409367). Best judged stays 7 ms; the fifth submission
+    is left unused (a clean run with every dense case at 6: about 1 in 10).
+- Next: the chained kernel is latency-bound (2.01 ms against 1.77 without the dependency), so
+  independent work fits in its gaps: the formatting of the previous chunk (0.65 ms; fused, it
+  did not pay for inv, whose kernel is throughput-bound), or the table of even reciprocals (a
+  separate pass at each window start). w = 4 (small_dense_00, 1.98 ms) stays on the block
+  kernel. max_random (3.6 ms against a 1.4 ms floor) computes reciprocals and long-tap blocks for
+  output that is mostly zero; not the slowest case.

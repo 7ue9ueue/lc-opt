@@ -1658,7 +1658,10 @@ product-tree lanes):
   outputs equal): exp 0.9947 warm, 0.9940 fresh; power 0.9958. `judge.py bench` exp 61 rounds
   16.05 -> 16.00 ms (0.9978). Not made in `transform.hpp`: that re-bundles every lib/poly problem
   for 0.06 ms of exp. Mutations (full stores past the half: ASan error; the mask one lane short;
-  the upper half's difference reversed, radix 2 and radix 4) fail the tests.
+  the upper half's difference reversed, radix 2 and radix 4) fail the tests. Merged as #319.
+  CI: exp 0.9971, pow 1.0017, compositional_inverse 1.0000, compositional_inverse_large
+  0.9996; all 4 0.9996. Judged: exp [409662](https://judge.yosupo.jp/submission/409662) AC
+  16 ms (1 of the 9 largest cases at 16, 8 at 15).
 - Counted, not built: fusing an inverse's top level with the next forward's (inv's `step.hpp`)
   at block 2's T(r_lo), block 3's T(g_2) and T(v): one pass over m words each, about 0.01 ms
   at m = 2^18 (T of a half-zero source 0.288 against 0.299 ms for a full one).

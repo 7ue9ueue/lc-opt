@@ -18,7 +18,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [convolution_mod_2_64](problems/convolution/convolution_mod_2_64) | [43 ms](https://judge.yosupo.jp/submission/409346) | 76 ms |
 | [convolution_F_2_64](problems/convolution/convolution_F_2_64) | [42 ms](https://judge.yosupo.jp/submission/409339) | 409 ms |
 | [bitwise_and_convolution](problems/convolution/bitwise_and_convolution) | [12 ms](https://judge.yosupo.jp/submission/409202) | 26 ms |
-| [bitwise_xor_convolution](problems/convolution/bitwise_xor_convolution) | [14 ms](https://judge.yosupo.jp/submission/409379) | 25 ms |
+| [bitwise_xor_convolution](problems/convolution/bitwise_xor_convolution) | [13 ms](https://judge.yosupo.jp/submission/409428) | 25 ms |
 | [gcd_convolution](problems/convolution/gcd_convolution) | [14 ms](https://judge.yosupo.jp/submission/409380) | 37 ms |
 | [lcm_convolution](problems/convolution/lcm_convolution) | [16 ms](https://judge.yosupo.jp/submission/409381) | 37 ms |
 | [mul_mod2n_convolution](problems/convolution/mul_mod2n_convolution) | [21 ms](https://judge.yosupo.jp/submission/409247) | 81 ms |
@@ -39,9 +39,11 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [exp_of_formal_power_series_sparse](problems/polynomial/exp_of_formal_power_series_sparse) | [7 ms](https://judge.yosupo.jp/submission/409367) | 39 ms |
 | [log_of_formal_power_series_sparse](problems/polynomial/log_of_formal_power_series_sparse) | [14 ms](https://judge.yosupo.jp/submission/409396) | 38 ms |
 | [pow_of_formal_power_series_sparse](problems/polynomial/pow_of_formal_power_series_sparse) | [13 ms](https://judge.yosupo.jp/submission/409426) | 43 ms |
+| [sqrt_of_formal_power_series_sparse](problems/polynomial/sqrt_of_formal_power_series_sparse) | [9 ms](https://judge.yosupo.jp/submission/409443) | 49 ms |
 
 Times are the judge's, for the slowest test, checked against the judge's API on 2026-10-10.
 Each time links to its submission.
+Per-machine and per-test times: [`SPEED.md`](SPEED.md).
 
 Open problems: [issues](https://github.com/7ue9ueue/lc-opt/issues).
 

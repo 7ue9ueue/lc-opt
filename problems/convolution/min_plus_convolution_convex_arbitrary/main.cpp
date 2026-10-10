@@ -1616,7 +1616,7 @@ std::size_t search(const Problem& p, std::size_t k, std::size_t lo, std::size_t 
 // the columns at most every value after them. Stops when there are more than 32 + 1/16 of the
 // columns scanned: the candidates are then dense.
 struct Records {
-    u32* out;
+    u32* out;            // 8 words of slack
     std::size_t origin;  // first column scanned
     u32 limit = kNone;   // a column is a record if its value is below limit
     u32 last = 0;        // the last record
@@ -1630,23 +1630,54 @@ struct Records {
     }
 };
 
+// Lane numbers of the set bits of each 8-bit mask, one per byte: ascending, then descending.
+constexpr auto kLanes = [] {
+    std::array<std::array<std::uint64_t, 256>, 2> t{};
+    for (unsigned mask = 0; mask < 256; ++mask)
+        for (unsigned i = 0, up = 0, down = 0; i < 8; ++i) {
+            if (mask >> i & 1) t[0][mask] |= std::uint64_t(i) << 8 * up++;
+            if (mask >> (7 - i) & 1) t[1][mask] |= std::uint64_t(7 - i) << 8 * down++;
+        }
+    return t;
+}();
+
+// Record lanes (bits 0-7) of chunk v given limit (every lane): forward, v[i] < min(limit, v[0, i));
+// backward, v[i] < min(limit, v(i, 8) + 1). least: the least value of the chunk, every lane.
+// Values < 2^31: signed compares are exact.
+template <bool Backward>
+unsigned record_lanes(__m256i v, __m256i limit, __m256i& least) {
+    const auto spread = [](__m256i x, __m256i from) { return _mm256_min_epu32(x, _mm256_permutevar8x32_epi32(x, from)); };
+    if constexpr (!Backward) {
+        const __m256i down = _mm256_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6);
+        const __m256i prefix = spread(spread(spread(v, down), _mm256_setr_epi32(0, 1, 0, 1, 2, 3, 4, 5)),
+                                      _mm256_setr_epi32(0, 1, 2, 3, 0, 1, 2, 3));
+        const __m256i before = _mm256_min_epu32(limit, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(prefix, down), limit, 0x01));
+        least = _mm256_permutevar8x32_epi32(prefix, _mm256_set1_epi32(7));
+        return unsigned(_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(before, v))));
+    } else {
+        const __m256i up = _mm256_setr_epi32(1, 2, 3, 4, 5, 6, 7, 7);
+        const __m256i suffix = spread(spread(spread(v, up), _mm256_setr_epi32(2, 3, 4, 5, 6, 7, 6, 7)),
+                                      _mm256_setr_epi32(4, 5, 6, 7, 4, 5, 6, 7));
+        const __m256i after_plus = _mm256_permutevar8x32_epi32(_mm256_add_epi32(suffix, _mm256_set1_epi32(1)), up);
+        const __m256i after = _mm256_min_epu32(limit, _mm256_blend_epi32(after_plus, limit, 0x80));
+        least = _mm256_permutevar8x32_epi32(suffix, _mm256_setzero_si256());
+        return unsigned(_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(after, v))));
+    }
+}
+
 // Records of row k among the lanes of chunk j..j+7 in mask (bits 0-7); false if they overflow.
 template <bool Backward>
 bool chunk_records(const Problem& p, std::size_t k, std::size_t j, unsigned mask, Records& r) {
-    const __m256i v = row_chunk(p.a, p.b, k, j);
-    // Values of valid columns are < 2^31, so the signed compare is exact.
-    const __m256i below = _mm256_cmpgt_epi32(_mm256_set1_epi32(int(r.limit)), v);
-    unsigned lanes = unsigned(_mm256_movemask_ps(_mm256_castsi256_ps(below))) & mask;
-    if (!lanes) [[likely]] return true;
-    alignas(32) u32 values[8];
-    _mm256_store_si256(reinterpret_cast<__m256i*>(values), v);
-    for (; lanes; lanes &= mask) {
-        const unsigned lane = Backward ? 31 - unsigned(std::countl_zero(lanes)) : unsigned(std::countr_zero(lanes));
-        mask &= Backward ? (1u << lane) - 1 : ~0u << (lane + 1);
-        if (values[lane] < r.limit && !r.add<Backward>(j + lane, values[lane])) return false;
-        lanes = unsigned(_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(_mm256_set1_epi32(int(r.limit)), v))));
-    }
-    return true;
+    const __m256i v = row_chunk(p.a, p.b, k, j), limit = _mm256_set1_epi32(int(r.limit));
+    if (!(unsigned(_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(limit, v)))) & mask)) [[likely]] return true;
+    __m256i least;
+    const unsigned lanes = record_lanes<Backward>(v, limit, least) & mask;  // not 0: the first lane below limit
+    const __m256i numbers = _mm256_cvtepu8_epi32(_mm_cvtsi64_si128(std::int64_t(kLanes[Backward][lanes])));
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(r.out + r.count), _mm256_add_epi32(numbers, _mm256_set1_epi32(int(j))));
+    r.count += unsigned(std::popcount(lanes));
+    r.limit = u32(_mm256_cvtsi256_si32(least)) + Backward;
+    r.last = u32(j + (Backward ? unsigned(std::countr_zero(lanes)) : 31 - unsigned(std::countl_zero(lanes))));
+    return r.count <= 32 + (Backward ? r.origin - j : j - r.origin) / 16;
 }
 
 // Records of row k over the valid columns [lo, hi], in chunks; false if they overflow.

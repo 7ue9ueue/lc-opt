@@ -38,6 +38,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [inv_of_formal_power_series_sparse](problems/polynomial/inv_of_formal_power_series_sparse) | [10 ms](https://judge.yosupo.jp/submission/409351) | 24 ms |
 | [exp_of_formal_power_series_sparse](problems/polynomial/exp_of_formal_power_series_sparse) | [7 ms](https://judge.yosupo.jp/submission/409367) | 39 ms |
 | [log_of_formal_power_series_sparse](problems/polynomial/log_of_formal_power_series_sparse) | [14 ms](https://judge.yosupo.jp/submission/409396) | 38 ms |
+| [pow_of_formal_power_series_sparse](problems/polynomial/pow_of_formal_power_series_sparse) | [13 ms](https://judge.yosupo.jp/submission/409426) | 43 ms |
 
 Times are the judge's, for the slowest test, checked against the judge's API on 2026-10-10.
 Each time links to its submission.

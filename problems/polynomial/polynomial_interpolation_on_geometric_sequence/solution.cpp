@@ -5,7 +5,8 @@
 //   c_l = (-a)^-l / Q_l sum_(k >= l) D_k K_(k-l),  D_k = (-1)^k Q_k r^-t(k) E_k.
 // Both sums are the lower half of a product with K, one cyclic convolution each of length
 // L = 2^lg >= 2N in ntt::Product's layout (lib/ntt/product.hpp). The second reuses K's
-// transform: five transforms in all. Q, 1/Q and the chirps come from scans in 32 lanes.
+// transform down to its leaves (bottom.hpp): five transforms in all. Q, 1/Q and the chirps come
+// from scans in 32 lanes.
 // Output in fixed-width fields (problems/convolution/convolution_mod/fields.hpp).
 #include <sys/mman.h>
 #include <unistd.h>
@@ -21,14 +22,17 @@
 #include "lib/ntt/product.hpp"
 #include "lib/poly/calculus.hpp"
 #include "problems/convolution/convolution_mod/fields.hpp"
+#include "bottom.hpp"
 
 namespace {
 
 using ntt::detail::add;
 using ntt::detail::broadcast;
+using ntt::detail::diff;
 using ntt::detail::Factor;
 using ntt::detail::kP;
 using ntt::detail::kR;
+using ntt::detail::multiply;
 using ntt::detail::multiply_mod;
 using ntt::detail::power;
 using ntt::detail::reduce;
@@ -37,6 +41,7 @@ using ntt::detail::Vec;
 using poly::detail::load;
 using poly::detail::load_unaligned;
 using poly::detail::low;
+using poly::detail::low_difference;
 using poly::detail::montgomery;
 using poly::detail::store;
 using poly::detail::store_unaligned;
@@ -56,18 +61,22 @@ std::uint32_t mont(std::uint32_t x) { return multiply_mod(x, kR); }  // x 2^32 m
 Vec reverse(Vec x) { return _mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0)); }
 
 // Rows become columns: lane l of r[t] moves to lane t of r[l], t, l < 8.
+// Unrolled, so that the arrays stay in registers.
 [[gnu::always_inline]] inline void transpose(Vec* r) {
     Vec t[8], u[8];
+#pragma GCC unroll 4
     for (int i = 0; i < 8; i += 2) {
         t[i] = _mm256_unpacklo_epi32(r[i], r[i + 1]);
         t[i + 1] = _mm256_unpackhi_epi32(r[i], r[i + 1]);
     }
+#pragma GCC unroll 2
     for (int i = 0; i < 8; i += 4) {
         u[i] = _mm256_unpacklo_epi64(t[i], t[i + 2]);
         u[i + 1] = _mm256_unpackhi_epi64(t[i], t[i + 2]);
         u[i + 2] = _mm256_unpacklo_epi64(t[i + 1], t[i + 3]);
         u[i + 3] = _mm256_unpackhi_epi64(t[i + 1], t[i + 3]);
     }
+#pragma GCC unroll 4
     for (int i = 0; i < 4; ++i) {
         r[i] = _mm256_permute2x128_si256(u[i], u[i + 4], 0x20);
         r[i + 4] = _mm256_permute2x128_si256(u[i], u[i + 4], 0x31);
@@ -143,8 +152,9 @@ public:
                 g[v] = times(g[v], ratio);
             }
         };
-        for (std::size_t b = 0; b < chunk_; b += 8) {
-            const std::size_t j0 = kForward ? b : chunk_ - 8 - b;
+        const std::size_t chunk = chunk_;
+        for (std::size_t b = 0; b < chunk; b += 8) {
+            const std::size_t j0 = kForward ? b : chunk - 8 - b;
             // A branch per step would keep x and g in memory: the block of the restart runs apart.
             if (restart - j0 < 8) {
 #pragma GCC unroll 1
@@ -157,9 +167,14 @@ public:
 #pragma GCC unroll 8
                 for (int i = 0; i < 8; ++i) step(kForward ? i : 7 - i);
             }
+#pragma GCC unroll 4
             for (int v = 0; v < 4; ++v) {
-                transpose(block[v]);
-                for (int l = 0; l < 8; ++l) put(start(8 * v + l) + j0, block[v][l]);
+                Vec rows[8];
+#pragma GCC unroll 8
+                for (int t = 0; t < 8; ++t) rows[t] = block[v][t];
+                transpose(rows);
+#pragma GCC unroll 1
+                for (int l = 0; l < 8; ++l) put((8 * v + l) * chunk + j0, rows[l]);
             }
         }
     }
@@ -177,10 +192,10 @@ private:
     std::size_t chunk_, partial_, first_padding_;
 };
 
-// ntt::detail::Subtrees (lib/ntt/product.hpp) with an option to reuse b's transform: without
-// kForwardB, b already holds its transform down to the level above the bottom stage, from an
-// earlier visit with kForwardB; the bottom stage reads b and leaves it unchanged. Subtrees of at
-// least 16 vectors, so tiles start at even group indices.
+// ntt::detail::Subtrees (lib/ntt/product.hpp) with an option to reuse b's transform: with
+// kForwardB, the bottom stage leaves b's leaves (its last forward level) in b (bottom.hpp: keep);
+// without, b holds them from such a visit and only a is transformed (reuse). Subtrees of at least
+// 16 vectors, so tiles start at even group indices.
 template <bool kForwardB>
 class Subtrees {
 public:
@@ -236,13 +251,15 @@ private:
     // The next two groups' forward half overlaps the current two's products and inverse.
     void bottom(Vec* a, Vec* b, std::size_t nv, std::size_t first) const {
         Leaves leaves[2][2];
-        ntt::product_kernels::bottom_first(a, b, leaves[0], r_ + slot(first), r_ + slot(2 * first));
+        if (kForwardB) bottom::first_keep(a, b, leaves[0], r_ + slot(first), r_ + slot(2 * first));
+        else bottom::first_reuse(a, b, leaves[0], r_ + slot(first), r_ + slot(2 * first));
         for (std::size_t j = 0, k = first;; j += 8, k += 2) {
             const std::size_t cur = j / 8 % 2, next = cur ^ 1;
-            const std::uint32_t *ix = ir_ + slot(k), *iy = ir_ + slot(2 * k);
+            const std::uint32_t *ix = ir_ + slot(k), *iy = ir_ + slot(2 * k), *x = r_ + slot(k + 2),
+                                *y = r_ + slot(2 * k + 4);
             if (j + 8 == nv) return ntt::product_kernels::bottom_last(a + j, leaves[cur], ix, iy);
-            ntt::product_kernels::bottom_both(a + j + 8, b + j + 8, leaves[next], r_ + slot(k + 2),
-                                              r_ + slot(2 * k + 4), a + j, leaves[cur], ix, iy);
+            if (kForwardB) bottom::both_keep(a + j + 8, b + j + 8, leaves[next], x, y, a + j, leaves[cur], ix, iy);
+            else bottom::both_reuse(a + j + 8, b + j + 8, leaves[next], x, y, a + j, leaves[cur], ix, iy);
         }
     }
 
@@ -250,15 +267,16 @@ private:
 };
 
 // Interpolation on n >= 3 points (so a, r != 0 and r^k != 1 for 0 < k < n). L = 2^lg >= 2n with
-// lg even and >= 10 (L / 8 = 2 * 4^j vectors, subtrees of at least 16). Buffers a, b, d of L
-// words: y, Y and finally c in a; K and its transform in b; D in d. One mapping in huge pages;
-// single use.
+// lg even and >= 10 (L / 8 = 2 * 4^j vectors, subtrees of at least 16). Buffers a and b of L
+// words. In a: y, Y's transform and the first product, with E in a[L/2, L); then D in a[0, L/2),
+// its transform and the second product, with G in a[L/2, L); then c in a[0, n). In b: K's
+// transform. One mapping in huge pages; single use.
 class Interpolation {
 public:
     explicit Interpolation(std::size_t n) : n_(n), lanes_(n) {
         lg_ = std::max(10, int(std::bit_width(2 * n - 1)));
         lg_ += lg_ % 2;
-        const std::size_t len = length(), words = 3 * (len + kPadding) + 2 * ntt::detail::table_words(lg_);
+        const std::size_t len = length(), words = 2 * (len + kPadding) + 2 * ntt::detail::table_words(lg_);
         constexpr std::size_t kHuge = std::size_t(1) << 21;
         bytes_ = (words * sizeof(std::uint32_t) + fields::kTextBytes + kHuge - 1) / kHuge * kHuge + kHuge;
         region_ = ::mmap(nullptr, bytes_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -269,8 +287,7 @@ public:
         ::madvise(a_, bytes_ - kHuge, MADV_HUGEPAGE);
 #endif
         b_ = a_ + len + kPadding;  // a different cache set from a at equal offsets
-        d_ = b_ + len + kPadding;
-        roots_ = d_ + len + kPadding;
+        roots_ = b_ + len + kPadding;
         inverse_roots_ = roots_ + ntt::detail::table_words(lg_);
         text_ = reinterpret_cast<char*>(inverse_roots_ + ntt::detail::table_words(lg_));
     }
@@ -295,13 +312,12 @@ public:
         kernel(r, r_inverse);
         auto* av = reinterpret_cast<Vec*>(a_);
         auto* bv = reinterpret_cast<Vec*>(b_);
-        auto* dv = reinterpret_cast<Vec*>(d_);
         ntt::detail::forward_radix8(av, q, roots_);
         ntt::detail::forward_radix8(bv, q, roots_);
         product<true>(av, bv, q);
         differences(r, r_inverse);
-        ntt::detail::forward_radix8(dv, q, roots_);
-        product<false>(dv, bv, q);
+        ntt::detail::forward_radix8(av, q, roots_);
+        product<false>(av, bv, q);
         coefficients(a, r, r_inverse);
         return a_;
     }
@@ -394,8 +410,8 @@ private:
         if (n_ < end) std::memset(f + n_, 0, (end - n_) * sizeof(std::uint32_t));
     }
 
-    // D_(n-1-k) = (-1)^k Q_k r^-t(k) E_k in d, k < n, from E's halves in a. Forward scan:
-    // x_(k+1) = x_k (r - r^-k) with g_k = -r^-k 2^32, x_k = (-1)^k Q_k r^-t(k) (L / 8)^-1 2^64.
+    // D_(n-1-k) = (-1)^k Q_k r^-t(k) E_k in a, k < n, zero up to L/2, from E in a[L/2, L). Forward
+    // scan: x_(k+1) = x_k (r - r^-k) with g_k = -r^-k 2^32, x_k = (-1)^k Q_k r^-t(k) (L / 8)^-1 2^64.
     void differences(std::uint32_t r, std::uint32_t r_inverse) {
         const Lanes& lanes = lanes_;
         const std::uint32_t scale = output_scale();
@@ -405,20 +421,21 @@ private:
             return State{multiply_mod(multiply_mod(q, power_of(r_inverse, triangle(k))), scale),
                          negate(mont(power_of(r_inverse, k)))};
         };
-        const std::uint32_t *u = a_, *w = a_ + length() / 2;
-        std::uint32_t* const d = d_;
+        const std::uint32_t* const u = a_ + length() / 2;
+        std::uint32_t* const d = a_;
         const std::size_t n = n_;
         lanes.scan<true>(initial, {}, mont(r), r_inverse, [=](std::size_t k, Vec x) {
             if (k >= n) return;
-            const Vec e = reduce(montgomery(low(add(load(u + k), load(w + k))), x), kP);
+            const Vec e = reduce(montgomery(load(u + k), x), kP);
             if (k + 8 <= n) return store_unaligned(d + n - 8 - k, reverse(e));
             alignas(32) std::uint32_t lanes_e[8];
             store(lanes_e, e);
             for (std::size_t i = 0; k + i < n; ++i) d[n - 1 - k - i] = lanes_e[i];
         });
+        std::memset(a_ + n_, 0, (length() / 2 - n_) * sizeof(std::uint32_t));
     }
 
-    // c_l = (-a)^-l / Q_l G_(n-1-l) in a, l < n, from G's halves in d. Backward scan:
+    // c_l = (-a)^-l / Q_l G_(n-1-l) in a, l < n, from G in a[L/2, L). Backward scan:
     // x_(l-1) = x_l (a r^l - a) with g_l = a r^l 2^32, x_l = (-a)^-l / Q_l (L / 8)^-1 2^64.
     void coefficients(std::uint32_t a, std::uint32_t r, std::uint32_t r_inverse) {
         const Lanes& lanes = lanes_;
@@ -428,25 +445,43 @@ private:
             if (l % 2) x = negate(x);
             return State{x, mont(multiply_mod(a, power_of(r, l)))};
         };
-        const std::uint32_t *u = d_, *w = d_ + length() / 2;
+        const std::uint32_t* const u = a_ + length() / 2;
         std::uint32_t* const c = a_;
         const std::ptrdiff_t n = std::ptrdiff_t(n_);
         lanes.scan<false>([&](int s) { return initial(lanes.end(s), s); }, initial(n_ - 1, Lanes::kCount - 1),
                           kP - mont(a), r_inverse, [=](std::size_t l, Vec x) {
                               if (std::ptrdiff_t(l) >= n) return;
-                              const std::ptrdiff_t at = n - 8 - std::ptrdiff_t(l);  // >= -7: reads b's padding
-                              const Vec g = reverse(low(add(load_unaligned(u + at), load_unaligned(w + at))));
+                              const std::ptrdiff_t at = n - 8 - std::ptrdiff_t(l);  // >= -7: in a
+                              const Vec g = reverse(load_unaligned(u + at));
                               store(c + l, reduce(montgomery(g, x), kP));
                           });
     }
 
+    // The lower half of a b in a[L/2, L), < 2P, before the scale (L / 8)^-1 2^32; ntt::Product's
+    // layout.
     template <bool kForwardB>
     void product(Vec* a, Vec* b, std::size_t q) const {
         const Subtrees<kForwardB> subtrees(roots_, inverse_roots_);
-        for (std::size_t c = 0; c < 4; ++c) subtrees.visit(a + c * q, b + c * q, q, c);
-        ntt::kernels::inverse_identity(a, q, inverse_roots_);
-        for (std::size_t c = 4; c < 8; ++c) subtrees.visit(a + c * q, b + c * q, q, c);
-        ntt::kernels::inverse(a + 4 * q, q, inverse_roots_ + slot(1), inverse_roots_ + slot(2));
+        for (std::size_t c = 0; c < 8; ++c) subtrees.visit(a + c * q, b + c * q, q, c);
+        top_lower(a, q);
+    }
+
+    // The top inverse levels for the lower half only: blocks a[t q, (t + 1) q) hold the identity
+    // group (t < 4) and group 1 (t >= 4), < 2P; block 4 + m gets quarter m of the lower half, < 2P:
+    // kernels.hpp's inverse_identity and inverse, then the sum of the last radix-2 level.
+    void top_lower(Vec* a, std::size_t q) const {
+        const std::uint32_t* const ir = inverse_roots_;
+        const Factor x(ir[1], ir[9]), y(ir[2], ir[10]), z(ir[3], ir[11]);  // identity group: z = x
+        for (Vec* f = a; f != a + q; ++f) {
+            const Vec ab = low(add(f[0], f[q])), cd = low(add(f[2 * q], f[3 * q]));
+            const Vec amb = low_difference(f[0], f[q]), cmd = multiply(diff(f[2 * q], f[3 * q]), x);
+            const Vec gab = low(add(f[4 * q], f[5 * q])), gcd = low(add(f[6 * q], f[7 * q]));
+            const Vec gamb = multiply(diff(f[4 * q], f[5 * q]), y), gcmd = multiply(diff(f[6 * q], f[7 * q]), z);
+            f[4 * q] = low(add(low(add(ab, cd)), low(add(gab, gcd))));
+            f[5 * q] = low(add(low(add(amb, cmd)), low(add(gamb, gcmd))));
+            f[6 * q] = low(add(low_difference(ab, cd), multiply(diff(gab, gcd), x)));
+            f[7 * q] = low(add(low_difference(amb, cmd), multiply(diff(gamb, gcmd), x)));
+        }
     }
 
     std::size_t n_;
@@ -454,7 +489,7 @@ private:
     int lg_;
     void* region_;
     std::size_t bytes_;
-    std::uint32_t *a_, *b_, *d_, *roots_, *inverse_roots_;
+    std::uint32_t *a_, *b_, *roots_, *inverse_roots_;
     char* text_;
     std::array<std::uint32_t, Lanes::kCount> q_end_, q_end_inverse_;
 };

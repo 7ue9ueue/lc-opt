@@ -74,13 +74,14 @@ Checked on the judge with `tools/isa_probe.cpp` (aplusb, [409083](https://judge.
 |---|---|
 | Mac (ARM64) | Edit, build, correctness. x86 binaries run under Rosetta; never time them. |
 | GCP `lc-intel` (c4-standard-4, europe-west2-c, Xeon 8581C, PMU on) | Profiling with `perf`: core events and top-down. No L3 events. |
-| GCP `lc-amd` (c2d-standard-4, europe-west2-b, EPYC 7B13, the judge's CPU) | Judge-like timing. No hardware counters. |
+| GCP `lc-amd` (c2d-standard-4, europe-west2-b, EPYC 7B13, the judge's CPU) | Builds and tests. Same CPU and setup as `lc-bench`. No hardware counters. |
 | GCP `lc-bench` (c2d-standard-4, europe-west2-b, EPYC 7B13, the judge's CPU) | Timing only, so builds and tests elsewhere do not disturb it. No hardware counters. |
 | GitHub Actions (EPYC 7763 Zen 3, plus other CPUs) | Timing. Confirm wins on the judge's core without losses elsewhere. |
 
 - VMs are in project `project-c73e6eb1-e167-4d7a-a31`, region `europe-west2` (London). Reach them with
   `gcloud compute ssh <name> --zone=<zone>`. All run Ubuntu 24.04 with Docker and the pinned `gcc:15.2.0` image.
-- Off the judge, build with `-march=x86-64-v3` (AVX2, no AVX-512). On `lc-amd`, use the judge's exact command.
+- Off the judge, build with `-march=x86-64-v3` (AVX2, no AVX-512). On `lc-amd` and `lc-bench`, use the judge's
+  exact command.
 - On a VM, wrap every timing or profiling run in `flock /tmp/bench.lock`. Builds and tests may run in parallel.
 - Keep VMs running; do not stop them.
 - Need more capacity? Create a VM yourself: same project and region, Ubuntu 24.04, name `lc-<purpose>`.
@@ -103,7 +104,7 @@ They need Linux and Docker: run them on a VM or in CI, not on the Mac.
   and AMD/Intel times per problem; `bench/<problem>.md`, every test with an I/O floor. Read-only, no submissions.
 - `tools/isa_probe.cpp`: submit as aplusb to re-check the judge's instruction set. AC means every check holds;
   otherwise the answer is off by a bitmask of the failed checks, listed on stderr.
-- Both VMs have the repo at `~/lc-opt`. Run `git fetch` there and check out your branch.
+- Every VM has the repo at `~/lc-opt`. Run `git fetch` there and check out your branch.
 - `main` is protected. Every change, docs included, goes through a pull request; enable
   `gh pr merge --auto --squash`. CI (`.github/workflows/verify.yml`) tests each changed `main.cpp` and times it
   against `main` on 3 machines. It merges only if correct and not slower: geomean over machines, then over problems.

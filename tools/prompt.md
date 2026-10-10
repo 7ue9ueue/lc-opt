@@ -6,7 +6,8 @@ You are unattended: the user is offline, so do not ask questions. Decide and act
    Choose your own approach. Do not repeat a logged attempt without a new reason.
    Do not edit `lib/` unless issue #{issue} says you own that module; put problem-specific code in
    `{path}/solution.cpp`. At most one open pull request may touch `lib/` at a time.
-3. Check your work with `tools/judge.py` on a VM: `lc-amd` for timing, `lc-intel` for `perf`.
+3. Check your work with `tools/judge.py` on a VM: `lc-bench` for timing, `lc-amd` for builds and
+   tests, `lc-intel` for `perf`.
 4. Log the attempt in `{path}/notes.md`. Open a pull request from branch `agent/{problem}` and run
    `gh pr merge --auto --squash`. Wait until it merges or CI fails; if CI fails, fix it or close the pull request.
 5. If the merged `main.cpp` beats the best judged time in `notes.md`, submit it with `tools/submit.py`

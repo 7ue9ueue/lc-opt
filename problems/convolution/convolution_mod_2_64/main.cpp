@@ -1150,8 +1150,9 @@ inline std::size_t format(char* text, const std::uint64_t* values, std::size_t c
 //   Padded{x, n}   x[i] < 2p; readable and zero up to max(n rounded up to 8, 2^lg / 2)
 //   Bounded{x, n}  x[i] < 2p; no word past n is read
 //   Wide{x, n}     any 64-bit x[i], p > 2^29; readable and zero up to max(n rounded up to 8, 2^lg / 2)
-// out and work hold 2^lg words plus kPadding (the kernels read 4 bytes past). work may be b's
-// storage (a's too for Wide): each input is read in full before its own array or work is written.
+// out and work hold 2^lg words plus kPadding (the kernels read 4 bytes past). In place: work may
+// be b's storage for Padded (b's first level reads each vector before it writes it), or a's for
+// Wide (a is read in full before work is written). Not b's for Wide: its words are twice as wide.
 // Also exported: the AVX2 helpers broadcast, add, diff, reduce, Factor and multiply.
 
 #include <immintrin.h>
@@ -3306,7 +3307,8 @@ private:
 
 // The narrowed input into dst[0, extent), zero past its count.
 template <class Input>
-inline void narrow_into(std::uint32_t* dst, std::size_t extent, const Narrow<Input>& narrow) {
+inline void narrow_into(std::uint32_t* dst, std::size_t extent, Input in, const Modulus& m) {
+    const Narrow<Input> narrow(m, in);
     std::size_t v = 0;
     for (; 8 * v < narrow.count(); ++v) _mm256_storeu_si256(reinterpret_cast<Vec*>(dst + 8 * v), narrow(v));
     if (8 * v < extent) std::memset(dst + 8 * v, 0, (extent - 8 * v) * sizeof(std::uint32_t));
@@ -3315,14 +3317,14 @@ inline void narrow_into(std::uint32_t* dst, std::size_t extent, const Narrow<Inp
 // kernels::forward_identity() on the narrowed input, f of 4h vectors; z = r[1]. Sparse: the
 // input's upper half is zero, and one pass narrows and transforms.
 template <class Input>
-inline void forward_radix4(Vec* f, std::size_t h, bool sparse, const Narrow<Input>& narrow,
-                           const std::uint32_t* roots, std::uint32_t modulus) {
+inline void forward_radix4(Vec* f, std::size_t h, bool sparse, Input in, const std::uint32_t* roots, const Modulus& m) {
     if (!sparse) {
-        narrow_into(reinterpret_cast<std::uint32_t*>(f), 32 * h, narrow);
+        narrow_into(reinterpret_cast<std::uint32_t*>(f), 32 * h, in, m);
         return kernels::forward_identity(f, h, roots);
     }
-    const Factor z(roots[1], roots[9], modulus);
-    const Vec p2 = broadcast(2 * modulus);
+    const Narrow<Input> narrow(m, in);
+    const Factor z(roots[1], roots[9], m.p);
+    const Vec p2 = broadcast(2 * m.p);
     for (std::size_t j = 0; j < h; ++j) {
         const Vec a = narrow(j), b = narrow(j + h), zb = multiply(b, z);  // < 4p
         f[j] = add(a, b), f[j + h] = diff(a, b, p2), f[j + 2 * h] = add(a, zb), f[j + 3 * h] = diff(a, zb, p2);
@@ -3333,10 +3335,10 @@ inline void forward_radix4(Vec* f, std::size_t h, bool sparse, const Narrow<Inpu
 // 2^lg = 2 * 4^j: one pass narrows x and writes the first radix-4 group of both halves of f
 // (as convolution_mod's Product). Outputs < 4p.
 template <class Input>
-inline void forward_radix8(Vec* f, std::size_t q, const std::uint32_t* roots, const Narrow<Input>& narrow,
-                           std::uint32_t modulus) {
-    const Factor i(roots[1], roots[9], modulus), y(roots[2], roots[10], modulus), z(roots[3], roots[11], modulus);
-    const Vec p = broadcast(modulus), p2 = add(p, p);
+inline void forward_radix8(Vec* f, std::size_t q, const std::uint32_t* roots, Input in, const Modulus& m) {
+    const Narrow<Input> narrow(m, in);
+    const Factor i(roots[1], roots[9], m.p), y(roots[2], roots[10], m.p), z(roots[3], roots[11], m.p);
+    const Vec p = broadcast(m.p), p2 = add(p, p);
     for (std::size_t j = 0; j < q; ++j) {
         const Vec f0 = narrow(j), f1 = narrow(j + q), f2 = narrow(j + 2 * q), f3 = narrow(j + 3 * q);
         const Vec g0 = add(f0, f2), g1 = add(f1, f3);
@@ -3366,7 +3368,7 @@ public:
 
     // a b factor mod p into out (canonical, 2^lg words); work: 2^lg words, destroyed.
     template <class Input>
-    void multiply(const Input& a_in, const Input& b_in, std::uint32_t* out, std::uint32_t* work, const Modulus& m,
+    void multiply(Input a_in, Input b_in, std::uint32_t* out, std::uint32_t* work, const Modulus& m,
                   std::uint32_t factor) const {
         using namespace detail;
         m.select();
@@ -3378,12 +3380,11 @@ public:
         const std::uint32_t scale = m.multiply(m.multiply(m.inverse(std::uint32_t(nv)), m.r), factor);
         auto* a = reinterpret_cast<Vec*>(out);
         auto* b = reinterpret_cast<Vec*>(work);
-        const detail::Narrow<Input> narrow_a(m, a_in), narrow_b(m, b_in);
         const bool sparse_a = a_in.count <= len / 2, sparse_b = b_in.count <= len / 2;
         if (std::countr_zero(nv) % 2 == 1 && nv >= 32 && sparse_a && sparse_b) {  // nv = 2 * 4^j
             const std::size_t h = nv / 2, q = nv / 8;
-            forward_radix8(a, q, roots_, narrow_a, m.p);
-            forward_radix8(b, q, roots_, narrow_b, m.p);
+            forward_radix8(a, q, roots_, a_in, m);
+            forward_radix8(b, q, roots_, b_in, m);
             for (std::size_t c = 0; c < 4; ++c) recursion.visit(a + c * q, b + c * q, q, c);
             kernels::inverse_identity(a, q, inverse_roots_);
             for (std::size_t c = 4; c < 8; ++c) recursion.visit(a + c * q, b + c * q, q, c);
@@ -3392,14 +3393,14 @@ public:
         }
         if (std::countr_zero(nv) % 2 == 0) {  // nv = 4^j
             const std::size_t h = nv / 4;
-            forward_radix4(a, h, sparse_a, narrow_a, roots_, m.p);
-            forward_radix4(b, h, sparse_b, narrow_b, roots_, m.p);
+            forward_radix4(a, h, sparse_a, a_in, roots_, m);
+            forward_radix4(b, h, sparse_b, b_in, roots_, m);
             for (std::size_t t = 0; t < 4; ++t) recursion.visit(a + t * h, b + t * h, h, t);
             inverse_radix4(a, h, inverse_roots_, Factor(scale, m), m.p);
             return;
         }
-        narrow_into(out, sparse_a ? len / 2 : len, narrow_a);
-        narrow_into(work, sparse_b ? len / 2 : len, narrow_b);
+        narrow_into(out, sparse_a ? len / 2 : len, a_in, m);
+        narrow_into(work, sparse_b ? len / 2 : len, b_in, m);
         const std::size_t h = nv / 2;  // nv = 2 * 4^j
         forward_radix2(a, h, sparse_a, m.p);
         forward_radix2(b, h, sparse_b, m.p);

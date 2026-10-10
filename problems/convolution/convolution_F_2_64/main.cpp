@@ -1212,9 +1212,9 @@ inline Vec load(const u64* p) { return _mm256_load_si256(reinterpret_cast<const 
 inline void store(u64* p, Vec v) { _mm256_store_si256(reinterpret_cast<Vec*>(p), v); }
 inline Vec broadcast(u64 x) { return _mm256_set1_epi64x(std::int64_t(x)); }
 
-// (high, low) mod P, as reduce_scalar: low ^ (high * (x^4 + x^3 + x + 1) mod x^64) ^ g(high >> 60),
+// acc + (high, low) mod P, as reduce_scalar: low ^ (high * (x^4 + x^3 + x + 1) mod x^64) ^ g(high >> 60),
 // where g(n) < 256 folds the bits above x^63; looked up by vpshufb.
-inline Vec reduce(Vec low, Vec high) {
+inline Vec reduce_add(Vec acc, Vec low, Vec high) {
     constexpr auto kFold = [] {
         std::array<std::int8_t, 16> t{};
         for (u64 n = 0; n < 16; ++n) t[n] = std::int8_t(reduce_scalar(0, n << 60));
@@ -1226,17 +1226,20 @@ inline Vec reduce(Vec low, Vec high) {
                                       kFold[7], kFold[8], kFold[9], kFold[10], kFold[11], kFold[12], kFold[13],
                                       kFold[14], kFold[15]);
     const Vec s = _mm256_xor_si256(high, _mm256_add_epi64(high, high));  // high << 1 off the shift pipes
-    const Vec times_r = _mm256_xor_si256(s, _mm256_slli_epi64(s, 3));  // high * (x^4 + x^3 + x + 1) mod x^64
     const Vec top = _mm256_shuffle_epi8(fold, _mm256_srli_epi64(high, 60));
-    return _mm256_xor_si256(_mm256_xor_si256(low, times_r), top);
+    // high * (x^4 + x^3 + x + 1) = s ^ (s << 3) mod x^64. s << 3 is ready last, so it is added last;
+    // the empty asm keeps GCC from reassociating it into the front of the chain (3 cycles later).
+    Vec sum = _mm256_xor_si256(_mm256_xor_si256(acc, low), _mm256_xor_si256(top, s));
+    __asm__("" : "+x"(sum));
+    return _mm256_xor_si256(sum, _mm256_slli_epi64(s, 3));
 }
 
-// Lane-wise products a * b in F.
-inline Vec multiply(Vec a, Vec b) {
+// acc + a * b in F, lane-wise.
+inline Vec multiply_add(Vec acc, Vec a, Vec b) {
 #ifdef __VPCLMULQDQ__
     const Vec even = _mm256_clmulepi64_epi128(a, b, 0x00);  // lanes 0 and 2: low, high
     const Vec odd = _mm256_clmulepi64_epi128(a, b, 0x11);   // lanes 1 and 3
-    return reduce(_mm256_unpacklo_epi64(even, odd), _mm256_unpackhi_epi64(even, odd));
+    return reduce_add(acc, _mm256_unpacklo_epi64(even, odd), _mm256_unpackhi_epi64(even, odd));
 #elif defined(__PCLMUL__)
     __m128i half[2][2];  // [128-bit half][even, odd]
     for (int h = 0; h < 2; ++h) {
@@ -1246,15 +1249,17 @@ inline Vec multiply(Vec a, Vec b) {
         half[h][1] = _mm_clmulepi64_si128(x, y, 0x11);
     }
     const Vec even = _mm256_set_m128i(half[1][0], half[0][0]), odd = _mm256_set_m128i(half[1][1], half[0][1]);
-    return reduce(_mm256_unpacklo_epi64(even, odd), _mm256_unpackhi_epi64(even, odd));
+    return reduce_add(acc, _mm256_unpacklo_epi64(even, odd), _mm256_unpackhi_epi64(even, odd));
 #else
     alignas(32) u64 x[4], y[4];
     _mm256_store_si256(reinterpret_cast<Vec*>(x), a);
     _mm256_store_si256(reinterpret_cast<Vec*>(y), b);
     for (int k = 0; k < 4; ++k) x[k] = multiply_scalar(x[k], y[k]);
-    return _mm256_load_si256(reinterpret_cast<const Vec*>(x));
+    return _mm256_xor_si256(acc, _mm256_load_si256(reinterpret_cast<const Vec*>(x)));
 #endif
 }
+
+inline Vec multiply(Vec a, Vec b) { return multiply_add(_mm256_setzero_si256(), a, b); }
 
 // Change of basis between monomials and X. A sequence's element e spans the W words at f + e * S
 // (W <= S); elements are xored as units. Forward passes take size: elements [size, length) are zero.
@@ -1665,7 +1670,8 @@ void change_basis(u64* f, int l, std::size_t size) {
 
 // The transform. Stage i maps the halves (u, v) of each block of 2^(i+1) at c to
 // (u + w v, u + w v + v), w = omega_{c >> i}; the inverse undoes the stages in reverse order.
-// Blocks of 2^kBlockLog words (32 KiB) run breadth first; above, depth first. Two stages share a pass.
+// Blocks of 2^kBlockLog words (32 KiB) run breadth first; above, depth first. Most passes do three
+// stages, some two or one.
 
 constexpr int kBlockLog = 12;
 
@@ -1673,7 +1679,7 @@ inline void stage_forward(u64* u, std::size_t half, u64 w) {
     const Vec tw = broadcast(w);
     u64* v = u + half;
     for (std::size_t j = 0; j < half; j += 4) {
-        const Vec x = _mm256_xor_si256(load(u + j), multiply(load(v + j), tw));
+        const Vec x = multiply_add(load(u + j), load(v + j), tw);
         store(u + j, x);
         store(v + j, _mm256_xor_si256(load(v + j), x));
     }
@@ -1685,7 +1691,7 @@ inline void stage_inverse(u64* u, std::size_t half, u64 w) {
     for (std::size_t j = 0; j < half; j += 4) {
         const Vec y = _mm256_xor_si256(load(u + j), load(v + j));
         store(v + j, y);
-        store(u + j, _mm256_xor_si256(load(u + j), multiply(y, tw)));
+        store(u + j, multiply_add(load(u + j), y, tw));
     }
 }
 
@@ -1704,12 +1710,12 @@ void stages_forward(u64* p, std::size_t c, int i) {
     const PairTwiddles t = pair_twiddles(c, i);
     for (std::size_t j = 0; j < q; j += 4) {
         Vec x0 = load(p + j), x1 = load(p + q + j), x2 = load(p + 2 * q + j), x3 = load(p + 3 * q + j);
-        x0 = _mm256_xor_si256(x0, multiply(x2, t.outer));
-        x1 = _mm256_xor_si256(x1, multiply(x3, t.outer));
+        x0 = multiply_add(x0, x2, t.outer);
+        x1 = multiply_add(x1, x3, t.outer);
         x2 = _mm256_xor_si256(x2, x0);
         x3 = _mm256_xor_si256(x3, x1);
-        x0 = _mm256_xor_si256(x0, multiply(x1, t.low));
-        x2 = _mm256_xor_si256(x2, multiply(x3, t.high));
+        x0 = multiply_add(x0, x1, t.low);
+        x2 = multiply_add(x2, x3, t.high);
         store(p + j, x0);
         store(p + q + j, _mm256_xor_si256(x1, x0));
         store(p + 2 * q + j, x2);
@@ -1724,14 +1730,77 @@ void stages_inverse(u64* p, std::size_t c, int i) {
         Vec x0 = load(p + j), x1 = load(p + q + j), x2 = load(p + 2 * q + j), x3 = load(p + 3 * q + j);
         x1 = _mm256_xor_si256(x1, x0);
         x3 = _mm256_xor_si256(x3, x2);
-        x0 = _mm256_xor_si256(x0, multiply(x1, t.low));
-        x2 = _mm256_xor_si256(x2, multiply(x3, t.high));
+        x0 = multiply_add(x0, x1, t.low);
+        x2 = multiply_add(x2, x3, t.high);
         x2 = _mm256_xor_si256(x2, x0);
         x3 = _mm256_xor_si256(x3, x1);
-        store(p + j, _mm256_xor_si256(x0, multiply(x2, t.outer)));
-        store(p + q + j, _mm256_xor_si256(x1, multiply(x3, t.outer)));
+        store(p + j, multiply_add(x0, x2, t.outer));
+        store(p + q + j, multiply_add(x1, x3, t.outer));
         store(p + 2 * q + j, x2);
         store(p + 3 * q + j, x3);
+    }
+}
+
+// Stages i, i - 1 and i - 2 of the block p = d + c of 2^(i+1) words, in eighths x0..x7: four
+// independent products per stage. Stage i - 1 on x4..x7 and stage i - 2 on x2k, x2k+1 shift the
+// first twiddle: omega(m + 2h) = omega(m) ^ omega(2h) for even m.
+struct TripleTwiddles {
+    Vec t2, t1[2], t0[4];
+};
+
+inline TripleTwiddles triple_twiddles(std::size_t c, int i) {
+    TripleTwiddles t;
+    t.t2 = broadcast(omega(c >> i));
+    for (std::size_t h = 0; h < 2; ++h) t.t1[h] = broadcast(omega(c >> (i - 1)) ^ kOmega.low[2 * h]);
+    for (std::size_t h = 0; h < 4; ++h) t.t0[h] = broadcast(omega(c >> (i - 2)) ^ kOmega.low[2 * h]);
+    return t;
+}
+
+void triple_forward(u64* p, std::size_t c, int i) {
+    const std::size_t q = std::size_t(1) << (i - 2);
+    const TripleTwiddles t = triple_twiddles(c, i);
+    for (std::size_t j = 0; j < q; j += 4) {
+        Vec x[8];
+#pragma GCC unroll 8
+        for (std::size_t k = 0; k < 8; ++k) x[k] = load(p + k * q + j);
+#pragma GCC unroll 4
+        for (std::size_t k = 0; k < 4; ++k) x[k] = multiply_add(x[k], x[k + 4], t.t2);
+#pragma GCC unroll 4
+        for (std::size_t k = 0; k < 4; ++k) x[k + 4] = _mm256_xor_si256(x[k + 4], x[k]);
+#pragma GCC unroll 4
+        for (std::size_t m = 0; m < 4; ++m) x[m + m / 2 * 2] = multiply_add(x[m + m / 2 * 2], x[m + m / 2 * 2 + 2], t.t1[m / 2]);
+#pragma GCC unroll 4
+        for (std::size_t m = 0; m < 4; ++m) x[m + m / 2 * 2 + 2] = _mm256_xor_si256(x[m + m / 2 * 2 + 2], x[m + m / 2 * 2]);
+#pragma GCC unroll 4
+        for (std::size_t k = 0; k < 8; k += 2) x[k] = multiply_add(x[k], x[k + 1], t.t0[k / 2]);
+#pragma GCC unroll 4
+        for (std::size_t k = 0; k < 8; k += 2) x[k + 1] = _mm256_xor_si256(x[k + 1], x[k]);
+#pragma GCC unroll 8
+        for (std::size_t k = 0; k < 8; ++k) store(p + k * q + j, x[k]);
+    }
+}
+
+void triple_inverse(u64* p, std::size_t c, int i) {
+    const std::size_t q = std::size_t(1) << (i - 2);
+    const TripleTwiddles t = triple_twiddles(c, i);
+    for (std::size_t j = 0; j < q; j += 4) {
+        Vec x[8];
+#pragma GCC unroll 8
+        for (std::size_t k = 0; k < 8; ++k) x[k] = load(p + k * q + j);
+#pragma GCC unroll 4
+        for (std::size_t k = 0; k < 8; k += 2) x[k + 1] = _mm256_xor_si256(x[k + 1], x[k]);
+#pragma GCC unroll 4
+        for (std::size_t k = 0; k < 8; k += 2) x[k] = multiply_add(x[k], x[k + 1], t.t0[k / 2]);
+#pragma GCC unroll 4
+        for (std::size_t m = 0; m < 4; ++m) x[m + m / 2 * 2 + 2] = _mm256_xor_si256(x[m + m / 2 * 2 + 2], x[m + m / 2 * 2]);
+#pragma GCC unroll 4
+        for (std::size_t m = 0; m < 4; ++m) x[m + m / 2 * 2] = multiply_add(x[m + m / 2 * 2], x[m + m / 2 * 2 + 2], t.t1[m / 2]);
+#pragma GCC unroll 4
+        for (std::size_t k = 0; k < 4; ++k) x[k + 4] = _mm256_xor_si256(x[k + 4], x[k]);
+#pragma GCC unroll 4
+        for (std::size_t k = 0; k < 4; ++k) x[k] = multiply_add(x[k], x[k + 4], t.t2);
+#pragma GCC unroll 8
+        for (std::size_t k = 0; k < 8; ++k) store(p + k * q + j, x[k]);
     }
 }
 
@@ -1776,13 +1845,13 @@ inline Vec lanes(std::size_t c, int s) {
 
 // (u, v) -> (u + w v, u + w v + v), and back.
 inline void butterfly_forward(Vec& u, Vec& v, Vec w) {
-    u = _mm256_xor_si256(u, multiply(v, w));
+    u = multiply_add(u, v, w);
     v = _mm256_xor_si256(v, u);
 }
 
 inline void butterfly_inverse(Vec& u, Vec& v, Vec w) {
     v = _mm256_xor_si256(v, u);
-    u = _mm256_xor_si256(u, multiply(v, w));
+    u = multiply_add(u, v, w);
 }
 
 inline Vec plus_beta1(Vec w) { return _mm256_xor_si256(w, broadcast(kBeta[1])); }  // omega(m + 2), m % 4 = 0
@@ -1822,15 +1891,17 @@ void group_stages_inverse(u64* d, std::size_t c, std::size_t end) {
     }
 }
 
-// Block d[c, c + 2^(i+1)), 3 <= i < kBlockLog: stages i down to 0 (or back): in pairs down to
-// stage 4, then stage 4 alone if i is even, then the group passes.
+// Block d[c, c + 2^(i+1)), 3 <= i < kBlockLog: stages i down to 0 (or back): in triples while
+// at least stages 6 to 4 remain, then stages 5 and 4 (or 4 alone), then the group passes.
 void forward_block(u64* d, std::size_t c, int i) {
     const std::size_t end = c + (std::size_t(2) << i);
     int s = i;
-    for (; s >= 5; s -= 2) {
-        for (std::size_t b = c; b < end; b += std::size_t(2) << s) stages_forward(d + b, b, s);
+    for (; s >= 6; s -= 3) {
+        for (std::size_t b = c; b < end; b += std::size_t(2) << s) triple_forward(d + b, b, s);
     }
-    if (s == 4) {
+    if (s == 5) {
+        for (std::size_t b = c; b < end; b += 64) stages_forward(d + b, b, 5);
+    } else if (s == 4) {
         for (std::size_t b = c; b < end; b += 32) stage_forward(d + b, 16, omega(b >> 4));
     }
     group_stages_forward<false>(d, c, end);
@@ -1839,13 +1910,16 @@ void forward_block(u64* d, std::size_t c, int i) {
 
 void inverse_block(u64* d, std::size_t c, int i) {
     const std::size_t end = c + (std::size_t(2) << i);
+    const int low = 3 + (i - 3) % 3;  // the stages above the group passes up to low run below the triples
     group_stages_inverse<true>(d, c, end);
     group_stages_inverse<false>(d, c, end);
-    if (i % 2 == 0) {
+    if (low == 5) {
+        for (std::size_t b = c; b < end; b += 64) stages_inverse(d + b, b, 5);
+    } else if (low == 4) {
         for (std::size_t b = c; b < end; b += 32) stage_inverse(d + b, 16, omega(b >> 4));
     }
-    for (int s = i % 2 == 0 ? 6 : 5; s <= i; s += 2) {
-        for (std::size_t b = c; b < end; b += std::size_t(2) << s) stages_inverse(d + b, b, s);
+    for (int s = low + 3; s <= i; s += 3) {
+        for (std::size_t b = c; b < end; b += std::size_t(2) << s) triple_inverse(d + b, b, s);
     }
 }
 
@@ -1858,9 +1932,12 @@ void forward(u64* d, std::size_t c, int i) {
         stage_forward(d + c, half, omega(c >> i));
         forward(d, c, i - 1);
         forward(d, c + half, i - 1);
-    } else {
+    } else if (i < kBlockLog + 3) {
         stages_forward(d + c, c, i);
         for (std::size_t k = 0; k < 4; ++k) forward(d, c + k * half / 2, i - 2);
+    } else {
+        triple_forward(d + c, c, i);
+        for (std::size_t k = 0; k < 8; ++k) forward(d, c + k * half / 4, i - 3);
     }
 }
 
@@ -1878,10 +1955,14 @@ void multiply_transformed(u64* a, u64* b, std::size_t c, int i) {
         multiply_transformed(a, b, c, i - 1);
         multiply_transformed(a, b, c + half, i - 1);
         stage_inverse(a + c, half, omega(c >> i));
-    } else {
+    } else if (i < kBlockLog + 3) {
         stages_forward(b + c, c, i);
         for (std::size_t k = 0; k < 4; ++k) multiply_transformed(a, b, c + k * half / 2, i - 2);
         stages_inverse(a + c, c, i);
+    } else {
+        triple_forward(b + c, c, i);
+        for (std::size_t k = 0; k < 8; ++k) multiply_transformed(a, b, c + k * half / 4, i - 3);
+        triple_inverse(a + c, c, i);
     }
 }
 

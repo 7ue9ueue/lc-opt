@@ -987,10 +987,27 @@ private:
         constexpr std::size_t kLast = kStep / kBlock - 1;
         std::uint32_t* const end = out + count;
         for (; out + kStep <= end; out += kStep) {
-            reduce<kFold>(state_part(out, kWidth, kLast), out + kBlock * kLast);
-            for (std::size_t b = 0; b < kLast; ++b) reduce<kFold>(state_part(out, kWidth, b), out + kBlock * b);
+            Vec x[kWidth];  // the state, broadcast once for the step's four blocks
+#pragma GCC unroll 16
+            for (std::size_t j = 0; j < kWidth; ++j) x[j] = detail::broadcast(out[-1 - std::ptrdiff_t(j)]);
+            reduce<kFold>(state_part(x, kLast), out + kBlock * kLast);
+#pragma GCC unroll 4
+            for (std::size_t b = 0; b < kLast; ++b) reduce<kFold>(state_part(x, b), out + kBlock * b);
         }
         for (; out < end; out += kBlock) reduce<kFold>(state_part(out, kWidth), out);
+    }
+
+    // state_part() from the state broadcast in x.
+    template <std::size_t kWidth>
+    Sums state_part(const Vec (&x)[kWidth], std::size_t first) const {
+        Sums sums{};
+#pragma GCC unroll 16
+        for (std::size_t j = 0; j < kWidth; ++j) {
+#pragma GCC unroll 4
+            for (std::size_t h = 0; h < 4; ++h) sums.q[h] = detail::multiply_add(sums.q[h], state_[j].q[4 * first + h], x[j]);
+            asm("" : "+x"(sums.q[0]), "+x"(sums.q[1]), "+x"(sums.q[2]), "+x"(sums.q[3]));
+        }
+        return sums;
     }
 
     using Kernel = void (Recurrence::*)(std::uint32_t*, std::size_t) const;

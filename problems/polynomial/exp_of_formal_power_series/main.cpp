@@ -3109,28 +3109,83 @@ inline void fill_window(Window& window, Vec a, const Factor& w) {
     store(window.word, reduce(times(a, w), kP));
 }
 
-// a b mod (x^8 - w) / 2^32 in [0, 2P) for canonical a (as a window) and b. Each output is a sum
-// of 8 products < P^2, plus the Montgomery term < 2^32 P: below 2^64.
-inline Vec leaf_product(const Window& window, const std::uint32_t* b) {
-    const auto at = [&window](int k) { return _mm256_loadu_si256(reinterpret_cast<const Vec*>(window.word + k)); };
-    const auto by = [b](int i) { return broadcast(b[i]); };
-    // Even outputs 2m from windows k = 8 .. 1 (b[8 - k]), odd outputs from k = 9 .. 2 (b[9 - k]).
-    Vec x = at(9);
-    Vec odd = _mm256_mul_epu32(x, by(0));
-    x = at(8);
-    Vec even = _mm256_mul_epu32(x, by(0));
-    odd = _mm256_add_epi64(odd, _mm256_mul_epu32(x, by(1)));
-#pragma GCC unroll 8
-    for (int k = 7; k >= 2; --k) {
-        x = at(k);
-        even = _mm256_add_epi64(even, _mm256_mul_epu32(x, by(8 - k)));
-        odd = _mm256_add_epi64(odd, _mm256_mul_epu32(x, by(9 - k)));
+// The windows of leaves 4g .. 4g + 3 from canonical a: weights y, -y, z, -z (y, z: entries 2g,
+// 2g + 1 of roots). The odd leaves' w a is 2P - y a (or z a), in (0, P] after the reduction.
+[[gnu::always_inline]] inline void fill_windows(Window (&window)[4], const Vec (&a)[4], const std::uint32_t* roots,
+                                                std::size_t g) {
+    const Factor y = entry(roots, 2 * g), z = entry(roots, 2 * g + 1);
+#pragma GCC unroll 4
+    for (int t = 0; t < 4; ++t) {
+        store(window[t].word + 8, a[t]);
+        const Vec wa = times(a[t], t < 2 ? y : z);
+        store(window[t].word, reduce(t % 2 ? _mm256_sub_epi32(broadcast(2 * kP), wa) : wa, kP));
     }
-    even = _mm256_add_epi64(even, _mm256_mul_epu32(at(1), by(7)));
-    const Vec ni = broadcast(ntt::kernels::kNI), p = broadcast(kP);
-    even = _mm256_add_epi64(even, _mm256_mul_epu32(_mm256_mul_epu32(even, ni), p));
-    odd = _mm256_add_epi64(odd, _mm256_mul_epu32(_mm256_mul_epu32(odd, ni), p));
-    return low(_mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA));
+}
+
+// a b mod (x^8 - w) / 2^32 in [0, 2P) for a as a window (words <= P) and canonical b. Even
+// outputs 2m are the sums over windows k = 8 .. 1 times b[8 - k], odd outputs over k = 9 .. 2
+// times b[9 - k]. Step i = 0 .. 7 broadcasts b[i], multiplies it with windows 9 - i (odd) and
+// 8 - i (even), then adds step i - 1's products. Each output is a sum of 8 products < P^2, plus
+// the Montgomery term < 2^32 P: below 2^64. Assembly keeps this order; GCC's schedule of the same
+// intrinsics was 2-5% slower in the bottoms below (lib/poly/notes.md).
+[[gnu::always_inline]] inline Vec leaf_product(const Window& window, const std::uint32_t* b) {
+    const Vec ni = broadcast(ntt::kernels::kNI), p = broadcast(kP), p2 = broadcast(2 * kP);
+    Vec even, odd, bi, t0, t1, t2, t3;
+    asm("vpbroadcastd (%[b]), %[bi]\n\t"
+        "vpmuludq 36(%[w]), %[bi], %[odd]\n\t"
+        "vpmuludq 32(%[w]), %[bi], %[even]\n\t"
+        "vpbroadcastd 4(%[b]), %[bi]\n\t"
+        "vpmuludq 32(%[w]), %[bi], %[t0]\n\t"
+        "vpmuludq 28(%[w]), %[bi], %[t1]\n\t"
+        "vpbroadcastd 8(%[b]), %[bi]\n\t"
+        "vpmuludq 28(%[w]), %[bi], %[t2]\n\t"
+        "vpmuludq 24(%[w]), %[bi], %[t3]\n\t"
+        "vpaddq %[t0], %[odd], %[odd]\n\t"
+        "vpaddq %[t1], %[even], %[even]\n\t"
+        "vpbroadcastd 12(%[b]), %[bi]\n\t"
+        "vpmuludq 24(%[w]), %[bi], %[t0]\n\t"
+        "vpmuludq 20(%[w]), %[bi], %[t1]\n\t"
+        "vpaddq %[t2], %[odd], %[odd]\n\t"
+        "vpaddq %[t3], %[even], %[even]\n\t"
+        "vpbroadcastd 16(%[b]), %[bi]\n\t"
+        "vpmuludq 20(%[w]), %[bi], %[t2]\n\t"
+        "vpmuludq 16(%[w]), %[bi], %[t3]\n\t"
+        "vpaddq %[t0], %[odd], %[odd]\n\t"
+        "vpaddq %[t1], %[even], %[even]\n\t"
+        "vpbroadcastd 20(%[b]), %[bi]\n\t"
+        "vpmuludq 16(%[w]), %[bi], %[t0]\n\t"
+        "vpmuludq 12(%[w]), %[bi], %[t1]\n\t"
+        "vpaddq %[t2], %[odd], %[odd]\n\t"
+        "vpaddq %[t3], %[even], %[even]\n\t"
+        "vpbroadcastd 24(%[b]), %[bi]\n\t"
+        "vpmuludq 12(%[w]), %[bi], %[t2]\n\t"
+        "vpmuludq 8(%[w]), %[bi], %[t3]\n\t"
+        "vpaddq %[t0], %[odd], %[odd]\n\t"
+        "vpaddq %[t1], %[even], %[even]\n\t"
+        "vpbroadcastd 28(%[b]), %[bi]\n\t"
+        "vpmuludq 8(%[w]), %[bi], %[t0]\n\t"
+        "vpmuludq 4(%[w]), %[bi], %[t1]\n\t"
+        "vpaddq %[t2], %[odd], %[odd]\n\t"
+        "vpaddq %[t3], %[even], %[even]\n\t"
+        "vpaddq %[t0], %[odd], %[odd]\n\t"
+        "vpaddq %[t1], %[even], %[even]\n\t"
+        // Montgomery: (s + (s / -P mod 2^32) P) / 2^32 in [0, 3P), then [0, 2P).
+        "vpmuludq %[ni], %[even], %[t0]\n\t"
+        "vpmuludq %[ni], %[odd], %[t1]\n\t"
+        "vpmuludq %[p], %[t0], %[t0]\n\t"
+        "vpmuludq %[p], %[t1], %[t1]\n\t"
+        "vpaddq %[t0], %[even], %[even]\n\t"
+        "vpaddq %[t1], %[odd], %[odd]\n\t"
+        "vpsrlq $32, %[even], %[even]\n\t"
+        "vpblendd $0xaa, %[odd], %[even], %[even]\n\t"
+        "vpsubd %[p2], %[even], %[t0]\n\t"
+        "vpminud %[t0], %[even], %[even]"
+        : [even] "=&x"(even), [odd] "=&x"(odd), [bi] "=&x"(bi), [t0] "=&x"(t0), [t1] "=&x"(t1), [t2] "=&x"(t2),
+          [t3] "=&x"(t3)
+        : [w] "r"(window.word), [b] "r"(b), [ni] "x"(ni), [p] "x"(p), [p2] "x"(p2),
+          "m"(*reinterpret_cast<const std::uint32_t(*)[17]>(window.word)),
+          "m"(*reinterpret_cast<const std::uint32_t(*)[8]>(b)));
+    return even;
 }
 
 // The bottom of a subtree: count groups at h = 1 (4 vectors each, at a), the first with index
@@ -3145,6 +3200,7 @@ struct ForwardBottom {
             const Group w(roots, first + j);
             Vec f[4] = {load(a), load(a + 8), load(a + 16), load(a + 24)};
             forward_h1(f, w);
+#pragma GCC unroll 4
             for (int t = 0; t < 4; ++t) store(a + 8 * t, canonical(f[t]));
         }
     }
@@ -3169,21 +3225,25 @@ struct InverseBottom {
 
 // Product: forward butterflies of a, leaf products with b (a transform; each product carries a
 // factor 2^-32 that the final scale undoes), inverse butterflies. The windows of group j + 1 are
-// written before the products of group j read those of group j.
+// written before the products of group j read those of group j. prepare and finish are inlined
+// and unrolled (as calls with rolled loops they cost 4-9% of the products, lib/poly/notes.md).
 struct ProductBottom {
     static constexpr bool kForward = true, kInverse = true;
     const std::uint32_t* roots;
     const std::uint32_t* inverse_roots;
     const std::uint32_t* b;
 
-    void prepare(const std::uint32_t* a, std::size_t g, Window (&window)[4]) const {
+    [[gnu::always_inline]] void prepare(const std::uint32_t* a, std::size_t g, Window (&window)[4]) const {
         Vec f[4] = {load(a), load(a + 8), load(a + 16), load(a + 24)};
         forward_h1(f, Group(roots, g));
-        for (int t = 0; t < 4; ++t) fill_window(window[t], canonical(f[t]), leaf_weight(roots, 4 * g + t));
+#pragma GCC unroll 4
+        for (int t = 0; t < 4; ++t) f[t] = canonical(f[t]);
+        fill_windows(window, f, roots, g);
     }
 
-    void finish(std::uint32_t* a, std::size_t g, const Window (&window)[4]) const {
+    [[gnu::always_inline]] void finish(std::uint32_t* a, std::size_t g, const Window (&window)[4]) const {
         Vec f[4];
+#pragma GCC unroll 4
         for (int t = 0; t < 4; ++t) f[t] = leaf_product(window[t], b + 8 * (4 * g + t));
         inverse_h1(f, Group(inverse_roots, g));
         for (int t = 0; t < 4; ++t) store(a + 8 * t, f[t]);
@@ -3206,8 +3266,10 @@ struct InverseProductBottom {
     ProductBottom product;  // holds b
     const std::uint32_t* a;
 
-    void prepare(std::size_t g, Window (&window)[4]) const {
-        for (std::size_t p = 4 * g; p < 4 * g + 4; ++p) fill_window(window[p % 4], load(a + 8 * p), leaf_weight(product.roots, p));
+    [[gnu::always_inline]] void prepare(std::size_t g, Window (&window)[4]) const {
+        const std::uint32_t* leaves = a + 32 * g;
+        const Vec f[4] = {load(leaves), load(leaves + 8), load(leaves + 16), load(leaves + 24)};
+        fill_windows(window, f, product.roots, g);
     }
 
     void operator()(std::uint32_t* out, std::size_t count, std::size_t first) const {
@@ -3238,12 +3300,14 @@ struct InverseProductSumBottom {
             if (j + 1 < count) prepare(first + j + 1, window[(j + 1) & 1]);
             const std::size_t g = first + j;
             Vec f[4];
+#pragma GCC unroll 4
             for (std::size_t t = 0; t < 4; ++t) {
                 f[t] = leaf_product(window[j & 1][0][t], terms[0].product.b + 8 * (4 * g + t));
                 for (std::size_t k = 1; k < K; ++k)
                     f[t] = low(add(f[t], leaf_product(window[j & 1][k][t], terms[k].product.b + 8 * (4 * g + t))));
             }
             inverse_h1(f, Group(terms[0].product.inverse_roots, g));
+#pragma GCC unroll 4
             for (std::size_t t = 0; t < 4; ++t) store(out + 8 * t, f[t]);
         }
     }
@@ -3262,6 +3326,7 @@ struct ForwardProductBottom {
         for (std::size_t j = 0; j < count; ++j, a += 32) {
             if (j + 1 < count) product.prepare(a + 32, first + j + 1, window[(j + 1) & 1]);
             const std::uint32_t* b = product.b + 32 * (first + j);
+#pragma GCC unroll 4
             for (int t = 0; t < 4; ++t)
                 store(a + 8 * t, reduce(times(leaf_product(window[j & 1][t], b + 8 * t), undo_montgomery), kP));
         }

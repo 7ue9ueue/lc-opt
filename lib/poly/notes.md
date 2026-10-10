@@ -29,10 +29,13 @@ powers of two and their neighbours up to 2^20, random sizes; also run under ASan
   products with b, kept as a transform).
 - Sources: the forward top level reads x^shift in[0, size) from any span (in place or not);
   coefficients outside are zero and not read. Outputs: `Half` computes one half only.
-- Leaf product: a window [w a, a] (canonical) gives x^i a mod (x^8 - w) as words [8 - i, 16 - i);
+- Leaf product: a window [w a, a] (words <= P) gives x^i a mod (x^8 - w) as words [8 - i, 16 - i);
   16 `vpmuludq` into 64-bit sums (8 products < P^2 plus the Montgomery term stay below 2^64), one
   Montgomery reduction per lane. The factor 2^-32 is undone by the inverse's scale in
-  `cyclic_product`, and by one Shoup multiplication by 2^32 in `multiply`.
+  `cyclic_product`, and by one Shoup multiplication by 2^32 in `multiply` and `forward_product`.
+  Inline asm in a fixed order (step i: broadcast b[i], two multiplies, the adds of step i - 1).
+  `fill_windows` writes a group's 4 windows: weights y, -y, z, -z with y, z broadcast from the
+  table, -(y a) as 2P - y a. The product bottoms are always inlined and unrolled.
 - Memory: `Arena`, one mapping in transparent huge pages, spans 32-byte aligned with 64 bytes after
   each (the forward kernels read 4 bytes past the end).
 
@@ -308,6 +311,57 @@ products 1.77 and 1.69).
   for the same program with `power(u, 1/2, c)`.
 - Merged as #148. Judged [409316](https://judge.yosupo.jp/submission/409316): AC 16 ms with a
   +9 ms launch spike; clean score 12 ms (record 25 ms).
+
+2026-10-09, claude (issue #95, leaf products):
+- Zen 3 costs (`lc-amd`, scratch probes, cycles per instruction, independent streams):
+  `vpaddq`, `vpsubd`, `vpminud`, `vpblendd` 0.25; `vpmuludq`, `vpmulld`, `vpsrlq`, `vpalignr`,
+  `vpshufd`, `vshufps` 0.5; `vperm2i128` 1.0; `vpbroadcastd` from memory uses no vector pipe.
+  Multiplies and shifts use disjoint pipe pairs (6 + 6: 4 per cycle). Multiplies with adds: 4
+  per cycle in the order M M A A, 3.0 in the order M A M A.
+- Leaf product alone (64 leaves in L1, windows stored long before; cycles per leaf): GCC's code
+  15.6, fixed-order asm 14.6, the same without memory operands 13.0, without the Montgomery step
+  9.5 (16 multiplies, 14 adds). Each added op cost ~0.12 (shift), ~0.27 (add, blend), ~0.45
+  (multiply): with half the ops multiplies, ~3.1 ops per cycle. Tree accumulation, two leaves
+  interleaved, the Montgomery chain cut: within 0.5.
+- In `cyclic_product` at 2^19 (ns per coefficient): 3.38; with the leaf product replaced by a
+  copy 2.77, also without the window's w a 2.49. GCC compiled `ProductBottom::prepare` as a call
+  (with `vzeroupper`), kept the loops over the 4 leaves rolled with stack round trips, and built
+  the odd leaves' weights P - w in general registers (`vmovd`, `vpbroadcastd`).
+- Changes: the product bottoms always inlined and unrolled; `fill_windows` for a group (y, z
+  broadcast from the table, -(y a) as 2P - y a); `leaf_product` in inline asm (step i: broadcast
+  b[i], two multiplies, the adds of step i - 1); unroll pragmas on `ForwardBottom`'s stores and in
+  `InverseProductSumBottom`. API and transform format unchanged. Tests: `leaf_product` against
+  scalar sums for windows with any words in [0, P] (all 0, all P - 1, all P, mixes) and canonical
+  b; `fill_windows` against w a for groups 0 .. 999 and random; -O2 and ASan/UBSan,
+  `-march=native` and `-march=x86-64-v3` (`lc-intel`). Mutations (no negation, a wrong window
+  offset, no final reduction) fail them.
+- In process at 2^19, ns per coefficient, medians of 40, same session, `lc-amd` (`lc-intel`),
+  main -> this: `cyclic_product` 3.38 -> 3.07 (4.00 -> 3.92), `inverse_product` 2.14 -> 1.95
+  (2.51 -> 2.47), `inverse_product_sum` of 2 3.13 -> 2.69 (3.93 -> 3.15), of 3 4.12 -> 3.46
+  (4.47 -> 3.84), `forward_product` 2.35 -> 2.06 (2.67 -> 2.58), `forward` 1.24 -> 1.20
+  (1.75 -> 1.74), `inverse` unchanged. Steps (`lc-amd`, `cyclic_product`): inlining and
+  unrolling 3.19, asm leaf product 3.13, `fill_windows` 3.07. On `lc-intel` the first two steps
+  made `inverse_product_sum` of 2 slower (3.85 -> 3.97); its unroll pragmas fixed that.
+- Tried, not kept (`cyclic_product` at 2^19 unless noted):
+  - Windows built in registers (`vperm2i128` + 6 `vpalignr` from a and w a): 31 vs 23 cycles per
+    leaf in isolation (long chain from w a to the products; GCC spilled).
+  - Windows prepared two groups ahead: no change (store forwarding is not the limit).
+  - Four leaf products in one asm block on fixed registers: 1-3% slower than one leaf per block
+    (the clobbers spill the surrounding code).
+  - Two leaves interleaved in one asm block: -0.6%, `forward_product` -3.6%; not worth a second
+    kernel.
+  - Instruction orders: M A alternating, E or O first, `vshufps` + `vpshufd` for the final
+    interleave: within 1% of the kept order. Intrinsics with the same bottoms: 2-5% slower.
+- Counted, not built: Karatsuba (the wrap needs w-scaled and plain halves of the same
+  sub-products: 64 products again); leaves mod x^4 - w (an in-register level costs ~14 ops per
+  vector in every transform, the product saves ~8 per vector); FMA on doubles (30-bit operands
+  need two limbs: 32 FMAs against 30 integer ops); one Montgomery step for K products in
+  `inverse_product_sum` (16 P^2 + 2^32 P > 2^64); q by one `vpmulld` (-1 multiply, +2 shifts,
+  +1 blend; estimated neutral).
+- Whole process (`judge.py bench`, 21 rounds, ratios new/main): `lc-amd` inv 0.9550, exp 0.9407,
+  log 0.9442, pow 0.9311, sqrt 0.9490 (exp 18.65 -> 17.53 ms, pow 29.33 -> 27.33 ms); `lc-intel`
+  inv 0.9800, exp 0.9841, log 0.9700, pow 0.9768, sqrt 0.9826. All official tests pass
+  (`judge.py test`, `lc-amd`).
 
 ## Sources
 

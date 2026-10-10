@@ -25,7 +25,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [mul_modp_convolution](problems/convolution/mul_modp_convolution) | [12 ms](https://judge.yosupo.jp/submission/409350) | 45 ms |
 | [min_plus_convolution_convex_convex](problems/convolution/min_plus_convolution_convex_convex) | [13 ms](https://judge.yosupo.jp/submission/409301) | 20 ms |
 | [min_plus_convolution_convex_arbitrary](problems/convolution/min_plus_convolution_convex_arbitrary) | [11 ms](https://judge.yosupo.jp/submission/409229) | 38 ms |
-| [min_plus_convolution_concave_arbitrary](problems/convolution/min_plus_convolution_concave_arbitrary) | [27 ms](https://judge.yosupo.jp/submission/409359) | 117 ms |
+| [min_plus_convolution_concave_arbitrary](problems/convolution/min_plus_convolution_concave_arbitrary) | [24 ms](https://judge.yosupo.jp/submission/409555) | 117 ms |
 | [multivariate_convolution](problems/convolution/multivariate_convolution) | [14 ms](https://judge.yosupo.jp/submission/409322) | 117 ms |
 | [multivariate_convolution_cyclic](problems/convolution/multivariate_convolution_cyclic) | [12 ms](https://judge.yosupo.jp/submission/409321) | 117 ms |
 | [inv_of_formal_power_series](problems/polynomial/inv_of_formal_power_series) | [11 ms](https://judge.yosupo.jp/submission/409370) | 25 ms |

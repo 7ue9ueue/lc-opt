@@ -58,3 +58,11 @@ tables 0.07, inverse 8.26, format 0.32 (to /dev/null); total 9.5. Whole process 
   - Checks: 25/25 official tests (`lc-amd`); `stress.py` 400 rounds; ASan/UBSan on all 25
     official cases, file and pipe input (`lc-intel`); lib/poly tests (in-place last step for
     n = 33 .. 300 and around powers of two).
+  - Merged as #166. CI: inv 0.9577 (EPYC 9V45 0.9570, 7763 0.9586, 0.9573); all 6 problems 0.9902.
+  - Transform kernels (lib/poly/notes.md): generated asm loops for the levels h = 4 and h = 1,
+    and forward top levels that skip the zero quarters of half-zero sources (two of the three
+    forwards per step). At 2^19 a forward costs 32.9 instead of 34.2 cycles per vector; the
+    products gain only at h = 4. `judge.py bench`, 21 rounds: `lc-amd` 0.9933, `lc-intel` 0.9865.
+  - Tried for the products, not kept: their bottom (forward, windows, leaf products, inverse) as
+    one list-scheduled asm statement per group, 18 knob variants: tiles 52.9-55.0 against 53.0
+    cycles per vector for the intrinsics.

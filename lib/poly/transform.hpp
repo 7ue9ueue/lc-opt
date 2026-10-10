@@ -36,6 +36,7 @@
 #include <span>
 
 #include "lib/ntt/ntt.hpp"
+#include "lib/poly/kernels.hpp"
 
 namespace poly {
 
@@ -237,12 +238,15 @@ inline void fill_window(Window& window, Vec a, const Factor& w) {
 
 // The bottom of a subtree: count groups at h = 1 (4 vectors each, at a), the first with index
 // first. Group g holds leaves 4g .. 4g + 3, so another operand's leaves are found by index.
-// Forward: forward butterflies, canonical leaves.
+// Forward: forward butterflies, canonical leaves. Counts that are multiples of 8 (first is then
+// one too) run in kernels.hpp's loop.
 struct ForwardBottom {
     static constexpr bool kForward = true, kInverse = false;
     const std::uint32_t* roots;
 
     void operator()(std::uint32_t* a, std::size_t count, std::size_t first) const {
+        if (count % 8 == 0)
+            return kernels::forward_bottom(reinterpret_cast<Vec*>(a), count, roots + slot(first), roots + slot(2 * first));
         for (std::size_t j = 0; j < count; ++j, a += 32) {
             const Group w(roots, first + j);
             Vec f[4] = {load(a), load(a + 8), load(a + 16), load(a + 24)};
@@ -261,6 +265,9 @@ struct InverseBottom {
 
     void operator()(std::uint32_t* a, std::size_t count, std::size_t first) const {
         const std::uint32_t* from = in + 32 * first;
+        if (count % 8 == 0)
+            return kernels::inverse_bottom(reinterpret_cast<Vec*>(a), count, inverse_roots + slot(first),
+                                           inverse_roots + slot(2 * first), reinterpret_cast<const Vec*>(from));
         for (std::size_t j = 0; j < count; ++j, a += 32, from += 32) {
             const Group w(inverse_roots, first + j);
             Vec f[4] = {load(from), load(from + 8), load(from + 16), load(from + 24)};
@@ -401,14 +408,19 @@ public:
 private:
     static constexpr std::size_t kTile = 256;
 
+    // Levels h >= 16 group by group (lib/ntt's kernels), h = 4 in one loop over its groups.
     void tile(std::uint32_t* a, std::size_t nv, std::size_t k) const {
-        if constexpr (Bottom::kForward)
-            for (std::size_t h = nv / 4; h >= 4; h /= 4)
+        if constexpr (Bottom::kForward) {
+            for (std::size_t h = nv / 4; h >= 16; h /= 4)
                 for (std::size_t j = 0, g = k * (nv / (4 * h)); j < nv; j += 4 * h, ++g) forward(a + 8 * j, h, g);
+            if (nv >= 16) kernels::forward_h4(vectors(a), nv / 16, r_, k * (nv / 16));
+        }
         bottom_(a, nv / 4, k * (nv / 4));
-        if constexpr (Bottom::kInverse)
-            for (std::size_t h = 4; h < nv; h *= 4)
+        if constexpr (Bottom::kInverse) {
+            if (nv >= 16) kernels::inverse_h4(vectors(a), nv / 16, ir_, k * (nv / 16));
+            for (std::size_t h = 16; h < nv; h *= 4)
                 for (std::size_t j = 0, g = k * (nv / (4 * h)); j < nv; j += 4 * h, ++g) inverse(a + 8 * j, h, g);
+        }
     }
 
     static Vec* vectors(std::uint32_t* a) { return reinterpret_cast<Vec*>(a); }
@@ -441,15 +453,20 @@ public:
     Vec operator()(std::size_t v) const {
         if (v - first_ < count_) return _mm256_loadu_si256(reinterpret_cast<const Vec*>(in_ + (8 * v - shift_)));
         if (v - first_touched_ >= touched_) return _mm256_setzero_si256();
-        return edge(v);
+        return edge(in_, shift_, end_, v);
+    }
+
+    // Whether every vector outside [lo, hi) is zero.
+    bool within(std::size_t lo, std::size_t hi) const {
+        return touched_ == 0 || (first_touched_ >= lo && first_touched_ + touched_ <= hi);
     }
 
 private:
-    // A vector partly inside.
-    [[gnu::noinline]] Vec edge(std::size_t v) const {
+    // A vector partly inside. Static, so a Source passed by value stays in registers.
+    [[gnu::noinline]] static Vec edge(const std::uint32_t* in, std::size_t shift, std::size_t end, std::size_t v) {
         alignas(32) std::uint32_t x[8] = {};
         for (std::size_t i = 8 * v; i < 8 * v + 8; ++i)
-            if (i >= shift_ && i < end_) x[i - 8 * v] = in_[i - shift_];
+            if (i >= shift && i < end) x[i - 8 * v] = in[i - shift];
         return load(x);
     }
 
@@ -465,9 +482,25 @@ private:
 
 // Radix-4 identity group on the quarters a, b, c, d (a polynomial mod X^4 - 1, X = x^(n/4)):
 // outputs (a + c) + (b + d), (a + c) - (b + d), (a - c) + z (b - d), (a - c) - z (b - d), z = r[1].
-inline void forward_top4(const Source& in, Vec* out, std::size_t h, const std::uint32_t* roots) {
+// Sources in one half skip the zero quarters.
+[[gnu::noinline]] inline void forward_top4(Source in, Vec* out, std::size_t h, const std::uint32_t* roots) {
     const Factor z(roots[1], roots[9]);
     const Vec p = broadcast(kP);
+    if (in.within(0, 2 * h)) {  // c = d = 0
+        for (std::size_t j = 0; j < h; ++j) {
+            const Vec a = in(j), b = in(j + h), zb = times(b, z);
+            out[j] = add(a, b), out[j + h] = diff(a, b), out[j + 2 * h] = add(a, zb), out[j + 3 * h] = diff(a, zb);
+        }
+        return;
+    }
+    if (in.within(2 * h, 4 * h)) {  // a = b = 0
+        for (std::size_t j = 0; j < h; ++j) {
+            const Vec c = in(j + 2 * h), d = in(j + 3 * h);
+            const Vec mc = _mm256_sub_epi32(p, c), zmd = times(_mm256_sub_epi32(p, d), z);
+            out[j] = add(c, d), out[j + h] = diff(c, d), out[j + 2 * h] = add(mc, zmd), out[j + 3 * h] = diff(mc, zmd);
+        }
+        return;
+    }
     for (std::size_t j = 0; j < h; ++j) {
         const Vec a = in(j), b = in(j + h), c = in(j + 2 * h), d = in(j + 3 * h);
         const Vec ac = add(a, c), amc = _mm256_sub_epi32(add(a, p), c);  // < 2P
@@ -478,8 +511,19 @@ inline void forward_top4(const Source& in, Vec* out, std::size_t h, const std::u
 }
 
 // Radix-2 on the halves u, v: outputs u + v, u - v.
-inline void forward_top2(const Source& in, Vec* out, std::size_t h) {
+[[gnu::noinline]] inline void forward_top2(Source in, Vec* out, std::size_t h) {
     const Vec p = broadcast(kP);
+    if (in.within(0, h)) {  // v = 0
+        for (std::size_t j = 0; j < h; ++j) out[j] = out[j + h] = in(j);
+        return;
+    }
+    if (in.within(h, 2 * h)) {  // u = 0
+        for (std::size_t j = 0; j < h; ++j) {
+            const Vec v = in(j + h);
+            out[j] = v, out[j + h] = _mm256_sub_epi32(p, v);
+        }
+        return;
+    }
     for (std::size_t j = 0; j < h; ++j) {
         const Vec u = in(j), v = in(j + h);
         out[j] = add(u, v), out[j + h] = _mm256_sub_epi32(add(u, p), v);

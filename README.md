@@ -42,6 +42,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [pow_of_formal_power_series_sparse](problems/polynomial/pow_of_formal_power_series_sparse) | [13 ms](https://judge.yosupo.jp/submission/409426) | 43 ms |
 | [sqrt_of_formal_power_series_sparse](problems/polynomial/sqrt_of_formal_power_series_sparse) | [9 ms](https://judge.yosupo.jp/submission/409443) | 49 ms |
 | [product_of_polynomial_sequence](problems/polynomial/product_of_polynomial_sequence) | [29 ms](https://judge.yosupo.jp/submission/409448) | 82 ms |
+| [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |
 | [multipoint_evaluation_on_geometric_sequence](problems/polynomial/multipoint_evaluation_on_geometric_sequence) | [10 ms](https://judge.yosupo.jp/submission/409475) | 34 ms |
 | [polynomial_interpolation_on_geometric_sequence](problems/polynomial/polynomial_interpolation_on_geometric_sequence) | [15 ms](https://judge.yosupo.jp/submission/409510) | 90 ms |
 | [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |

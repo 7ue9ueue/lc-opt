@@ -6,6 +6,8 @@ Power series modulo P = 998244353 for `problems/polynomial/` (issue #95). Two la
 - `calculus.hpp`: coefficient-wise operations: `derivative`, `divide_by_index` (integration).
 - One header per operation on top: `inverse.hpp`, `exp.hpp` (Newton iterations), `log.hpp`
   (division f'/f), `pow.hpp` (c (f / f[0])^e as exp(e log)), `sqrt.hpp` (Newton iteration).
+- `sparse.hpp`: linear recurrences with few taps, for series with few nonzero terms (issues
+  #69-#73); independent of the transform layer.
 
 APIs and usage: the header of each file. Tests: `test.cpp` (O(n^2) references; sizes 1..64,
 powers of two and their neighbours up to 2^20, random sizes; also run under ASan/UBSan in CI).
@@ -183,6 +185,32 @@ negations: the inverse update and the root step both come out with the right sig
     f u^2) / 2, needs f u^2 mod x^2m, a longer product than g h.
   - Harvey's 4/3 M(n) square root (Harvey 2011 below; 8 T(n) with M(n) = 6 T(n)): blocked,
     more leaf products per transform; not tried (as the 13/9 reciprocal, issue #62 below).
+
+## Sparse
+
+`Recurrence`: g[i] = r[i] + sum over taps (d, c) of c g[i - d], at most 16 taps, r sparse;
+`next(out, count)` produces the next coefficients into any window that holds the history before
+it (a ring, or one array). For 1/f: taps (i_k, -a_k / a_0), r = [1 / a_0].
+- Blocks of 16. Short taps (d < 16): the state is the last w = max d values;
+  g[n + t] = sum_(j < w) A[t][j] g[n - 1 - j] + sum_(s <= t) u[t - s] r'[n + s], u the short
+  taps' impulse response, r' = r plus the long taps' terms (16-wide loads at n - d, all before
+  the block). A and u are built once by running the short recurrence on unit states.
+- Where no long tap reaches and r is zero (all of a dense f's output): 64 coefficients per step
+  from one state, in four independent blocks of 16, the block holding the next state first.
+  w products per coefficient and no dependency inside a step. One kernel per w (1..15), fully
+  unrolled.
+- Products: coefficient times 2^32 (Montgomery form) and value, both below P, by `vpmuludq`
+  into 64-bit sums laid out as qwords of the even and odd outputs (no shuffles before the
+  products). Reduction per sum: up to 12 products, one Montgomery step (< 4P) and two
+  subtractions; up to 17 (any sum below 2^64), first 2^32 h + l -> h (2^32 mod P) + l < 2^62.
+- Blocks with long taps or r: r' reduced, the A part reduced, then h 2^32 + U r' (17 products).
+  Without short taps the block is r' itself.
+- Costs (`lc-amd`, in memory): about 0.125 + 0.05 w ns per coefficient for w <= 12 (0.463 at w = 7);
+  each column is 4 `vpmuludq` + 4 `vpaddq` per 16 values, 2.8 cycles.
+- Next, for exp, log, pow and sqrt (#70-#73): their recurrences have coefficients linear in n
+  (log's n g_n is constant-coefficient: G = n g, then a division by n); dense small-tap inputs
+  then need a different block step, and bulk inverses of 1..N (`calculus.hpp` has batch
+  inversion).
 
 ## Measurements
 
@@ -363,6 +391,24 @@ products 1.77 and 1.69).
   inv 0.9800, exp 0.9841, log 0.9700, pow 0.9768, sqrt 0.9826. All official tests pass
   (`judge.py test`, `lc-amd`).
 
+2026-10-09, claude (issue #69, inv_of_formal_power_series_sparse):
+- New `sparse.hpp` (above) and its tests: the recurrence against its definition for 3000 random
+  tap sets (short, long, mixed, block edges, 16 taps at P - 1), next() in random lengths into an
+  array and into a ring; each width 1..15 over 20000 coefficients; the reduction at its bounds
+  (12 (P - 1)^2 unfolded, 2^64 - 1 folded). With the unfolded bound raised to 14 the tests fail;
+  random recurrences alone did not catch it.
+- Kernel steps, solve phase of small_dense_02 (w = 7, 10^6 coefficients) in process, ms: sums in
+  a struct by reference and a call per block (GCC kept them on the stack) 2.16; sums in
+  registers, 32 per step 0.85; 64 per step, unrolled per width, an empty asm after each column
+  (GCC otherwise formed all products first and spilled 14 per block) 0.68; the block holding
+  the next state first (it was ~285 instructions into a step, past the 256-entry reorder
+  buffer) 0.53. In memory, w = 7: 0.711 -> 0.557 -> 0.463 ns per coefficient.
+- Not kept: the state in registers, lanes broadcast by `vpermd` (0.711 at 32 per step, 0.766 at
+  64; GCC spilled the state); broadcasts from memory cost no vector uop and their store
+  forwarding is off the critical path once the state block comes first. Each column as asm in
+  the order M M A A (the leaf product's finding above): w = 7 0.480 against 0.466 for GCC's
+  M A M A, two alternated runs (the multiplies here take their column from memory).
+
 ## Sources
 
 - lib/ntt (our refactor of QPoly): table layout, kernels, recursion.
@@ -380,3 +426,7 @@ products 1.77 and 1.69).
   division and square root", ACM TOMS 23 (1997) (the idea, as described by Hanrot and
   Zimmermann above). The blocked form (residuals by middle products of stored transforms) is
   the usual blockwise division; derived and written here, no code read.
+- Linear recurrences in blocks by jump matrices (the state times A = M^t rows) and the impulse
+  response of the short part: standard linear algebra, derived here; no code read.
+- Montgomery reduction: P. Montgomery, "Modular multiplication without trial division",
+  Math. Comp. 44 (1985).

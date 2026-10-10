@@ -12,12 +12,12 @@ Record when opened (issue #35): 45 ms.
   cyclic convolution of length n = P - 1 of A[x] = a_(g^x), B[x] = b_(g^x). One linear product of
   length 2n - 1 <= 2^20 (`lib/ntt`), folded: c_(g^k) = d_k + d_(k+n).
   c_0 = a_0 (b_0 + sum b) + b_0 sum a; the sums come out of the gather.
-- Transform: for 2^lg = 2 * 4^j >= 256 (all P > 2^17), `Product`: the radix-8 first level of
-  `../convolution_mod` (copied), then `lib/ntt`'s recursion. Other P: `ntt::Convolution`.
+- Transform: for 2^lg >= 512 (P >= 131), `ntt::Product` (`lib/ntt/product.hpp`: convolution_mod's
+  radix-8 first level, bottom stage and fused inverse top). Other P: `ntt::Convolution`.
 - Input: a_1.. and b_1.. are parsed into the factors' lower halves, then interleaved into pairs
   a_i + 2^32 b_i (one 8-byte load serves both factors). The pairs live in the factors' upper
-  halves (which the radix-8 level does not read): pairs 1..2^lg/4 in a's, the rest in b's. No
-  memory beyond `ntt::Convolution`'s layout.
+  halves (which `ntt::Product` does not read): pairs 1..2^lg/4 in a's, the rest in b's. No
+  memory beyond the product's layout.
 - Gather: powers g^x, g^(x+16) by a vector Shoup multiply (16 lanes, step g^16), lane order
   0 1 4 5 2 3 6 7 so that two `vpgatherdq` and two `shufps` give A and B in natural order.
 - Output: scatter c[g^k] into b's buffer, `../convolution_mod/fields.hpp`,
@@ -74,9 +74,16 @@ Record when opened (issue #35): 45 ms.
   (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
   values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
   12.04 → 11.93 ms (0.993). 40/40 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
+- 2026-10-10, claude (lib, issue #156 round 2): `Product` is now a wrapper of `ntt::Product`
+  (`lib/ntt/product.hpp`, moved from `../convolution_mod`); the copied radix-8 level is gone.
+  New in the product: convolution_mod's bottom stage (two groups per asm statement, no weight
+  array) and fused inverse top; P in [131, 2^17] also takes it (radix-4 top at odd lg).
+  `judge.py bench`, `lc-bench` (EPYC 7B13), 31 rounds, slowest 3 cases: 12.18 -> 11.91 ms,
+  ratio 0.9764. 40/40 official tests, `stress.py` 300 rounds and 24 known large cases,
+  ASan/UBSan on 7 official cases (file and pipe input).
 
 ## Sources
 
 - Discrete log reduction of multiplicative convolution mod a prime: standard (Rader-style index
   map). No code read.
-- `lib/ntt`, `lib/io`; `../convolution_mod` for the radix-8 level and `fields.hpp` (shared).
+- `lib/ntt` (`ntt::Product`), `lib/io`; `../convolution_mod/fields.hpp` (shared).

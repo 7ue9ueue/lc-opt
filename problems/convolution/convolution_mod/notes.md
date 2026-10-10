@@ -11,16 +11,17 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
 ## Design
 
 - `lib/ntt`: one cyclic transform of length 2^lg >= N + M - 1 (2^20 at the maximum).
-  For 2^lg = 2 * 4^j >= 1024 with both factors at most half the length (all large tests),
-  `solution.cpp` replaces the top level: one radix-8 pass per factor reads its lower half once
+  With both factors at most half the length and lg >= 9 (all large tests), `ntt::Product`
+  (`lib/ntt/product.hpp`; built here in rounds 1-5, moved to lib/ntt by issue #156). For
+  2^lg = 2 * 4^j it replaces the top level: one radix-8 pass per factor reads its lower half once
   and writes the first radix-4 group of both halves (no copy of the lower half, no separate
-  pass for the upper half's group). Below it, `lib/ntt`'s recursion and kernels (copied as
-  `Subtrees`) except the bottom stage, which comes from `bottom.hpp` (`gen_asm.py`, built on
+  pass for the upper half's group). Below it, `lib/ntt`'s recursion and kernels except the bottom
+  stage, which comes from `lib/ntt/product_kernels.hpp` (`gen_product_kernels.py`, built on
   `lib/ntt/gen_kernels.py`): two groups per inlined asm statement, leaf weights taken from the
   group's own twiddles (no weight array), leaf products with each coefficient of B broadcast once.
   The inverse top level (identity group of the lower half, group 1 of the upper half, the radix-2
-  level between them and the scale) is one pass, `top.hpp` (`gen_asm.py`): the scale is folded
-  into the twiddles, 9 Shoup products per column instead of 13.
+  level between them and the scale) is one pass, `inverse_top`: the scale is folded into the
+  twiddles, 9 Shoup products per column instead of 13. Other sizes use `ntt::Convolution`.
 - Input: 9-digit tokens (fft_killer, all_same_01-03: 13 of the 16 large tests) and 1-digit tokens
   (all_same_00) take a fixed-width fast path in `solution.cpp`: token i starts at 10i (or 2i),
   so 8 tokens come from four 32-byte loads with no separator search; each block is checked by its
@@ -266,3 +267,9 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
   end-aligned variant does not count lower. Formatter at 34 cycles per 16 values; `forward` and
   `inverse` at 29.3 cycles per iteration, limited by dependence chains (25 without them).
   `bottom.hpp` and `top.hpp` would also fit convolution_mod_large and `lib/ntt`.
+- 2026-10-10, claude (lib, issue #156 round 2): `Product`, `Subtrees`, `forward_radix8`,
+  `bottom.hpp`, `top.hpp` and `gen_asm.py` moved to `lib/ntt` as `ntt::Product`
+  (`lib/ntt/product.hpp`, `product_kernels.hpp`, `gen_product_kernels.py`), so
+  convolution_mod_large and mul_modp_convolution use them too. Same asm; lg 9 and odd lg now take
+  `ntt::Product` too (radix-4 top). `judge.py bench`, `lc-bench`, 31 rounds, slowest 3 cases:
+  12.88 -> 12.93 ms median, ratio 0.9976 (noise). Compiled code: `lib/ntt/notes.md`.

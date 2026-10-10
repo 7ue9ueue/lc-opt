@@ -5469,11 +5469,14 @@ public:
     Product(const Product&) = delete;
     Product& operator=(const Product&) = delete;
 
-    // The factors, zero-filled: n and m coefficients < kModulus.
+    // The factors, zero-filled: n and m coefficients < kModulus. multiply() does not read words
+    // length() / 2 and up of either, so they may serve as scratch until then.
     std::uint32_t* a() { return a_; }
     std::uint32_t* b() { return b_; }
     // The caller's extra bytes, zero-filled.
     void* extra() { return extra_; }
+    // The transform length 2^lg.
+    std::size_t length() const { return std::size_t(1) << lg_; }
 
     // The n + m - 1 coefficients of a * b, canonical, in a(); b() is destroyed.
     const std::uint32_t* multiply() {
@@ -5512,7 +5515,6 @@ private:
     static constexpr std::size_t kPadding = 16;  // words after each factor: the kernels read 4 bytes past
 
     static int log_length(std::size_t n, std::size_t m) { return std::max(6, int(std::bit_width(n + m - 2))); }
-    std::size_t length() const { return std::size_t(1) << lg_; }
 
     // nv^-1 2^32 mod P: undoes the factor nv / 2^32 of the transform and the leaf products.
     static std::uint32_t scale(std::size_t nv) {

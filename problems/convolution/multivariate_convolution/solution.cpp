@@ -8,7 +8,6 @@
 // - Split: a few outer variables by schoolbook over their digits, the rest graded with fewer
 //   grades and shorter transforms (transform.hpp). A cost model picks it or the graded method.
 #include <sys/mman.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -19,6 +18,7 @@
 
 #include "lib/io/io.hpp"
 #include "lib/ntt/ntt.hpp"
+#include "lib/run/early.hpp"
 #include "../convolution_mod/fields.hpp"
 #include "../text_buffer.hpp"
 #include "transform.hpp"
@@ -207,7 +207,6 @@ void graded(const std::vector<u32>& n, std::size_t size, const u32* f, const u32
     if (m <= 16) return graded<2>(n, size, f, g, c, m);
     graded<4>(n, size, f, g, c, m);
 }
-
 
 // ---------------------------------------------------------------------------------------------
 // Split method. The outer variables (a subset O, Q = prod n_o positions) are multiplied by
@@ -960,16 +959,6 @@ void solve() {
     fields::write(out, c, size, text_buffer<fields::kTextBytes>(g, size * sizeof(u32)));  // g is dead
 }
 
-#ifdef __ELF__
-// Runs from .preinit_array, before libstdc++ initializes iostreams and locales; _exit skips teardown.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

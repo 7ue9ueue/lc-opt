@@ -2,7 +2,6 @@
 // a * b mod 998244353: one cyclic NTT of length 2^lg >= N + M - 1, output in fixed-width fields
 // (../convolution_mod/fields.hpp). Factors of at most half the length (all large tests) use
 // ntt::Product (lib/ntt/product.hpp), other sizes ntt::Convolution.
-#include <unistd.h>
 
 // lib/io/bulk32.hpp
 // Bulk read of uint32 arrays with AVX2, on top of io::Reader:
@@ -5527,6 +5526,35 @@ private:
 };
 
 }  // namespace ntt
+// lib/run/early.hpp
+// Program entry for solutions. RUN_EARLY(solve) runs solve() from the executable's
+// pre-initializers (.preinit_array), before the C++ runtime initializes iostreams and locales
+// (lib/io uses neither) and before any static constructor, then ends the process with _exit(0):
+// no exit handlers, no teardown, no unmapping. Elsewhere it defines main() { solve(); }.
+// Measurements: lib/run/notes.md.
+//
+//   namespace {
+//   void solve() { ... }  // flushes its output (io::Writer does on destruction)
+//   }  // namespace
+//
+//   RUN_EARLY(solve)      // at namespace scope, once per program
+
+#include <unistd.h>
+
+#ifdef __ELF__
+#define RUN_EARLY(solve)                                                                                  \
+    namespace {                                                                                           \
+    void run_early(int, char**, char**) {                                                                 \
+        solve();                                                                                          \
+        ::_exit(0);                                                                                       \
+    }                                                                                                     \
+    [[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early; \
+    }                                                                                                     \
+    int main() { solve(); }  // reached only if the loader skips .preinit_array
+#else
+#define RUN_EARLY(solve) \
+    int main() { solve(); }
+#endif
 // problems/convolution/convolution_mod/fields.hpp
 // Fixed-width output of residues < 10^9, byte for byte as ../fixed_width.hpp: each value
 // right-aligned in 9 characters, then a space; the last separator is a newline. Judge-specific:
@@ -5732,17 +5760,6 @@ void solve() {
     convolve(in, convolution, n, m);
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here). _exit skips their teardown too.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

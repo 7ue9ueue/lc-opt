@@ -9,7 +9,6 @@
 // - Split: a few outer variables by schoolbook over their digits, the rest graded with fewer
 //   grades and shorter transforms (transform.hpp). A cost model picks it or the graded method.
 #include <sys/mman.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -2934,6 +2933,35 @@ private:
 };
 
 }  // namespace ntt
+// lib/run/early.hpp
+// Program entry for solutions. RUN_EARLY(solve) runs solve() from the executable's
+// pre-initializers (.preinit_array), before the C++ runtime initializes iostreams and locales
+// (lib/io uses neither) and before any static constructor, then ends the process with _exit(0):
+// no exit handlers, no teardown, no unmapping. Elsewhere it defines main() { solve(); }.
+// Measurements: lib/run/notes.md.
+//
+//   namespace {
+//   void solve() { ... }  // flushes its output (io::Writer does on destruction)
+//   }  // namespace
+//
+//   RUN_EARLY(solve)      // at namespace scope, once per program
+
+#include <unistd.h>
+
+#ifdef __ELF__
+#define RUN_EARLY(solve)                                                                                  \
+    namespace {                                                                                           \
+    void run_early(int, char**, char**) {                                                                 \
+        solve();                                                                                          \
+        ::_exit(0);                                                                                       \
+    }                                                                                                     \
+    [[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early; \
+    }                                                                                                     \
+    int main() { solve(); }  // reached only if the loader skips .preinit_array
+#else
+#define RUN_EARLY(solve) \
+    int main() { solve(); }
+#endif
 // problems/convolution/convolution_mod/fields.hpp
 // Fixed-width output of residues < 10^9, byte for byte as ../fixed_width.hpp: each value
 // right-aligned in 9 characters, then a space; the last separator is a newline. Judge-specific:
@@ -3646,7 +3674,6 @@ void graded(const std::vector<u32>& n, std::size_t size, const u32* f, const u32
     if (m <= 16) return graded<2>(n, size, f, g, c, m);
     graded<4>(n, size, f, g, c, m);
 }
-
 
 // ---------------------------------------------------------------------------------------------
 // Split method. The outer variables (a subset O, Q = prod n_o positions) are multiplied by
@@ -4399,16 +4426,6 @@ void solve() {
     fields::write(out, c, size, text_buffer<fields::kTextBytes>(g, size * sizeof(u32)));  // g is dead
 }
 
-#ifdef __ELF__
-// Runs from .preinit_array, before libstdc++ initializes iostreams and locales; _exit skips teardown.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

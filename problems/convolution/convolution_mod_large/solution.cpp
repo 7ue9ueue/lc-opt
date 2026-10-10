@@ -1,11 +1,11 @@
 // a * b mod 998244353: one cyclic NTT of length 2^lg >= N + M - 1, output in fixed-width fields
 // (../convolution_mod/fields.hpp). Factors of at most half the length (all large tests) use
 // ntt::Product (lib/ntt/product.hpp), other sizes ntt::Convolution.
-#include <unistd.h>
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/ntt/product.hpp"
+#include "lib/run/early.hpp"
 #include "../convolution_mod/fields.hpp"
 
 namespace {
@@ -38,17 +38,6 @@ void solve() {
     convolve(in, convolution, n, m);
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here). _exit skips their teardown too.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

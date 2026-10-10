@@ -13,11 +13,11 @@
 // chunks. Each int64 array is transformed while it is still in the cache.
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
+#include "lib/run/early.hpp"
 #include "../convolution_mod/fields.hpp"
 #include "../text_buffer.hpp"
 
 #include <sys/mman.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -467,18 +467,6 @@ void solve() {
     out.flush();
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here), and _exit skips their teardown and the input's unmapping
-// by the Reader (the kernel does it at exit).
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

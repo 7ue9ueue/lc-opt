@@ -3,7 +3,6 @@
 // (fields.hpp). Factors of at most half the length (all large tests) use ntt::Product
 // (lib/ntt/product.hpp), other sizes ntt::Convolution. Inputs of 9-digit or 1-digit tokens take a
 // fixed-width parser.
-#include <unistd.h>
 
 // lib/io/bulk32.hpp
 // Bulk read of uint32 arrays with AVX2, on top of io::Reader:
@@ -5528,6 +5527,35 @@ private:
 };
 
 }  // namespace ntt
+// lib/run/early.hpp
+// Program entry for solutions. RUN_EARLY(solve) runs solve() from the executable's
+// pre-initializers (.preinit_array), before the C++ runtime initializes iostreams and locales
+// (lib/io uses neither) and before any static constructor, then ends the process with _exit(0):
+// no exit handlers, no teardown, no unmapping. Elsewhere it defines main() { solve(); }.
+// Measurements: lib/run/notes.md.
+//
+//   namespace {
+//   void solve() { ... }  // flushes its output (io::Writer does on destruction)
+//   }  // namespace
+//
+//   RUN_EARLY(solve)      // at namespace scope, once per program
+
+#include <unistd.h>
+
+#ifdef __ELF__
+#define RUN_EARLY(solve)                                                                                  \
+    namespace {                                                                                           \
+    void run_early(int, char**, char**) {                                                                 \
+        solve();                                                                                          \
+        ::_exit(0);                                                                                       \
+    }                                                                                                     \
+    [[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early; \
+    }                                                                                                     \
+    int main() { solve(); }  // reached only if the loader skips .preinit_array
+#else
+#define RUN_EARLY(solve) \
+    int main() { solve(); }
+#endif
 // problems/convolution/convolution_mod/fields.hpp
 // Fixed-width output of residues < 10^9, byte for byte as ../fixed_width.hpp: each value
 // right-aligned in 9 characters, then a space; the last separator is a newline. Judge-specific:
@@ -5705,7 +5733,6 @@ inline void write(io::Writer& out, const std::uint32_t* values, std::size_t coun
 
 namespace {
 
-
 // Input fast paths for inputs whose tokens all have 9 digits (13 of the 16 large tests) or 1 digit
 // (all_same_00), each followed by one separator: token i then starts at a fixed stride, so blocks
 // need no separator search. Each block is checked by its separator mask; the first block that
@@ -5823,17 +5850,6 @@ void solve() {
     convolve(in, convolution, n, m);
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here): 0.15 ms less per run. _exit skips their teardown too.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

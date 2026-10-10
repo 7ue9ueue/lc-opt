@@ -19,7 +19,7 @@ Next other user: 26 ms (adamant, 400554).
   rows of a and b spread over 4 groups of L1 sets. Each row is transformed over its own 17 bits
   after its band is parsed; one column pass then does the 3 row bits of a and b, the product and
   the inverse row bits; each row then gets its inverse 17 bits and is printed with
-  `../fixed_width.hpp`.
+  `../fixed_width.hpp`, its text in b (dead by then).
 - Inside a row: pieces of 2^12 values (16 KiB, L1), then the row's upper bits. The lane bits use a
   transpose: per 8-vector tile, radix-8 over the vector bits, 8x8 transpose, radix-8 over the former
   lane bits. Forward tiles stay transposed (the product does not care); the inverse restores them.
@@ -118,6 +118,12 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
 - 2026-10-10, claude (lib/io #21, round 3): submitted the #176 `main.cpp`,
   [409382](https://judge.yosupo.jp/submission/409382): AC 21 ms, 19.0 MiB; one launch spike
   (max_random_01 21, peers 12), clean 12 ms (`tools/spikes.py`). Best judged stays 12 ms.
+- 2026-10-10, claude (lib/io #21, round 4): the output text goes into b, dead after the product
+  and already touched, page-aligned, instead of `fixed_width.hpp`'s static 250 KB (63 page faults;
+  497 → 428 faults per run), and blocks are 60 pages (`lib/io/notes.md`: whole-page writes from
+  a page-aligned buffer are the fastest). `judge.py bench`, `lc-amd`, 31 rounds, slowest 3 cases:
+  12.93 → 12.66 ms (0.985). First try: the buffer move alone 0.988, with 60-page blocks 0.983.
+  Outputs byte-identical to main on all 13 tests (judge build, ASan/UBSan, pipe input).
 
 ## Sources
 

@@ -212,9 +212,10 @@ void solve() {
     default: combine<kMaxRowsLog>(a, b, block); break;
     }
     io::Writer out;
+    char* const text = fixed_width::text_buffer(b, size * sizeof(std::uint32_t));  // b is dead
     for (std::size_t r = 0; r < rows; ++r) {
         row_levels<true>(a + row_offset(r, block), block_log);
-        fixed_width::write(out, a + row_offset(r, block), std::min(block, total));
+        fixed_width::write(out, a + row_offset(r, block), std::min(block, total), text);
     }
 }
 

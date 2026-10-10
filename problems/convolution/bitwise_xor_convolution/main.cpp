@@ -1111,12 +1111,27 @@ template <int Shift>
 
 }  // namespace detail
 
-// values[0, count), count >= 1, as fixed-width fields. They are formatted in blocks of 250 KB,
-// longer than the Writer's buffer, so the Writer hands each block to write(2) directly: on a
-// 331 MB output 3% faster than 64 KiB writes.
-inline void write(io::Writer& out, const std::uint32_t* values, std::size_t count) {
-    constexpr std::size_t kBlock = 25600;  // values
-    alignas(64) static char text[10 * kBlock + 96];
+// Values per block: 240 KiB of text, longer than the Writer's buffer, so the Writer hands each
+// block to write(2) directly (on a 331 MB output 3% faster than 64 KiB writes). It is 60 pages:
+// with a page-aligned buffer and output offset, write(2) copies whole pages, its fastest case
+// (lib/io/notes.md).
+inline constexpr std::size_t kBlock = 24576;
+inline constexpr std::size_t kTextBytes = 10 * kBlock + 96;
+inline constexpr std::size_t kPage = 4096;
+
+// A text buffer for write(): page-aligned within spare, memory the caller no longer needs and has
+// already touched (so it costs no page faults), if kTextBytes fit; else a static buffer.
+inline char* text_buffer(void* spare, std::size_t spare_bytes) {
+    const auto start = reinterpret_cast<std::uintptr_t>(spare);
+    const std::uintptr_t aligned = (start + kPage - 1) & ~(kPage - 1);
+    if (aligned - start + kTextBytes <= spare_bytes) return reinterpret_cast<char*>(aligned);
+    alignas(kPage) static char fallback[kTextBytes];
+    return fallback;
+}
+
+// values[0, count), count >= 1, as fixed-width fields, through text: kTextBytes bytes, best
+// from text_buffer().
+inline void write(io::Writer& out, const std::uint32_t* values, std::size_t count, char* text) {
     const detail::Constants& k = detail::constants();
     for (std::size_t i = 0; i < count; i += kBlock) {
         const std::size_t n = std::min(kBlock, count - i);
@@ -1577,10 +1592,12 @@ void solve() {
     forward_rows();
     columns(x, a, rows_log, row_vectors, stride);
 
-    // Each chunk ends with a newline: the checker compares tokens.
+    // Each chunk ends with a newline: the checker compares tokens. The text goes after the chunk,
+    // in what is left of a.
+    char* const text = fixed_width::text_buffer(values + chunk, (rows * row_vectors / 2 - chunk / 8) * sizeof(Vec));
     for (std::size_t r = 0; r < rows; r += chunk_rows) {
         for (std::size_t i = 0; i < chunk_rows; ++i) inverse_row(x + (r + i) * stride, values + i * row_values, row_log);
-        fixed_width::write(out, values, chunk);
+        fixed_width::write(out, values, chunk, text);
     }
     out.flush();
 }

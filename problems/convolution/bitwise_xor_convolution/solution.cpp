@@ -455,10 +455,12 @@ void solve() {
     forward_rows();
     columns(x, a, rows_log, row_vectors, stride);
 
-    // Each chunk ends with a newline: the checker compares tokens.
+    // Each chunk ends with a newline: the checker compares tokens. The text goes after the chunk,
+    // in what is left of a.
+    char* const text = fixed_width::text_buffer(values + chunk, (rows * row_vectors / 2 - chunk / 8) * sizeof(Vec));
     for (std::size_t r = 0; r < rows; r += chunk_rows) {
         for (std::size_t i = 0; i < chunk_rows; ++i) inverse_row(x + (r + i) * stride, values + i * row_values, row_log);
-        fixed_width::write(out, values, chunk);
+        fixed_width::write(out, values, chunk, text);
     }
     out.flush();
 }

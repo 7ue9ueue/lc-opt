@@ -5664,11 +5664,11 @@ inline Vec difference(Vec x, Vec y) { return reduce(_mm256_sub_epi32(add(x, broa
 //   h = 1 / g mod x^m = h0 - x^(m/2) (h0 e mod x^(m/2)), e = (g h0)[m/2, m)
 //   t = h r mod x^m   = h0 r0 + x^(m/2) (h0 (r1 - e r0) mod x^(m/2))
 //   g s mod x^m       = g0 s0 + x^(m/2) ((g0 s1 + g1 s0) mod x^(m/2))
-// Each product has degree < m - 1, so a cyclic product of length m gives it exactly. The upper
-// parts are needed only if n - m > m/2. T_m(g1) = ±(T_m(g) - G0): x^(m/2) is 1 in the lower half
-// of a transform of length m and -1 in its upper half. 14 transforms and 8 leaf products of
+// Each product has degree < m - 1, so a cyclic product of length m gives it exactly; the upper
+// parts are needed only if n - m > m/2. (g s)[m/2, m) is the upper half of the cyclic product
+// g s0 + g0 x^(m/2) s1 (no product reaches x^(3m/2)). 14 transforms and 8 leaf products of
 // length m (a full step, as in exp_newton: 16 and 7).
-// Spans: gt [G0, T_m(g)], w, work: 2m, m and m words; ht holds H.
+// Spans: gt = [G0, T_m(g)] and w of 2m words, work of m words; ht holds H.
 [[gnu::always_inline]] inline void exp_last_step(const Transform& t, std::span<const std::uint32_t> d, std::span<std::uint32_t> g,
                                                  std::size_t m, bool first, Vec d_before, std::span<std::uint32_t> gt,
                                                  std::span<const std::uint32_t> ht, std::span<std::uint32_t> w,
@@ -5701,20 +5701,14 @@ inline Vec difference(Vec x, Vec y) { return reduce(_mm256_sub_epi32(add(x, broa
         return add(x, _mm256_sub_epi32(broadcast(kP), i ? load_unaligned(d.data() + i - 1) : d_before));
     });
     t.forward(w.first(std::min(rest, half)), 0, work);  // T_m(s0)
-    if (upper) {  // (g0 s1 + g1 s0) mod x^(m/2) at r0t[0, m/2)
-        t.forward(w.subspan(half, rest - half), 0, r0t);
-        for (std::size_t i = 0; i < half; i += 8) store(glt.data() + i, difference(load(glt.data() + i), load(g0t.data() + i)));
-        for (std::size_t i = half; i < m; i += 8) store(glt.data() + i, difference(load(g0t.data() + i), load(glt.data() + i)));
-        const Transform::Pair pairs[] = {{g0t, r0t}, {glt, work}};
-        t.inverse_product_sum(pairs, r0t, Half::kLower);
+    if (upper) {  // (g s)[m/2, rest) at r0t[m/2, ..)
+        t.forward(w.subspan(half, rest - half), half, r0t);
+        const Transform::Pair pairs[] = {{glt, work}, {g0t, r0t}};
+        t.inverse_product_sum(pairs, r0t, Half::kUpper);
+        std::copy(r0t.begin() + std::ptrdiff_t(half), r0t.begin() + std::ptrdiff_t(rest), g.begin() + std::ptrdiff_t(m + half));
     }
-    t.inverse_product(g0t, work, work, both);  // g0 s0
-    std::uint32_t* const out = g.data() + m;
-    const std::size_t full = std::min(rest, half);
-    std::copy_n(work.begin(), full, out);
-    std::size_t i = half;
-    for (; i + 8 <= rest; i += 8) store_unaligned(out + i, reduce(add(load(work.data() + i), load(r0t.data() + i - half)), kP));
-    for (; i < rest; ++i) out[i] = (work[i] + r0t[i - half]) % kP;
+    t.inverse_product(g0t, work, work, Half::kLower);  // (g s)[0, m/2) = (g0 s0)[0, m/2)
+    std::copy_n(work.begin(), std::min(rest, half), g.begin() + std::ptrdiff_t(m));
 }
 
 // The Newton steps of exp() below, from g mod x^kExpBase (given) to g mod x^n, n = g.size() >

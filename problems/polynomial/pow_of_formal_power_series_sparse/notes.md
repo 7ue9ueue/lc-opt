@@ -3,7 +3,9 @@
 f with K <= 10 nonzero terms, N <= 10^6, M <= 10^18; print the first N coefficients of f^M
 mod 998244353. 10 s. Input is tiny; output up to 10 MB.
 
-Best judged: none yet. Record when opened (issue #72): 43 ms.
+Best judged: ours, 13 ms: [409426](https://judge.yosupo.jp/submission/409426) (`main.cpp` of
+#196), with one launch spike (max_random_01 13 ms against 3 for its peers); clean score 7 ms
+(`tools/spikes.py`). Record when opened (issue #72): 43 ms.
 
 ## Tests
 
@@ -55,6 +57,12 @@ process, small_dense_02, 10^6 coefficients: 2.95 -> 2.35 ms.
     2.60 (0.33 less), and its reciprocals 0.35; after this round the dependency costs nothing
     (the kernel is throughput-bound, about 390 vector ops per block at w = 6).
   - Not kept: windows of 32768 coefficients (no change).
+  - Merged as #196. CI: exp sparse 0.9713, log sparse 0.9994; all 2 0.9853. Submitted:
+    [409425](https://judge.yosupo.jp/submission/409425) AC 16 ms, 13.8 MiB: small_dense_02 15
+    and 04 16 ms against 6 for 00 and 01, example_00 9 ms (three launch spikes); resubmitted
+    [409426](https://judge.yosupo.jp/submission/409426) AC 13 ms, 14.3 MiB: small_dense 6-7 ms,
+    max_random_01 13 (a spike; its peers 3). `tools/spikes.py`: clean 7 ms for both; a clean run
+    has P = 0.15 (35 cases within 9 ms of the max), so not resubmitted again.
 - Next: the solve is ~2.3 ms of 8.9. Op counts per block at w = 6: state part 112 (V and V',
   12 columns), triangle 118 (46 `vpmuludq`; 40 in a layout of consecutive qwords, 34 at best),
   odd reciprocals ~60, scale 40, reductions 30.

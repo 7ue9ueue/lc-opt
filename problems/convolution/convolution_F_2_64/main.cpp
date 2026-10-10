@@ -1735,11 +1735,15 @@ void stages_inverse(u64* p, std::size_t c, int i) {
     }
 }
 
-// Stages 1 and 0 of the 16 words at c (c a multiple of 16), four blocks of 4 words. A 4x4
-// transpose puts word j of block k in lane k of t[j]; stage 1 then pairs t[0] with t[2] and t[1]
-// with t[3], stage 0 t[0] with t[1] and t[2] with t[3]. The forward transform leaves each 16 words
+// Stages 3 to 0 run in two passes over a block, on groups of 16 words x0..x3 (x[k] = words
+// 4k + [0, 4) of the group). Stages 3 and 2 pair whole vectors. For stages 1 and 0 a 4x4
+// transpose puts word j of x[k] in lane k of t[j]: stage 1 pairs t[0] with t[2] and t[1] with
+// t[3], stage 0 t[0] with t[1] and t[2] with t[3]. The forward transform leaves each group
 // transposed and the inverse starts from there; the pointwise product does not care.
-// Lane k's twiddle is omega((c + 4k + j) >> s) = omega((c + j) >> s) ^ omega(4k >> s).
+//
+// Twiddles live in registers. Lane k's twiddle at stage s < 2 is omega((c + 4k + j) >> s) =
+// omega((c + j) >> s) ^ omega(4k >> s). From group g to g + 1 the bits g ^ (g + 1) = 2^(t+1) - 1
+// flip, t = ctz(g + 1): stage s's twiddle changes by omega((2^(t+1) - 1) << (4 - s)).
 alignas(32) constexpr std::array<std::array<u64, 4>, 2> kLaneOmega = [] {
     std::array<std::array<u64, 4>, 2> t{};  // [s][k] = omega(4k >> s)
     for (int s = 0; s < 2; ++s) {
@@ -1748,13 +1752,26 @@ alignas(32) constexpr std::array<std::array<u64, 4>, 2> kLaneOmega = [] {
     return t;
 }();
 
-struct Twiddles16 {
-    Vec w1, w0;  // j = 0
-};
+constexpr int kSteps = 17;  // t <= 16 for groups below 2^20; the step after the last one is unused
 
-inline Twiddles16 twiddles16(std::size_t c) {
-    const auto lanes = [c](int s) { return _mm256_xor_si256(broadcast(omega(c >> s)), load(kLaneOmega[s].data())); };
-    return {lanes(1), lanes(0)};
+alignas(32) constexpr std::array<std::array<std::array<u64, 4>, kSteps>, 4> kStep = [] {
+    std::array<std::array<std::array<u64, 4>, kSteps>, 4> table{};  // [s][t], four equal lanes
+    for (int s = 0; s < 4; ++s) {
+        for (int t = 0; t < kSteps; ++t) {
+            u64 v = 0;
+            for (int b = 4 - s; b <= t + 4 - s && b < kMaxLog; ++b) v ^= kBeta[b];
+            table[s][t] = {v, v, v, v};
+        }
+    }
+    return table;
+}();
+
+inline void step(Vec& w, int s, std::size_t group) {
+    w = _mm256_xor_si256(w, load(kStep[s][std::countr_zero(group + 1)].data()));
+}
+
+inline Vec lanes(std::size_t c, int s) {
+    return _mm256_xor_si256(broadcast(omega(c >> s)), load(kLaneOmega[s].data()));
 }
 
 // (u, v) -> (u + w v, u + w v + v), and back.
@@ -1770,49 +1787,64 @@ inline void butterfly_inverse(Vec& u, Vec& v, Vec w) {
 
 inline Vec plus_beta1(Vec w) { return _mm256_xor_si256(w, broadcast(kBeta[1])); }  // omega(m + 2), m % 4 = 0
 
-inline void kernel16_forward(u64* p, std::size_t c) {
-    const Twiddles16 w = twiddles16(c);
-    Vec x0 = load(p), x1 = load(p + 4), x2 = load(p + 8), x3 = load(p + 12);
-    transpose4(x0, x1, x2, x3);
-    butterfly_forward(x0, x2, w.w1);
-    butterfly_forward(x1, x3, w.w1);
-    butterfly_forward(x0, x1, w.w0);
-    butterfly_forward(x2, x3, plus_beta1(w.w0));
-    store(p, x0), store(p + 4, x1), store(p + 8, x2), store(p + 12, x3);
+// Stages 3 and 2, or 1 and 0, of the groups in d[c, end).
+template <bool Low>
+void group_stages_forward(u64* d, std::size_t c, std::size_t end) {
+    Vec w_high = Low ? lanes(c, 1) : broadcast(omega(c >> 3)), w_low = Low ? lanes(c, 0) : broadcast(omega(c >> 2));
+    for (std::size_t b = c; b < end; b += 16) {
+        u64* p = d + b;
+        Vec x0 = load(p), x1 = load(p + 4), x2 = load(p + 8), x3 = load(p + 12);
+        if constexpr (Low) transpose4(x0, x1, x2, x3);
+        butterfly_forward(x0, x2, w_high);
+        butterfly_forward(x1, x3, w_high);
+        butterfly_forward(x0, x1, w_low);
+        butterfly_forward(x2, x3, plus_beta1(w_low));
+        store(p, x0), store(p + 4, x1), store(p + 8, x2), store(p + 12, x3);
+        step(w_high, Low ? 1 : 3, b / 16);
+        step(w_low, Low ? 0 : 2, b / 16);
+    }
 }
 
-inline void kernel16_inverse(u64* p, std::size_t c) {
-    const Twiddles16 w = twiddles16(c);
-    Vec x0 = load(p), x1 = load(p + 4), x2 = load(p + 8), x3 = load(p + 12);
-    butterfly_inverse(x0, x1, w.w0);
-    butterfly_inverse(x2, x3, plus_beta1(w.w0));
-    butterfly_inverse(x0, x2, w.w1);
-    butterfly_inverse(x1, x3, w.w1);
-    transpose4(x0, x1, x2, x3);
-    store(p, x0), store(p + 4, x1), store(p + 8, x2), store(p + 12, x3);
+template <bool Low>
+void group_stages_inverse(u64* d, std::size_t c, std::size_t end) {
+    Vec w_high = Low ? lanes(c, 1) : broadcast(omega(c >> 3)), w_low = Low ? lanes(c, 0) : broadcast(omega(c >> 2));
+    for (std::size_t b = c; b < end; b += 16) {
+        u64* p = d + b;
+        Vec x0 = load(p), x1 = load(p + 4), x2 = load(p + 8), x3 = load(p + 12);
+        butterfly_inverse(x0, x1, w_low);
+        butterfly_inverse(x2, x3, plus_beta1(w_low));
+        butterfly_inverse(x0, x2, w_high);
+        butterfly_inverse(x1, x3, w_high);
+        if constexpr (Low) transpose4(x0, x1, x2, x3);
+        store(p, x0), store(p + 4, x1), store(p + 8, x2), store(p + 12, x3);
+        step(w_high, Low ? 1 : 3, b / 16);
+        step(w_low, Low ? 0 : 2, b / 16);
+    }
 }
 
-// Block d[c, c + 2^(i+1)), 3 <= i < kBlockLog: stages i down to 0 (or back), in pairs down to
-// stage 2, then the 16-word kernel.
+// Block d[c, c + 2^(i+1)), 3 <= i < kBlockLog: stages i down to 0 (or back): in pairs down to
+// stage 4, then stage 4 alone if i is even, then the group passes.
 void forward_block(u64* d, std::size_t c, int i) {
     const std::size_t end = c + (std::size_t(2) << i);
     int s = i;
-    for (; s >= 3; s -= 2) {
+    for (; s >= 5; s -= 2) {
         for (std::size_t b = c; b < end; b += std::size_t(2) << s) stages_forward(d + b, b, s);
     }
-    if (s == 2) {
-        for (std::size_t b = c; b < end; b += 8) stage_forward(d + b, 4, omega(b >> 2));
+    if (s == 4) {
+        for (std::size_t b = c; b < end; b += 32) stage_forward(d + b, 16, omega(b >> 4));
     }
-    for (std::size_t b = c; b < end; b += 16) kernel16_forward(d + b, b);
+    group_stages_forward<false>(d, c, end);
+    group_stages_forward<true>(d, c, end);
 }
 
 void inverse_block(u64* d, std::size_t c, int i) {
     const std::size_t end = c + (std::size_t(2) << i);
-    for (std::size_t b = c; b < end; b += 16) kernel16_inverse(d + b, b);
+    group_stages_inverse<true>(d, c, end);
+    group_stages_inverse<false>(d, c, end);
     if (i % 2 == 0) {
-        for (std::size_t b = c; b < end; b += 8) stage_inverse(d + b, 4, omega(b >> 2));
+        for (std::size_t b = c; b < end; b += 32) stage_inverse(d + b, 16, omega(b >> 4));
     }
-    for (int s = i % 2 == 0 ? 4 : 3; s <= i; s += 2) {
+    for (int s = i % 2 == 0 ? 6 : 5; s <= i; s += 2) {
         for (std::size_t b = c; b < end; b += std::size_t(2) << s) stages_inverse(d + b, b, s);
     }
 }

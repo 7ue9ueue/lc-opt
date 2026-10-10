@@ -108,6 +108,10 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
   values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
   11.36 → 11.25 ms (0.991). 24/24 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
+- 2026-10-10, claude (lib, issue #156 round 2): the arena comes from `lib/mem/huge.hpp`
+  (`mem::Arena`) instead of a local copy. Same instructions, other stack slots in `solve()` and
+  `transform_short`; `judge.py bench`, `lc-bench`, 21 rounds: 11.50 -> 11.44 ms (noise). Official
+  tests pass; ASan/UBSan on 6 official cases.
 
 ## Sources
 

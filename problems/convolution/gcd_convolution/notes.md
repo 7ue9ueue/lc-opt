@@ -92,6 +92,9 @@ Record when opened: 37 ms (407011). Best judged: ours, [409380](https://judge.yo
 - 2026-10-10, claude (lib/io #21, round 3): submitted the #176 `main.cpp`,
   [409380](https://judge.yosupo.jp/submission/409380): AC 14 ms, 22.5 MiB; clean 14 ms
   (`tools/spikes.py`: spikes only on small cases). New best judged (was 15 ms).
+- 2026-10-10, claude (lib, issue #156 round 2): the huge-page allocation comes from
+  `lib/mem/huge.hpp` instead of a local copy. Same stripped executable as before (judge flags,
+  `lc-amd`).
 
 ## Next
 

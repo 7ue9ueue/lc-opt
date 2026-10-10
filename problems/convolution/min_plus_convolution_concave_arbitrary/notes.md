@@ -95,3 +95,7 @@ Record when the issue opened: 117 ms.
   (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
   values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
   28.20 → 28.03 ms (0.991). 41/41 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
+- 2026-10-10, claude (lib, issue #156 round 2): the huge-page allocation comes from
+  `lib/mem/huge.hpp` (`mem::huge<T>`, inlined into `solve()`; the local `allocate<T>` was out of
+  line). `judge.py bench`, `lc-bench`, 21 rounds: 27.61 -> 27.78 ms, ratio 1.0009 (noise). Official
+  tests pass; ASan/UBSan on 5 official cases.

@@ -87,6 +87,9 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
 - Next: transforms are ~24.7 of ~41 ms and near lib/ntt's kernel bound; `write()` 6 ms is fixed.
   Five primes are the minimum with 30-bit primes (four give 2^120 < 2^147). Left: the radix-8
   level's reduction (1.2 ms), the subtrees (lib/ntt's kernels).
+- 2026-10-10, claude (lib, issue #156 round 2): the huge-page allocation comes from
+  `lib/mem/huge.hpp` instead of a local copy. Same stripped executable as before (judge flags,
+  `lc-amd`).
 
 ## Sources
 

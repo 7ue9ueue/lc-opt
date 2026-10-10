@@ -167,3 +167,6 @@ same harness: 2.55, 2.1, 2.05, 6.0, 12.1, 4.3, 11.2.
   (~1.5 ms if it reaches 5.8). Fuse the pointwise product into the stage 1-0 group passes (shared
   twiddles, no store and reload). Column gather and scatter still ~0.4 ms per inverse change;
   top Taylor and bottom four levels of taylor<2^16> as sheared passes with unaligned loads.
+- 2026-10-10, claude (lib, issue #156 round 2): the huge-page allocation comes from
+  `lib/mem/huge.hpp` instead of a local copy. Same stripped executable as before (judge flags,
+  `lc-amd`).

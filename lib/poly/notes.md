@@ -1777,6 +1777,9 @@ product-tree lanes):
   w_p, odd w_p not negated, one constant for both halves, no e, the last step's product with the
   given T_m(q mod x^m) in the lower half only, block 3 from lo instead of the given T_m(q_2))
   fail them.
+- Merged as #348. CI: pow 0.9839, compositional_inverse 0.9917, _large 0.9942, exp 0.9980, log
+  1.0066 (identical code); all 5 0.9948. Judged: pow [409718](https://judge.yosupo.jp/submission/409718)
+  AC 23 ms (was 26; three earlier runs had launch spikes, clean 24).
 
 ## Sources
 

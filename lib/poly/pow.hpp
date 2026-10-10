@@ -27,7 +27,7 @@ inline int power_log(std::size_t n) { return std::max(detail::log_derivative_log
 
 // Scratch words for power() of n coefficients.
 inline std::size_t power_scratch(std::size_t n) {
-    return Arena::footprint(std::size_t(1) << exp_log(n)) + std::max(detail::log_derivative_scratch(n), detail::exp_newton_scratch(n));
+    return Arena::footprint(detail::exp_length(n)) + std::max(detail::log_derivative_scratch(n), detail::exp_newton_scratch(n));
 }
 
 // g = c exp(e log(f / f[0])) mod x^n for n = g.size() >= 1, f[0] != 0, e and c residues.
@@ -39,7 +39,7 @@ inline std::size_t power_scratch(std::size_t n) {
 inline void power(const Transform& t, std::span<const std::uint32_t> f, std::uint32_t e, std::uint32_t c,
                   std::span<std::uint32_t> g, std::span<std::uint32_t> scratch) {
     using namespace detail;
-    const std::size_t n = g.size(), len = std::size_t(1) << exp_log(n);
+    const std::size_t n = g.size(), len = exp_length(n);
     if (f.empty() || f[0] == 0) std::abort();
     const std::span<std::uint32_t> d = scratch.first(len), rest = scratch.subspan(Arena::footprint(len));
     const Factor factor(e);

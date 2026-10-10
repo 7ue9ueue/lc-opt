@@ -40,10 +40,18 @@ inline void exp_direct(std::span<const std::uint32_t> d, std::span<std::uint32_t
 
 }  // namespace detail
 
-// Transform length exp uses for n coefficients: the Transform needs lg_max >= this.
-inline int exp_log(std::size_t n) {
-    return std::max(Transform::kMinLog + 1, int(std::bit_width(std::max<std::size_t>(n, 2) - 1)));
+namespace detail {
+
+// Words of d = f' and of the larger scratch buffers: a power of two >= n, at least 2 kExpBase.
+inline std::size_t exp_length(std::size_t n) {
+    return std::size_t(1) << std::max(Transform::kMinLog + 1, int(std::bit_width(std::max<std::size_t>(n, 2) - 1)));
 }
+
+}  // namespace detail
+
+// Transform length exp uses for n coefficients: the Transform needs lg_max >= this. The last
+// step's transforms have length exp_length(n) / 2, as do the full steps' doublings.
+inline int exp_log(std::size_t n) { return std::countr_zero(detail::exp_length(n)) - 1; }
 
 namespace detail {
 
@@ -111,7 +119,7 @@ inline Vec difference(Vec x, Vec y) { return reduce(_mm256_sub_epi32(add(x, broa
 }
 
 // The Newton steps of exp() below, from g mod x^kExpBase (given) to g mod x^n, n = g.size() >
-// kExpBase, for g' = d g: d has 2^exp_log(n) words, d[i] = 0 for i >= n - 1. Each step is
+// kExpBase, for g' = d g: d has exp_length(n) words, d[i] = 0 for i >= n - 1. Each step is
 // invariant under scaling g, so g[0] may be any nonzero constant. scratch: exp_newton_scratch(n).
 [[gnu::always_inline]] inline void exp_newton(const Transform& t, std::span<const std::uint32_t> d, std::span<std::uint32_t> g,
                                               std::span<std::uint32_t> scratch) {
@@ -156,7 +164,7 @@ inline Vec difference(Vec x, Vec y) { return reduce(_mm256_sub_epi32(add(x, broa
 }
 
 inline std::size_t exp_newton_scratch(std::size_t n) {
-    const std::size_t len = std::size_t(1) << exp_log(n);
+    const std::size_t len = exp_length(n);
     return 2 * Arena::footprint(len) + 2 * Arena::footprint(len / 2);
 }
 
@@ -164,7 +172,7 @@ inline std::size_t exp_newton_scratch(std::size_t n) {
 
 // Scratch words for exp() of n coefficients.
 inline std::size_t exp_scratch(std::size_t n) {
-    return Arena::footprint(std::size_t(1) << exp_log(n)) + detail::exp_newton_scratch(n);
+    return Arena::footprint(detail::exp_length(n)) + detail::exp_newton_scratch(n);
 }
 
 // g = exp(f) mod x^n for n = g.size() >= 1. f[0] = 0; coefficients of f past f.size() are zero.
@@ -183,7 +191,7 @@ inline std::size_t exp_scratch(std::size_t n) {
 inline void exp(const Transform& t, std::span<const std::uint32_t> f, std::span<std::uint32_t> g,
                 std::span<std::uint32_t> scratch) {
     using namespace detail;
-    const std::size_t n = g.size(), len = std::size_t(1) << exp_log(n);
+    const std::size_t n = g.size(), len = exp_length(n);
     const std::span<std::uint32_t> d = scratch.first(len);
     derivative(f.first(std::min(f.size(), n)), d);  // d[i] = 0 for i >= n - 1
     exp_direct(d, g.first(std::min(n, kExpBase)));

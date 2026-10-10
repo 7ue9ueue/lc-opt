@@ -20,7 +20,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [bitwise_and_convolution](problems/convolution/bitwise_and_convolution) | [11 ms](https://judge.yosupo.jp/submission/409492) | 26 ms |
 | [bitwise_xor_convolution](problems/convolution/bitwise_xor_convolution) | [13 ms](https://judge.yosupo.jp/submission/409428) | 25 ms |
 | [gcd_convolution](problems/convolution/gcd_convolution) | [14 ms](https://judge.yosupo.jp/submission/409380) | 37 ms |
-| [lcm_convolution](problems/convolution/lcm_convolution) | [16 ms](https://judge.yosupo.jp/submission/409381) | 37 ms |
+| [lcm_convolution](problems/convolution/lcm_convolution) | [14 ms](https://judge.yosupo.jp/submission/409551) | 37 ms |
 | [mul_mod2n_convolution](problems/convolution/mul_mod2n_convolution) | [21 ms](https://judge.yosupo.jp/submission/409247) | 81 ms |
 | [mul_modp_convolution](problems/convolution/mul_modp_convolution) | [12 ms](https://judge.yosupo.jp/submission/409350) | 45 ms |
 | [min_plus_convolution_convex_convex](problems/convolution/min_plus_convolution_convex_convex) | [13 ms](https://judge.yosupo.jp/submission/409301) | 20 ms |
@@ -36,7 +36,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [composition_of_formal_power_series](problems/polynomial/composition_of_formal_power_series) | [3 ms](https://judge.yosupo.jp/submission/409336) | 9 ms |
 | [composition_of_formal_power_series_large](problems/polynomial/composition_of_formal_power_series_large) | [35 ms](https://judge.yosupo.jp/submission/409535) | 72 ms |
 | [compositional_inverse_of_formal_power_series](problems/polynomial/compositional_inverse_of_formal_power_series) | [3 ms](https://judge.yosupo.jp/submission/409399) | 14 ms |
-| [compositional_inverse_of_formal_power_series_large](problems/polynomial/compositional_inverse_of_formal_power_series_large) | [47 ms](https://judge.yosupo.jp/submission/409541) | 93 ms |
+| [compositional_inverse_of_formal_power_series_large](problems/polynomial/compositional_inverse_of_formal_power_series_large) | [33 ms](https://judge.yosupo.jp/submission/409549) | 93 ms |
 | [inv_of_formal_power_series_sparse](problems/polynomial/inv_of_formal_power_series_sparse) | [10 ms](https://judge.yosupo.jp/submission/409351) | 24 ms |
 | [exp_of_formal_power_series_sparse](problems/polynomial/exp_of_formal_power_series_sparse) | [7 ms](https://judge.yosupo.jp/submission/409367) | 39 ms |
 | [log_of_formal_power_series_sparse](problems/polynomial/log_of_formal_power_series_sparse) | [14 ms](https://judge.yosupo.jp/submission/409396) | 38 ms |

@@ -23,18 +23,30 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   prime-power parts: the largest power of each prime to factor 0, the next to factor 1, ...).
   Point (i_1..) maps to y_r = sum i_j w_jr mod D_r. Then per point of the short axes' spectrum:
   Kronecker substitution with factor r padded to 2 D_r - 1, the product over Z mod three NTT
-  primes (`lib/multimod`, `Bounded` input), CRT straight to residues mod p (Montgomery, p odd), fold j + D_r onto j.
-  Coefficients < 2^18 p^2 < 2^78; the primes' product is 2^89.6.
-- One cyclic factor (all long tests): the places are [0, D), so a and b need no clearing and the
-  CRT folds as it reads (c_j + c_{j+D}). One long axis of stride 1 (dim1, dim2_00): the
-  transforms read f and g in place (masked loads, never past the count) and the CRT writes into
-  f. Two long axes (dim2_01, dim2_02): place j = r n_c + i_c with i_q = j mod n_q, so gather and
-  scatter run over blocks of 16 values of i_c, by place inside a block (f's rows stay in L1,
-  places come in runs of 16).
-- The transform's first radix-4 level reads the input directly (no copy pass) when sparse.
+  primes below 2^28 (`../convolution_mod_1000000007/product.hpp`, `lazy::Product`: lazy
+  reductions, 2^9 <= length <= 2^20, inputs < 4P raw), CRT straight to residues mod p
+  (Montgomery, p odd), fold j + D_r onto j. Coefficients < 2^18 p^2 < 2^77.8, folded sums
+  < 2^78.8; the primes' product is 2^83.96.
+- The two factors of a product are the halves of one pair array of 2^lg words; the last prime's
+  product runs in place, so the pair becomes its residues: 4 arrays of 2^lg words (pair, two
+  residues, work).
+- One cyclic factor (all long tests): the places are [0, D), and the CRT folds each prime's
+  residues first (y_k[j] + y_k[j + D] mod P_k), then one CRT per output.
+- One long axis of stride 1 (dim1, dim2_00, dim2_02): input rows go straight into pairs
+  [row r of f | row r of g], each zero-padded to half the pair. The short DFTs run on the pairs
+  (f and g in one pass), the products in place on each pair, and the CRT writes row r packed to
+  [r n, r n + n): inside pairs < r, already consumed (n <= half a pair).
+- Two long axes of coprime lengths (dim2_01): place j = r n_y + c holds the point
+  ((r + a c) mod n_x, c), a = 1 / n_y mod n_x (an isomorphism Z_D -> Z_nx x Z_ny). As a matrix,
+  A[r][c] = F[c][(r + a c) mod n_x] with F the rows of f along x: a transpose of rotated rows,
+  done in 8 x 8 AVX2 blocks (column blocks outer; the 8 rows of F stay in L1; rows that wrap use
+  masked loads and stores). The CRT is fused into the scatter. Scalar for the last n_y mod 8
+  columns, and for all when x has stride > 1 or a length < 8.
 - Split: axes above 48 are long (the shortest dropped while the transform would exceed 2^20);
-  a shorter axis joins when a cost model says so (13 ns per transform word, 0.5 ns per element
-  and axis length).
+  a shorter axis joins when a cost model says so (a product 10.5 ns per transform word below
+  2^18 words, 12 from there, plus 0.6 ns per word once for page faults; gather and scatter 2 ns
+  per point unless direct; a short DFT 0.5 ns per element and axis length). dim2_02 (53337 x 4)
+  stays direct: four products of 2^17 beat one of 2^19 plus gather and scatter.
 - Pointwise product when no axis is long. The scale 1 / prod(short n) is folded into the CRT
   constants. Output `../convolution_mod/fields.hpp` (10-byte fields). `.preinit_array` start.
 
@@ -115,11 +127,43 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
 - 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
   `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
   before (judge flags, `lc-amd`).
+- 2026-10-10, claude (round 3). Exploration files: `lc-opt-explore/multivariate_convolution_cyclic/r3`.
+  Per-case times: static builds (judge flags) run on the host of `lc-bench` (EPYC 7B13), pinned,
+  interleaved, median of 11 (`pcb.py`); phases: in-process `CLOCK_MONOTONIC` stamps, median of
+  11 (`probe.py`). Host runs read about 1 ms less than `judge.py`.
+  - v1: `lazy::Product` (primes below 2^28) instead of lib/multimod; direct rows padded to half
+    the transform (the lazy product reads whole halves). Per case: dim1_00 10.35 -> 9.58,
+    dim2_01 10.69 -> 10.11, dim2_02 10.09 -> 9.46 ms. `judge.py bench`, 21 rounds, 8 cases:
+    11.16 -> 10.51 (0.936).
+  - Phases of v1 (ms): dim1_00 read 0.73, products 6.33 (0.31 of it page faults of the product
+    arrays: pre-faulted, 6.07), CRT 0.27, write 1.11; dim2_01 also gather 0.33, scatter 0.17,
+    CRT 0.40.
+  - dim2_02 direct (4 rows, products of 2^17) instead of joined (one of 2^19): in-process
+    8.57 -> 7.67. Products 4 x 1.37 = 5.48 against 6.24: per word, 2^17 runs 10% faster (the
+    arrays stay nearer L2, fewer page faults). The cost model now says so.
+  - Skewed 8 x 8 transposes for two long axes (v2): gather of f and g 0.33 -> 0.34 cold (0.25
+    warm), scatter 0.16 -> 0.13. Memory-bound, not compute: each column block writes 32 bytes
+    into each of 199 rows of A, one RFO per line.
+  - Pair layout, last prime in place (v3): one array of 2^lg words less. dim1_00 9.42 -> 9.32,
+    dim2_01 9.90 -> 9.63 (5 rounds).
+  - Folding residues per prime before one CRT (v4): CRT 0.333 -> 0.213 ms on dim1_00. CRT fused
+    into the scatter: 0.462 -> 0.444 (its reads now go down columns of A).
+  - Per case, v1 / v3 / v4: dim1_00 9.22 / 9.18 / 9.06, dim2_00 9.07 / 9.06 / 8.93, dim2_01
+    9.72 / 9.62 / 9.55, dim2_02 9.15 / 8.29 / 8.25 ms.
+  - `judge.py bench`, 21 rounds, 8 slowest cases, main against v4: `lc-bench` 11.43 -> 10.56
+    (0.921); `lc-k68` 11.98 -> 11.15 (0.930).
+  - Checks: 24/24 official tests (`lc-amd`); `stress.py` 400 rounds plus 40 large (cases with two
+    coprime axes added); ASan/UBSan: stress 80 rounds and all 24 official cases, file and pipe;
+    `-march=x86-64-v3`: stress 150 rounds.
+- Next: at 2^19 the products' top two levels stream 2 MiB arrays through L3 (2^17 products run
+  10% faster per word): a fused radix-16 top level, forward and inverse, would save one pass of
+  each. dim2_01 still pays ~0.45 ms over dim1 (gather 0.30 with the pair's page faults, scatter
+  0.23).
 
 ## Sources
 
 - Chinese remainder theorem for cyclic groups (Z_ab = Z_a x Z_b for coprime a, b), as in the
   Good-Thomas prime-factor FFT; invariant-factor decomposition of finite abelian groups.
 - Kronecker substitution for multivariate products.
-- Our own code: `../convolution_mod_1000000007` (transform, CRT), `../convolution_mod`
+- Our own code: `../convolution_mod_1000000007` (`product.hpp`, CRT), `../convolution_mod`
   (`fields.hpp`), `lib/io`.

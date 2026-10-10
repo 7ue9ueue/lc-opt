@@ -4,7 +4,8 @@ f of N coefficients, M, a, r mod 998244353, N, M <= 2^19; print f(a r^i) for i <
 Slowest tests: max_random_00..02 (N = M = 2^19, random a, r). The a0_r01 tests have a = 0 or
 r in {0, 1}: no product (2.5-4.7 ms). near_pow_of_2 has N, M near 2^18; nm_1 has N or M = 1.
 
-Best judged: not submitted yet.
+Best judged: ours, 10 ms: [409475](https://judge.yosupo.jp/submission/409475) (`main.cpp` of #227),
+clean (`tools/spikes.py`).
 Record when opened (issue #76): 34 ms.
 
 ## Design
@@ -69,6 +70,13 @@ write M values with `fields.hpp`, nothing else (`floor.cpp`): 4.92-4.99 ms media
     a, r in {0, 1, 2, P - 1} or random; sizes 1-8, near powers of two, up to 2^19); ASan/UBSan
     on all 25 official cases, file and pipe input; `lib/poly/test.cpp` at -O2 (native and
     x86-64-v3) and ASan/UBSan.
+  - `lc-bench`, 21 rounds, max_random_00..02 (merged version): 10.04 ms; floor 4.70; v1 10.60.
+  - Merged as #227 (new problem: CI checks only).
+  - Submitted the merged `main.cpp` twice (2 of 5 this session):
+    [409473](https://judge.yosupo.jp/submission/409473) AC 13 ms, from a launch spike on nm_1_01
+    (13 ms; the same work in a0_r01_00 took 4; `spikes.py`: clean 10), and
+    [409475](https://judge.yosupo.jp/submission/409475) AC 10 ms, clean: random_01 and
+    max_random_02 10, max_random_00/01 9, the rest at most 8.
 - Next: the transform is 4.1 of the 5.2 ms above the floor and is convolution_mod's. Chirp
   steps by x_(32v+l) = D_v E_l(v) (per-lane geometric E by a Shoup product, scalar D_v with its
   quotient computed on the scalar side): 8 multiplies per vector instead of 10, ~0.08 ms.

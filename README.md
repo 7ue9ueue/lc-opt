@@ -7,22 +7,31 @@ Account: [Aiyiyi](https://judge.yosupo.jp/user/Aiyiyi).
 
 ## Results
 
-Every problem we have finished so far holds the fastest time on the judge.
+All but one of the problems we have finished beat the fastest time on the judge before us.
+convolution_mod_1000000007 is 2 ms behind: its large cases run in 21–23 ms, but each submission so far
+hit one of the judge's launch spikes.
 
 | Problem | Ours | Fastest before us |
 |---|---:|---:|
 | [many_aplusb](problems/sample/many_aplusb) | 18 ms | 23 ms |
 | [convolution_mod](problems/convolution/convolution_mod) | 14 ms | 23 ms |
-| [convolution_mod_large](problems/convolution/convolution_mod_large) | 452 ms\* | 737 ms |
+| [convolution_mod_large](problems/convolution/convolution_mod_large) | 439 ms | 737 ms |
+| [convolution_mod_1000000007](problems/convolution/convolution_mod_1000000007) | 31 ms | 29 ms |
+| [convolution_mod_2_64](problems/convolution/convolution_mod_2_64) | 44 ms | 76 ms |
+| [convolution_F_2_64](problems/convolution/convolution_F_2_64) | 46 ms | 409 ms |
 | [bitwise_and_convolution](problems/convolution/bitwise_and_convolution) | 12 ms | 26 ms |
 | [bitwise_xor_convolution](problems/convolution/bitwise_xor_convolution) | 14 ms | 25 ms |
 | [gcd_convolution](problems/convolution/gcd_convolution) | 15 ms | 37 ms |
-| [lcm_convolution](problems/convolution/lcm_convolution) | 17 ms | 37 ms |
+| [lcm_convolution](problems/convolution/lcm_convolution) | 16 ms | 37 ms |
+| [mul_mod2n_convolution](problems/convolution/mul_mod2n_convolution) | 21 ms | 81 ms |
+| [mul_modp_convolution](problems/convolution/mul_modp_convolution) | 12 ms | 45 ms |
+| [min_plus_convolution_convex_convex](problems/convolution/min_plus_convolution_convex_convex) | 17 ms | 20 ms |
 | [min_plus_convolution_convex_arbitrary](problems/convolution/min_plus_convolution_convex_arbitrary) | 11 ms | 38 ms |
-| [min_plus_convolution_concave_arbitrary](problems/convolution/min_plus_convolution_concave_arbitrary) | 31 ms | 117 ms |
+| [min_plus_convolution_concave_arbitrary](problems/convolution/min_plus_convolution_concave_arbitrary) | 27 ms | 117 ms |
+| [multivariate_convolution](problems/convolution/multivariate_convolution) | 14 ms | 117 ms |
+| [multivariate_convolution_cyclic](problems/convolution/multivariate_convolution_cyclic) | 15 ms | 117 ms |
 
 Times are the judge's, for the slowest test. Submission links are in each problem's `notes.md`.
-\* Judged with the QPoly program; the current `main.cpp` times 0.994 of it on the judge's CPU.
 
 Open problems: [issues](https://github.com/7ue9ueue/lc-opt/issues).
 

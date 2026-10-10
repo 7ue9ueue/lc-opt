@@ -3,11 +3,11 @@
 f with K <= 10 nonzero terms (f[0] = 1), N <= 10^6; print the first N coefficients of log(f)
 mod 998244353. 10 s. Input is tiny; output up to 10 MB.
 
-Best judged: ours, 9 ms: [409639](https://judge.yosupo.jp/submission/409639) (`main.cpp` of
-#196 / #300, the same code as #182); small_N_03 took 9 ms against 1 for its peers (launch spike);
-clean score 6 ms (small_dense_00 and _04 6 ms, _01 and _02 5). Earlier 14 ms (409396, spike;
-clean 5). `main.cpp` of #317: 10 ms (409663, spike; clean 6). Record when opened (issue #71):
-38 ms.
+Best judged: ours, 9 ms: [409669](https://judge.yosupo.jp/submission/409669) (`main.cpp` of
+#324) and [409639](https://judge.yosupo.jp/submission/409639) (`main.cpp` of #196 / #300, the
+code of #182), each set by launch spikes (+9 ms on a 0-1 ms case). Clean scores: #324 5, 5, 6
+ms (409667, 409668, 409669: its dense cases took 5 ms in 11 of 12 runs); #182 5 and 6. Record
+when opened (issue #71): 38 ms.
 
 ## Tests
 
@@ -135,6 +135,15 @@ N / 2 (they write the table) and 0.087 above.
     the official tests or 10^6-value runs (there the same block never reads and writes one
     slot). Mutants caught: runs not swapped, runs read at m + 0, 4, factors loaded after the
     stores.
+  - Merged as #324: CI 1.0014 (0.9978, 0.9980, 1.0083), then 0.9937 on a rerun (0.9872,
+    0.9966, 0.9974); the gain (~0.3% of the process) is below one run's noise.
+  - Submitted `main.cpp` of #324 (12.0-12.3 MiB, all AC):
+    [409667](https://judge.yosupo.jp/submission/409667) 12 ms (spikes on max_random_00, _03 and
+    small_N_03; clean 5), [409668](https://judge.yosupo.jp/submission/409668) 13 ms (spikes on
+    max_random_02, small_N_02; clean 5), [409669](https://judge.yosupo.jp/submission/409669)
+    9 ms (spikes on example_01 and small_N_02; `tools/spikes.py` misses the second, which also
+    spiked in 409668; clean 6, small_dense_00 6). Dense cases: 5 ms in 11 of 12. Best judged
+    stays 9 ms; the session's 5 submissions are used (409639, 409663, 409667-409669).
 - Next: 0.84 ms over the floor's 5.13 (recurrence 0.35 more than the floor's fill, division
   0.49 before the reordered table; both at about 3 vector ops per cycle). The division needs
   2.5 Montgomery products per value; fewer products (pairs of odd n by finite differences:

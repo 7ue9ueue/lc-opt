@@ -102,3 +102,6 @@ containers run under `judge.slice`, cpuset 0, an isolated partition. `tools/judg
 - Next: nothing here moves the judged time: w = 3 sits at 1.037 times the floor and judges 5 ms
   as w = 7 does. The broadcast-once kernel can join the next `sparse.hpp` change that has other
   gains (log of a sparse series uses the same kernel).
+- 2026-10-10, claude (issue #71, log_of_formal_power_series_sparse round 2): `Recurrence` now
+  broadcasts the state once per step (the kernel above), shipped with the log change.
+  `judge.py bench` (`lc-bench`, 41 rounds) against main: 0.9944; 24/24 official tests.

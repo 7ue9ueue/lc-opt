@@ -313,7 +313,11 @@ it (a ring, or one array). For 1/f: taps (i_k, -a_k / a_0), r = [1 / a_0].
 - Where no long tap reaches and r is zero (all of a dense f's output): 64 coefficients per step
   from one state, in four independent blocks of 16, the block holding the next state first.
   w products per coefficient and no dependency inside a step. One kernel per w (1..15), fully
-  unrolled.
+  unrolled. The state is broadcast once per step into w registers, not once per block: -1 to
+  -6% in memory for w = 1..15 (inv sparse #69 round 2), recurrence 0.482 -> 0.459 ms in the
+  log process at w = 7 (#71 round 2).
+- Not kept (#71 round 2): two streams per loop (a chunk's halves, each matrix column loaded
+  once for both): no faster for w <= 5, 13% slower at w = 7; loads are not the limit.
 - Products: coefficient times 2^32 (Montgomery form) and value, both below P, by `vpmuludq`
   into 64-bit sums laid out as qwords of the even and odd outputs (no shuffles before the
   products). Reduction per sum: up to 12 products, one Montgomery step (< 4P) and two
@@ -373,9 +377,14 @@ the same with e = 1/2. log is `Recurrence` on G = n g (taps (d, -f_d), r = n f_n
 the last), in place or not. For log: G from `Recurrence` in chunks, divided after the chunk's
 history is saved.
 - 2^32 / n: odd n by batch inversion, 4 chains of 8 lanes, a chain the 8 odd n of one block of
-  16; even n = 2m from a table of 2^32 / (2m) at m (2 MiB at N = 10^6, huge pages). Blocks write
-  the table below N / 2 and read it at n / 2, so a call is cut into pieces [a, b) with b <= 2a
-  (and at N / 2); the first 32 entries are filled at construction.
+  16; even n = 2m from a table of 2^32 / (2m) at m. Blocks write the table below N / 2 and read
+  it at n / 2, so a call is cut into pieces [a, b) with b <= 2a (and at N / 2); the first 32
+  entries are filled at construction.
+- The table is a ring of N / 4 words (1 MB at N = 10^6) in the caller's memory: entry m is
+  written at index m and last read at 2m, so the write of m replaces m - ring, read at
+  2 (m - ring) < m (an earlier block, or the same block before its stores). Pieces are also cut
+  where writes or reads wrap. The log solution puts it in the huge page of its G ring and text:
+  one 2 MiB page fault (0.075 ms) instead of two.
 - A piece: prefix products p_j = p_(j-1) x_j / 2^32 (Montgomery products, lazy in [0, 2P)),
   stored; the 32 lane totals inverted by a vector product tree with one scalar inversion at the
   root; backward, the odd reciprocals p_(j-1) q_j / 2^32 overwrite the prefixes; then the blocks
@@ -386,7 +395,11 @@ history is saved.
   no interleave.
 - Costs: 30 `vpmuludq` per 16 values (prefix 6, backward 12, products 12). `lc-amd`, 10^6 values
   in chunks of 25600: 0.447 ms (forward ~0.09, backward ~0.13, blocks ~0.23); about 65% of the
-  two multiply pipes.
+  two multiply pipes. `lc-bench`, TSC: 0.458 ms; forward 0.078, backward 0.141, blocks 0.151
+  below N / 2 (with the table's writes; 0.145 without its stores, so not memory) and 0.087 above.
+- Not kept (#71 round 2): 8 chains of 4 qword lanes (no odd-lane shifts or blends) with qword
+  odd reciprocals and the table interleaved by a blend: 0.50-0.53 ms. The products fused into
+  the `Recurrence` kernel loop (reciprocals first, a sink per step): slower by 0.05 ms.
 
 ## Composition
 

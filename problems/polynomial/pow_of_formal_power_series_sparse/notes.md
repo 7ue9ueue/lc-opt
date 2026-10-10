@@ -66,3 +66,6 @@ process, small_dense_02, 10^6 coefficients: 2.95 -> 2.35 ms.
 - Next: the solve is ~2.3 ms of 8.9. Op counts per block at w = 6: state part 112 (V and V',
   12 columns), triangle 118 (46 `vpmuludq`; 40 in a layout of consecutive qwords, 34 at best),
   odd reciprocals ~60, scale 40, reductions 30.
+- 2026-10-10, claude (issue #71, log_of_formal_power_series_sparse round 2): the bundle changed
+  with `lib/poly/sparse.hpp` (`Recurrence` broadcasts its state once per step; unused here). The
+  stripped executable is byte-identical (judge's command, `lc-amd`).

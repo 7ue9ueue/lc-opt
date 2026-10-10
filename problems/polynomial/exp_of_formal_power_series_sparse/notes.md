@@ -100,3 +100,7 @@ the slowest: every block still takes reciprocals and the long-tap path).
   separate pass at each window start). w = 4 (small_dense_00, 1.98 ms) stays on the block
   kernel. max_random (3.6 ms against a 1.4 ms floor) computes reciprocals and long-tap blocks for
   output that is mostly zero; not the slowest case.
+- 2026-10-10, claude (issue #71, log_of_formal_power_series_sparse round 2): the bundle changed
+  with `lib/poly/sparse.hpp` (`Recurrence` broadcasts its state once per step; unused here). The
+  stripped executable is byte-identical (judge's command, `lc-amd`).
+  `judge.py bench` (41 rounds): 0.9972, noise.

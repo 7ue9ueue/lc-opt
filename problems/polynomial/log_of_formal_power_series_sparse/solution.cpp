@@ -74,19 +74,21 @@ void solve() {
     }
     sparse::Recurrence recurrence(std::span<const sparse::Term>(taps.data(), k - 1),
                                   std::span<const sparse::Term>(rhs.data(), k - 1));
-    sparse::Divider divider(n);
 
     // G in a ring of history + kChunk words if the taps reach back at most a chunk, divided in
     // place once the next chunk's history is saved; else G in one array after kPadding zeros and
-    // g in a chunk of its own. The text follows, 16-byte aligned.
+    // g in a chunk of its own. Then the divider's table and the text, 16-byte aligned: at most
+    // 1.5 MB, one huge page, if the taps reach back at most a chunk.
     constexpr std::size_t kStep = sparse::Divider::kStep;
     const auto round_up = [](std::size_t x) { return (x + kStep - 1) / kStep * kStep; };
     const std::size_t history = recurrence.history();
     const bool ring = history <= kChunk;
     const std::size_t before = ring ? history : sparse::Recurrence::kPadding;
     const std::size_t words = round_up(before + (ring ? kChunk : round_up(n) + kChunk));
-    std::uint32_t* const area = allocate(words + 10 * kChunk / sizeof(std::uint32_t));
-    char* const text = reinterpret_cast<char*>(area + words);
+    const std::size_t table = sparse::Divider::table_words(n);
+    std::uint32_t* const area = allocate(words + table + 10 * kChunk / sizeof(std::uint32_t));
+    sparse::Divider divider(n, area + words);
+    char* const text = reinterpret_cast<char*>(area + words + table);
     std::uint32_t* const quotient = ring ? area + before : area + words - kChunk;
     io::Writer out;
     std::uint32_t* G = area + before;

@@ -1397,7 +1397,7 @@ void test_compositional_inverse() {
 }
 
 // Divider over [0, n) in calls of random multiples of kStep, into a separate array or in place;
-// G random, or P - 1 (kind 1), or zero but at a few indices (kind 2).
+// G random, or P - 1 (kind 1), or zero but at a few indices (kind 2). The table starts as garbage.
 void check_divider(std::size_t n, int kind, bool in_place) {
     using poly::sparse::Divider;
     static const auto inv = reciprocal_table(std::size_t(1) << 21);
@@ -1405,7 +1405,9 @@ void check_divider(std::size_t n, int kind, bool in_place) {
     std::vector<u32> G(padded + 1), g(padded, P);
     for (std::size_t i = 0; i < padded + 1; ++i) G[i] = kind == 1 ? P - 1 : kind == 2 && pick(100) ? 0 : u32(pick(P));
     const std::vector<u32> input = G;
-    Divider divider(n);
+    std::vector<u32> table(Divider::table_words(n));
+    for (u32& x : table) x = u32(pick(P));
+    Divider divider(n, table.data());
     for (std::size_t i = 0; i < n;) {
         const std::size_t m = std::min(n - i, Divider::kStep * (1 + pick(i < 4096 ? 8 : 600)));
         divider.divide(G.data() + i, in_place ? G.data() + i : g.data() + i, i, m);

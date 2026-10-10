@@ -73,3 +73,6 @@ first version 8.49 (w = 3), 8.55 (w = 4), 8.63 (w = 5), 8.96 (w = 8).
     is the median of a 9 and a 0. Not resubmitted again (3 of 5 used).
 - Next: the solve is 2.6 ms of 9.0 at w = 8, throughput-bound, with the triangle the largest
   part (0.85 ms). A real gain needs fewer products per coefficient in G = F H, not a new layout.
+- 2026-10-10, claude (issue #71, log_of_formal_power_series_sparse round 2): the bundle changed
+  with `lib/poly/sparse.hpp` (`Recurrence` broadcasts its state once per step; unused here). The
+  stripped executable is byte-identical (judge's command, `lc-amd`).

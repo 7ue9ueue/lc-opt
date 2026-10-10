@@ -4,15 +4,16 @@
 //   progress::read(in, dst, count, [&](std::size_t parsed) { ... dst[0, parsed) are final ... });
 //
 // Each read_bulk call ends with shrinking chunks and up to 1023 tokens parsed one at a time: in
-// 2^16-token calls that costs 0.25 ms per 2^21 tokens on Zen 3 (notes.md, round 4). On Zen 3 this
-// is a copy of BulkParser32 that reports after each chunk of input (256 KiB here, 128 KiB in
-// lib/io); elsewhere it is Reader::read in 2^16-token pieces, as read_bulk is there.
+// 2^16-token calls that costs 0.25 ms per 2^21 tokens on Zen 3 (notes.md, round 4). This is a
+// copy of BulkParser32 that reports after each chunk of input (256 KiB here, 128 KiB in lib/io).
+// Unlike read_bulk it runs on every CPU: on Intel (lc-intel) it beat Reader::read in 2^16-token
+// pieces too.
 #pragma once
 
-#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -206,9 +207,8 @@ private:
 // done(parsed) as values become final, dst[0, parsed) with parsed increasing, last with count.
 template <class Done>
 void read(io::Reader& in, std::uint32_t* dst, std::size_t count, Done&& done) {
-    std::size_t parsed = 0;
-#if IO_BULK32_TRANSPOSE
     using detail::Parser;
+    std::size_t parsed = 0;
     if (count >= Parser::kMinTokens) {
         const char* const start = Parser::skip_whitespace(in.scan().cur);
         const auto [stop, bulk] = Parser::parse(start, dst, count, done);
@@ -219,13 +219,6 @@ void read(io::Reader& in, std::uint32_t* dst, std::size_t count, Done&& done) {
     }
     for (std::size_t i = parsed; i < count; ++i) dst[i] = in.read<std::uint32_t>();
     done(count);
-#else
-    constexpr std::size_t kPiece = std::size_t(1) << 16;
-    for (; parsed < count; parsed += std::min(kPiece, count - parsed)) {
-        in.read(dst + parsed, std::min(kPiece, count - parsed));
-        done(parsed + std::min(kPiece, count - parsed));
-    }
-#endif
 }
 
 }  // namespace progress

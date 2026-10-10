@@ -36,7 +36,8 @@ Record when opened: 25 ms.
 - One parse per array (round 4): `progress_read.hpp`, a copy of lib/io's `BulkParser32` that
   calls back after each 256 KiB chunk of text, so each row is widened and transformed as soon as
   its values are parsed, while they are in L2. Each `read_bulk` call ends with shrinking chunks
-  and ~1000 tokens parsed one at a time; 2^16-token calls (rounds 1-3) cost 0.25 ms more.
+  and ~1000 tokens parsed one at a time; 2^16-token calls (rounds 1-3) cost 0.25 ms more. Used on
+  every CPU (`read_bulk` takes `Reader::read` off Zen 3).
 - An array's values are parsed into the last 4 MiB of x and widened in place: row r ends at or
   before the values of row r + 1, and the last row's vectors, 16 values at a time, end before its
   values not yet read. No separate input buffer.
@@ -240,6 +241,14 @@ runs unless noted.
   per call: step 8 21.4, 9 22.8, 16 21.4, 17 22.2, 31 21.0, 32 21.4). Not the cause.
 - `judge.py bench`, 41 rounds, slowest 3 cases: `lc-k68` 14.05 → 13.73 ms (0.9800), `lc-bench`
   13.97 → 13.60 (0.9796).
+- Off Zen 3: the first PR version kept `Reader::read` there, in 2^16-token pieces with the
+  callback after each. CI: EPYC 7763 0.980, EPYC 9V45 1.0036 and 1.0052. `lc-intel`, 31 rounds:
+  that version 11.87 → 11.85 ms (0.9954), the copied parser 11.75 (0.9912). Now the copied parser
+  runs everywhere.
+- No gain: in the parser, the second token's window and the shuffle rows built with loads and
+  `vpblendd` instead of `vinserti128` (parse of both arrays, populated input: 2.115 → 2.10-2.11
+  ms). Radix-16 calls in L1 ordered so that consecutive calls touch different cache lines: same
+  cycles (step 2 22.4 vs 23.5, 8 21.3 vs 22.4, 16 and 32 21.3 both).
 - Checks: 13/13 official tests on `lc-amd` and `lc-intel`; `stress.py` 300 rounds (every third
   input now with irregular whitespace, which takes the parser's slow path) and 4 known N = 20
   cases (one irregular) on both; ASan/UBSan on all official inputs, file and pipe; each parser

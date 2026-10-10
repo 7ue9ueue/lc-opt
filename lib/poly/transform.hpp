@@ -273,7 +273,7 @@ struct InverseBottom {
 // Product: forward butterflies of a, leaf products with b (a transform; each product carries a
 // factor 2^-32 that the final scale undoes), inverse butterflies. The windows of group j + 1 are
 // written before the products of group j read those of group j. prepare and finish are inlined
-// into the loops (as calls they cost 6-7% of cyclic_product, lib/poly/notes.md).
+// and unrolled (as calls with rolled loops they cost 4-9% of the products, lib/poly/notes.md).
 struct ProductBottom {
     static constexpr bool kForward = true, kInverse = true;
     const std::uint32_t* roots;

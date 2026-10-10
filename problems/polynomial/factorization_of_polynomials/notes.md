@@ -8,7 +8,8 @@ same_degree (p in {101, 998244353}, k factors of one degree d <= 12), square_fre
 degrees 1..13, sparse degrees 1, 3, 7, 15, 31), large_p2 (p = 2, degree 100), zero_derivative and
 multiplicity_multiple_of_p (p <= 7). The checker tests irreducibility itself.
 
-Best judged: none yet. Record when opened (issue #83): 161 ms.
+Best judged: 9 ms, clean 1 ms ([409665](https://judge.yosupo.jp/submission/409665),
+[409666](https://judge.yosupo.jp/submission/409666), #323). Record when opened (issue #83): 161 ms.
 
 ## Design
 
@@ -87,6 +88,9 @@ reaches ~4.5 products per cycle at any size (L1 or L2): its bound is the FP port
   - Checks: 67/67 official tests (`judge.py test`, lc-amd); `stress.py` 2000 rounds against
     `brute.cpp` (DDF + EDF on f itself, no square-free step); ASan/UBSan build on all official
     tests, outputs compared as sorted factor lines.
+  - Submissions (#323's main.cpp): 409665 AC 9 ms, 409666 AC 9 ms. Both clean 1 ms
+    (`spikes.py`): launch spikes of 8-9 ms on 4 and 1 cases whose peers ran in 0-1 ms. Every
+    real case is judged 0 or 1 ms. P(clean run) = 0.03 with 67 cases, so 3 submissions are kept.
   - Next: same_degree_03's split (root finding of a degree-44 mu: ~40 small nodes, each a chain
     of 30 dependent squarings; batch them across nodes), the dense kernels at ~4.5 of ~6.4
     products per cycle (FP-port bound), x^((p-1)/2) (symmetric squaring), page faults (~30

@@ -1009,9 +1009,9 @@ products 1.77 and 1.69).
   `Transform::inverse_product_sum` instantiates the 4-pair bottom in every program that uses it
   (compositional_inverse: 0.9974 against 0.9936 without it, 31 rounds, noise-level), so
   composition.hpp has its own `inverse_product_sum<K>` on its tables.
-- `judge.py bench` (21 rounds, new/main), `lc-amd`: composition_of_formal_power_series_large
-  0.8973, composition_of_formal_power_series 0.9275, compositional_inverse_of_formal_power_series
-  0.9974. All official tests pass (`judge.py test`); `test.cpp` passes at -O2 (x86-64-v3 and
+- `judge.py bench` (21 rounds, new/main), `lc-amd` (`lc-intel`):
+  composition_of_formal_power_series_large 0.8973 (0.9219), composition_of_formal_power_series
+  0.9275 (0.9631), compositional_inverse_of_formal_power_series 0.9974 (0.9895). PR #242. All official tests pass (`judge.py test`); `test.cpp` passes at -O2 (x86-64-v3 and
   native) and ASan/UBSan (`lc-intel`); both composition `stress.py` 400 rounds.
 
 ## Sources

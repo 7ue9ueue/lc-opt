@@ -31,7 +31,7 @@ V at 2m ~250; forward of P at 2m ~260; inverse of R at 4m 460-580 plus the produ
 Sums: forward pass 16.0 ms (level 0 0.73, generic 15.0, last levels 1.1), backward 17.1 ms
 (last levels 1.0, generic 15.4, level 0 0.7). The bottoms were ~10 ms of 34.
 
-After round 1's lib/poly change (`main.cpp` 34.75 ms whole process): compose 29.97 ms warm, 31.7 ms on the
+After #242 (`main.cpp` 34.75 ms whole process): compose 29.97 ms warm, 31.7 ms on the
 first call (page faults: ~100 µs per 2 MiB huge page on `lc-amd`, ~20 pages). Split (ms):
 generic levels 2 .. 13 forward 9.09 (with the Graeffe bottom ~3.0) + 2.76, backward 2.89 + 9.53
 (the product bottom ~3.6); levels 0: 0.60 + 0.68; 1: 0.73 + 0.81; 14: 0.51 + 0.75; 15, 16: 0.61
@@ -56,7 +56,7 @@ generic levels 2 .. 13 forward 9.09 (with the Graeffe bottom ~3.0) + 2.76, backw
   - `next_level` and level 1 no longer zero the x >= L/2 halves (the pruned forward does not read
     them): next_level 235 -> 6 µs; compose within noise.
   - Whole process (`judge.py bench`, 21 rounds, against #238): `lc-amd` 0.8973 (38.70 -> 34.75 ms),
-    `lc-intel` (see the PR).
+    `lc-intel` 0.9219. PR #242.
   - Checks: 32/32 official tests (`lc-amd`); `stress.py` 400 rounds (`lc-intel`); lib/poly
     `test.cpp` at -O2 (x86-64-v3 and native) and ASan/UBSan.
 - Next: the y levels by doubling (from V's transform at 2Y points, Q_(s+1) at the other 2Y

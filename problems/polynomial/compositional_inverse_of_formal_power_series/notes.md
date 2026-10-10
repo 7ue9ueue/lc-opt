@@ -104,7 +104,8 @@ g = f) 1.22 ms. main.cpp 2.70 ms (#174's 2.76).
 - 2026-10-10, claude (composition_of_formal_power_series_large round 1, lib/poly owner lane):
   composition.hpp's new bottoms reach this problem through level 0's `LevelBottom` and the shared
   leaf sums (moved from projection.hpp, unchanged); the inverses of V take `graeffe_scale`. Whole
-  process (`judge.py bench`, `lc-amd`): 0.9974 (21 rounds), 0.9974 in a second run (31 rounds).
+  process (`judge.py bench`, `lc-amd`): 0.9974 (21 rounds), 0.9974 in a second run (31 rounds);
+  `lc-intel` 0.9895. PR #242.
 - Next: `power` at N - 1 = 7999 (229 us; its steps are near their transform count); the last levels
   (100 us: 7 strided column copies, 6 forwards at m/2, 3 products, one cyclic product at m).
   Counted, not built: level 2 one-dimensional (Q_3 and P_3 from 35 row products at m/2: ~57m

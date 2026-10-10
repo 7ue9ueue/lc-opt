@@ -41,7 +41,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [inv_of_formal_power_series_2d](problems/polynomial/inv_of_formal_power_series_2d) | [21 ms](https://judge.yosupo.jp/submission/409570) | 197 ms |
 | [exp_of_formal_power_series_sparse](problems/polynomial/exp_of_formal_power_series_sparse) | [7 ms](https://judge.yosupo.jp/submission/409367) | 39 ms |
 | [log_of_formal_power_series_sparse](problems/polynomial/log_of_formal_power_series_sparse) | [9 ms](https://judge.yosupo.jp/submission/409639) | 38 ms |
-| [pow_of_formal_power_series_sparse](problems/polynomial/pow_of_formal_power_series_sparse) | [13 ms](https://judge.yosupo.jp/submission/409426) | 43 ms |
+| [pow_of_formal_power_series_sparse](problems/polynomial/pow_of_formal_power_series_sparse) | [10 ms](https://judge.yosupo.jp/submission/409706) | 43 ms |
 | [sqrt_of_formal_power_series_sparse](problems/polynomial/sqrt_of_formal_power_series_sparse) | [9 ms](https://judge.yosupo.jp/submission/409443) | 49 ms |
 | [product_of_polynomial_sequence](problems/polynomial/product_of_polynomial_sequence) | [29 ms](https://judge.yosupo.jp/submission/409448) | 82 ms |
 | [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |

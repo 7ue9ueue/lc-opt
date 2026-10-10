@@ -95,9 +95,13 @@ g = f) 1.22 ms. main.cpp 2.70 ms (#174's 2.76).
   [409398](https://judge.yosupo.jp/submission/409398) AC 9 ms, spike on small_degree_02 (clean 3 ms);
   [409399](https://judge.yosupo.jp/submission/409399) AC 3 ms, 2.8 MiB, no spike. New best judged:
   3 ms (was 9, 409373).
-- Next: the pruned y levels as generated asm (`lib/poly/gen_kernels.py`'s scheduler; the
-  intrinsics run a radix-4 level 19% slower, and since #170 P's pruned forward only matches the
-  plain one); `power` at N - 1 = 7999 (262 us, a fifth of the time; owner lane); the last levels
+- 2026-10-10, claude (lib/poly owner lane, issue #95): the pruned y levels run generated column
+  loops, and Transform's inverse scales come from a table. In process (A/B, `lc-amd`)
+  power_projection 0.963, power at 7999 0.98 (235 -> 229 us); whole process (`judge.py bench`)
+  0.9838 on `lc-amd` (2.73 -> 2.69 ms, 31 rounds), 0.9896 on `lc-intel`. In the bundle the gain
+  is smaller than in the A/B harness (another translation unit): a second projection call
+  1193 -> 1179 us.
+- Next: `power` at N - 1 = 7999 (229 us; its steps are near their transform count); the last levels
   (100 us: 7 strided column copies, 6 forwards at m/2, 3 products, one cyclic product at m).
   Counted, not built: level 2 one-dimensional (Q_3 and P_3 from 35 row products at m/2: ~57m
   leaf products against the generic level's 26m); the leaf math by 8-point transforms inside the

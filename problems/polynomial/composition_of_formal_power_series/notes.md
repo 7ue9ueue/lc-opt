@@ -70,9 +70,14 @@ score = slowest of max_random_00, max_random_03, hack_02, random_04): read and w
 - 2026-10-10, audit (claude): [409336](https://judge.yosupo.jp/submission/409336) (2026-10-10
   01:24 UTC) was not logged before; who submitted it is not recorded. `main.cpp` of #164 (2/5
   with 409332): AC 3 ms, 4.8 MiB, no spike. New best judged: 3 ms (was 11, 409332).
-- Next: level 1 one-dimensional (Y = 2, ~50 us estimate); pruned y-levels in the transforms of
-  generic levels (x-padding bit below the y-bits: y-levels need only half the columns; estimate
-  up to 18% of transform time, needs radix-4 kernels whose stride differs from their count).
+- 2026-10-10, claude (lib/poly owner lane, issue #95): pruned transforms in every generic level
+  (lib/poly/notes.md, Composition), the y levels by generated column loops (lib/ntt's radix-4
+  bodies with a stride separate from the count). compose in process 0.923; in the bundle the
+  first call 1518 -> 1398 us; whole process (`judge.py bench`) 0.9637 on `lc-amd` (2.78 -> 2.67
+  ms, 31 rounds), 0.9261 on `lc-intel`.
+- Next: level 1 one-dimensional (Y = 2, ~50 us estimate); the bottoms (`leaf_graeffe` 7%,
+  `CompositionBottom` 15% of a `lc-intel` profile); always inlining their leaf functions was
+  2.3% slower whole process.
 
 ## Sources
 

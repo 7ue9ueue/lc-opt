@@ -768,7 +768,7 @@ private:
 };
 
 }  // namespace io
-// problems/convolution/multivariate_convolution_cyclic/fields.hpp
+// problems/convolution/convolution_mod/fields.hpp
 // Fixed-width output of residues < 10^9, byte for byte as ../fixed_width.hpp: each value
 // right-aligned in 9 characters, then a space; the last separator is a newline. Judge-specific:
 // the checker compares tokens, so the padding is accepted.

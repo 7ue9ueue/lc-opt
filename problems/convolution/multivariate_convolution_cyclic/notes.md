@@ -34,7 +34,7 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   a shorter axis joins when a cost model says so (13 ns per transform word, 0.5 ns per element
   and axis length).
 - Pointwise product when no axis is long. The scale 1 / prod(short n) is folded into the CRT
-  constants. Output `fields.hpp` (convolution_mod's, 10-byte fields). `.preinit_array` start.
+  constants. Output `../convolution_mod/fields.hpp` (10-byte fields). `.preinit_array` start.
 
 ## Log
 
@@ -86,6 +86,9 @@ threes (2s and 3s), small, k0 (K = 0, p may be 2).
   AVX2 helpers are `multimod::add` etc., no longer in `detail`. The reduction state now stays in
   registers in the first level: transforms alone at lg 20, ratio 0.9945. `judge.py bench`,
   31 rounds, `lc-amd`: 0.9944. 24/24 official tests. Details: `lib/multimod/notes.md`.
+- 2026-10-10, claude (issue #156): the local `fields.hpp` copy is gone; the solution includes
+  `../convolution_mod/fields.hpp` (it was byte-identical). `main.cpp` changes in one comment line; the
+  judge's command builds byte-identical executables from main's and this `main.cpp` (`lc-amd`).
 - Next: dim2_01 still pays ~0.5 ms for gather and scatter over dim1. The transforms (about
   6.5 ms) are the floor of this method; a gain there needs faster lib/ntt kernels.
 

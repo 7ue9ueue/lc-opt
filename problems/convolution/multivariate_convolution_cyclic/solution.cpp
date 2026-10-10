@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "lib/io/io.hpp"
-#include "fields.hpp"
+#include "../convolution_mod/fields.hpp"
 #include "lib/multimod/transform.hpp"
 
 namespace {

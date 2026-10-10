@@ -20,7 +20,9 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
   significant first, in a qword; leading zeros from x ^ (x - 1) and `vpblendvb`; the units digit
   and separator from v - 10w. 16 values per step, ten 16-byte chunks built by `pshufb`; the
   divisions of the next step are issued before the digits of this one. The text buffer sits
-  after the NTT tables in their huge page.
+  after the NTT tables in their huge page. Shared, not copied: gcd, lcm, mul_mod2n, mul_modp,
+  convolution_mod_large and multivariate_convolution_cyclic include it, and six polynomial
+  problems.
 - The program runs from `.preinit_array` and ends with `_exit`: libstdc++'s initializers
   (iostreams, locales) and exit handlers never run.
 

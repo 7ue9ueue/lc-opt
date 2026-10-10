@@ -20,7 +20,7 @@
 #include <cstdlib>
 
 #include "lib/io/io.hpp"
-#include "columns.hpp"
+#include "../min_plus_convolution_convex_arbitrary/columns.hpp"
 
 namespace {
 

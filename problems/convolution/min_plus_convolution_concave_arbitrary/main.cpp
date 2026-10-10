@@ -776,7 +776,7 @@ private:
 };
 
 }  // namespace io
-// problems/convolution/min_plus_convolution_concave_arbitrary/columns.hpp
+// problems/convolution/min_plus_convolution_convex_arbitrary/columns.hpp
 // Fixed-width output of values < 2^31: each value right-aligned in W - 1 characters, then a space;
 // the last separator is a newline. W = 10 for blocks whose values are all below 10^9, else 11.
 // Judge-specific: the checker compares tokens, so the padding is accepted.

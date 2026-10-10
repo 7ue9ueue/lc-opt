@@ -1,9 +1,9 @@
 // Tests for lib/poly against O(n^2) references: transforms leaf by leaf against their definition,
-// products against schoolbook multiplication, the inverse, exp, log, power and sqrt against their recurrences,
-// composition against Horner's rule and identities, product trees against naive products, chirps
-// against their recurrence, multipoint evaluation and interpolation against Horner's rule, division
-// against long division, coefficient-wise operations against scalar code. Long results are checked
-// at random coefficients (each an O(n) sum) or at random points.
+// products against schoolbook multiplication, the inverse (also bivariate), exp, log, power and sqrt
+// against their recurrences, composition against Horner's rule and identities, product trees against
+// naive products, chirps against their recurrence, multipoint evaluation and interpolation against
+// Horner's rule, division against long division, coefficient-wise operations against scalar code.
+// Long results are checked at random coefficients (each an O(n) sum) or at random points.
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -25,6 +25,7 @@
 #include "lib/poly/holonomic.hpp"
 #include "lib/poly/interpolation.hpp"
 #include "lib/poly/inverse.hpp"
+#include "lib/poly/inverse_2d.hpp"
 #include "lib/poly/log.hpp"
 #include "lib/poly/pow.hpp"
 #include "lib/poly/product_tree.hpp"
@@ -457,6 +458,88 @@ void test_inverse(Fixture& fx) {
         if (!f[0]) f[0] = 1;
         check_inverse(fx, f, n, true);
     }
+}
+
+// g = 1 / f mod (x^rows, y^cols), row-major, by f_00 g_ij = [i = j = 0] - sum_((p, q) != 0) f_pq g_(i-p)(j-q).
+std::vector<u32> inverse_2d_reference(const std::vector<u32>& f, std::size_t rows, std::size_t cols) {
+    std::vector<u32> g(rows * cols);
+    const u32 inv0 = power(f[0], P - 2);
+    for (std::size_t i = 0; i < rows; ++i)
+        for (std::size_t j = 0; j < cols; ++j) {
+            u64 s = i == 0 && j == 0;
+            for (std::size_t p = 0; p <= i; ++p)
+                for (std::size_t q = 0; q <= j; ++q)
+                    if (p || q) s = (s + u64(P - f[p * cols + q]) * g[(i - p) * cols + j - q]) % P;
+            g[i * cols + j] = mul(u32(s), inv0);
+        }
+    return g;
+}
+
+// Coefficient (i, j) of f g, both row-major with cols columns.
+u32 product_2d_coefficient(const std::vector<u32>& f, const std::vector<u32>& g, std::size_t cols, std::size_t i,
+                           std::size_t j) {
+    u64 s = 0;
+    for (std::size_t p = 0; p <= i; ++p)
+        for (std::size_t q = 0; q <= j; ++q) s = (s + u64(f[p * cols + q]) * g[(i - p) * cols + j - q]) % P;
+    return u32(s);
+}
+
+// Inverse2d on its own arena (sizes from the plan), scratch filled with garbage first; against the
+// recurrence up to 600 coefficients, else f g = 1 at the corners and random coefficients.
+void check_inverse_2d(const std::vector<u32>& f, std::size_t rows, std::size_t cols) {
+    const poly::Inverse2d plan(rows, cols);
+    using poly::Arena;
+    Arena arena(poly::Transform::words(plan.lg()) + Arena::footprint(plan.f_words()) + Arena::footprint(plan.g_words()) +
+                Arena::footprint(plan.scratch_words()));
+    const poly::Transform t(arena, plan.lg());
+    const auto fz = arena.take(plan.f_words()), gz = arena.take(plan.g_words()), scratch = arena.take(plan.scratch_words());
+    std::fill(scratch.begin(), scratch.end(), 0xFFFFFFFF);
+    const std::size_t stride = plan.stride(), split = plan.split(), offset = plan.offset();
+    expect(stride >= cols && (rows <= 2 || stride >= 2 * cols - 1), "inverse_2d stride", rows, cols);
+    expect(split >= (rows + 1) / 2 && split <= rows, "inverse_2d split", rows, cols);
+    for (std::size_t i = 0; i < rows; ++i) std::copy_n(f.begin() + i * cols, cols, fz.begin() + offset + i * stride);
+    plan.run(t, fz, gz, scratch);
+    std::vector<u32> g(rows * cols);
+    for (std::size_t i = 0; i < rows; ++i)
+        std::copy_n(i < split ? gz.begin() + i * stride : fz.begin() + offset + i * stride, cols, g.begin() + i * cols);
+    if (rows * cols <= 600) {
+        expect(g == inverse_2d_reference(f, rows, cols), "inverse_2d", rows, cols);
+        return;
+    }
+    std::vector<std::pair<std::size_t, std::size_t>> at = {{0, 0}, {rows - 1, cols - 1}, {rows - 1, 0}, {0, cols - 1}};
+    for (int k = 0; k < 8; ++k) at.push_back({pick(rows), pick(cols)});
+    for (auto [i, j] : at)
+        expect(product_2d_coefficient(f, g, cols, i, j) == (i == 0 && j == 0), "inverse_2d f g = 1", rows * cols, i * cols + j);
+}
+
+void check_inverse_2d(std::size_t rows, std::size_t cols, int kind) {
+    auto f = random_poly(rows * cols, kind);
+    if (!f[0]) f[0] = 1 + u32(pick(P - 1));
+    check_inverse_2d(f, rows, cols);
+}
+
+void test_inverse_2d() {
+    for (std::size_t rows = 1; rows <= 12; ++rows)
+        for (std::size_t cols = 1; cols <= 12; ++cols) check_inverse_2d(rows, cols, int((rows + cols) % 3));
+    for (auto [rows, cols] : {std::pair<std::size_t, std::size_t>{1, 1000}, {2, 3000}, {3, 999}, {5, 600}, {9, 333}, {33, 33},
+                              {64, 64}, {65, 63}, {100, 7}, {255, 4}, {1023, 2}, {3000, 3}, {1000, 1}, {600, 5}})
+        for (int kind = 0; kind < 3; ++kind) {
+            check_inverse_2d(rows, cols, kind);
+            check_inverse_2d(cols, rows, kind);
+        }
+    // 1 - x - y: g_ij = binomial(i + j, i); f = 1: g = 1.
+    for (auto [rows, cols] : {std::pair<std::size_t, std::size_t>{20, 30}, {300, 400}}) {
+        std::vector<u32> f(rows * cols);
+        f[0] = 1, f[1] = P - 1, f[cols] = P - 1;
+        check_inverse_2d(f, rows, cols);
+        std::vector<u32> one(rows * cols);
+        one[0] = 1;
+        check_inverse_2d(one, rows, cols);
+    }
+    // The shapes of the Library Checker tests (N M <= 500000), and longer rows.
+    for (auto [rows, cols] : {std::pair<std::size_t, std::size_t>{707, 707}, {1045, 478}, {478, 1045}, {10, 50000}, {53336, 9},
+                              {2, 250000}, {250000, 2}, {1, 1 << 19}, {1 << 19, 1}, {3, 166666}, {5000, 100}})
+        check_inverse_2d(rows, cols, int(pick(3)));
 }
 
 void test_derivative() {
@@ -2089,6 +2172,7 @@ int main() {
     test_column_kernels(fx);
     test_transforms(fx);
     test_inverse(fx);
+    test_inverse_2d();
     test_derivative();
     test_divide_by_index();
     test_exp(fx);

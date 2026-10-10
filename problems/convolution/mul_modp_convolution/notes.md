@@ -81,6 +81,9 @@ Record when opened (issue #35): 45 ms.
   `judge.py bench`, `lc-bench` (EPYC 7B13), 31 rounds, slowest 3 cases: 12.18 -> 11.91 ms,
   ratio 0.9764. 40/40 official tests, `stress.py` 300 rounds and 24 known large cases,
   ASan/UBSan on 7 official cases (file and pipe input).
+- 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
+  `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
+  before (judge flags, `lc-amd`).
 
 ## Sources
 

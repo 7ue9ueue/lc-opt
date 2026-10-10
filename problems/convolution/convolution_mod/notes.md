@@ -273,3 +273,6 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
   convolution_mod_large and mul_modp_convolution use them too. Same asm; lg 9 and odd lg now take
   `ntt::Product` too (radix-4 top). `judge.py bench`, `lc-bench`, 31 rounds, slowest 3 cases:
   12.88 -> 12.93 ms median, ratio 0.9976 (noise). Compiled code: `lib/ntt/notes.md`.
+- 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
+  `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
+  before (judge flags, `lc-amd`).

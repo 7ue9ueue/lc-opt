@@ -109,6 +109,9 @@ Record when opened: 29 ms (another user). Best judged: ours, 23 ms, spike-free:
   (`mem::Arena`) instead of a local copy. Same instructions, other stack slots in `solve()`;
   `judge.py bench`, `lc-bench`, 21 rounds: 23.53 -> 23.54 ms (noise). Official tests pass;
   ASan/UBSan on 4 official cases.
+- 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
+  `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
+  before (judge flags, `lc-amd`).
 
 ## Sources
 

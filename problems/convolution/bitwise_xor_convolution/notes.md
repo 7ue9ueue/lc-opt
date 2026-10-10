@@ -140,6 +140,9 @@ faults), columns a 0.59, columns b 1.05, inverse rows 0.75, print 4.63, exit 0.9
   PR #198 merged; CI 0.9704 (EPYC 7763 0.969, 0.968, 0.975). Submitted
   [409428](https://judge.yosupo.jp/submission/409428): AC 13 ms, 23.0 MiB, no spike
   (`tools/spikes.py`). New best (was 14).
+- 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
+  `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
+  before (judge flags, `lc-amd`).
 
 ## Next
 

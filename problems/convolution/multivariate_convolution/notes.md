@@ -157,6 +157,9 @@ no sources read.
   on all 17 tests and 200 random inputs; ASan/UBSan on all 17 tests, file and pipe.
   PR #198 merged; CI 0.9961 (EPYC 7763 1.000, EPYC 9V45 0.993, EPYC 9V74 0.996). Not submitted
   (0.1 ms, under the judge's resolution).
+- 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
+  `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
+  before (judge flags, `lc-amd`).
 
 ## Next
 

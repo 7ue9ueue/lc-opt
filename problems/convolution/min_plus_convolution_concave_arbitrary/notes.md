@@ -99,3 +99,6 @@ Record when the issue opened: 117 ms.
   `lib/mem/huge.hpp` (`mem::huge<T>`, inlined into `solve()`; the local `allocate<T>` was out of
   line). `judge.py bench`, `lc-bench`, 21 rounds: 27.61 -> 27.78 ms, ratio 1.0009 (noise). Official
   tests pass; ASan/UBSan on 5 official cases.
+- 2026-10-10, claude (lib, issue #156 round 2): the `.preinit_array` start and `_exit` come from
+  `lib/run/early.hpp` (`RUN_EARLY(solve)`) instead of a local copy. Same stripped executable as
+  before (judge flags, `lc-amd`).

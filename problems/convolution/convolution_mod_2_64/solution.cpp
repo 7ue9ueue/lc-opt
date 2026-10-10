@@ -1,13 +1,13 @@
 // a * b mod 2^64: the product modulo five NTT primes (lib/multimod: lib/ntt's transform with the
 // modulus set at run time), the Chinese remainder theorem in 64-bit arithmetic, fixed-width output
 // (fields64.hpp).
-#include <sys/mman.h>
 #include <unistd.h>
 
 #include <array>
 
 #include "lib/io/bulk64.hpp"
 #include "lib/io/io.hpp"
+#include "lib/mem/huge.hpp"
 #include "fields64.hpp"
 #include "lib/multimod/transform.hpp"
 
@@ -57,31 +57,6 @@ constexpr Crt kCrt = [] {
     }
     return crt;
 }();
-
-// Bump allocation in one mapping with transparent huge pages. Never freed: the program ends with _exit.
-class Arena {
-public:
-    explicit Arena(std::size_t bytes) {
-        constexpr std::size_t kHuge = std::size_t(1) << 21;
-        bytes = (bytes + kHuge - 1) / kHuge * kHuge + kHuge;
-        void* region = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (region == MAP_FAILED) std::abort();
-        cur_ = (reinterpret_cast<std::uintptr_t>(region) + kHuge - 1) & ~(kHuge - 1);
-#ifdef MADV_HUGEPAGE
-        ::madvise(reinterpret_cast<void*>(cur_), bytes - kHuge, MADV_HUGEPAGE);
-#endif
-    }
-
-    template <class T>
-    T* take(std::size_t count) {
-        T* p = reinterpret_cast<T*>(cur_);
-        cur_ += (count * sizeof(T) + 63) & ~std::size_t(63);
-        return p;
-    }
-
-private:
-    std::uintptr_t cur_;
-};
 
 using Residues = std::array<const std::uint32_t*, kPrimes>;
 
@@ -141,8 +116,9 @@ void solve() {
     const std::size_t len = std::size_t(1) << lg, words = len + multimod::Transform::kPadding;
     const auto padded = [](std::size_t k) { return (k + 7) & ~std::size_t(7); };
 
-    Arena arena(8 * (padded(n) + padded(m) + len) + 4 * (multimod::Transform::table_words(lg) + (kPrimes + 1) * words) +
-                8 * fields64::kBlock + fields64::kTextBytes + 64 * 16);
+    mem::Arena arena(8 * (padded(n) + padded(m) + len) +
+                     4 * (multimod::Transform::table_words(lg) + (kPrimes + 1) * words) + 8 * fields64::kBlock +
+                     fields64::kTextBytes + 64 * 16);
     // Zero up to half the length too: the first level reads that far. a's storage also holds the
     // last prime's work words (at least 2^lg + kPadding).
     auto* a = arena.take<std::uint64_t>(std::max(padded(n), len / 2) + multimod::Transform::kPadding / 2);

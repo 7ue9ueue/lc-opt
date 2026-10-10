@@ -6,7 +6,6 @@
 // for m < 256).
 // a and b are interleaved as pairs, so one load fetches both.
 #include <immintrin.h>
-#include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -18,6 +17,7 @@
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
+#include "lib/mem/huge.hpp"
 #include "../convolution_mod/fields.hpp"
 
 namespace {
@@ -107,20 +107,6 @@ void add_sums(std::uint64_t* dst, Half sums) {
 
 // The pair at p as two 64-bit lanes.
 Half widen_pair(const std::uint64_t* p) { return _mm_cvtepu32_epi64(load_pair(p)); }
-
-// Zeroed memory in 2 MiB pages where the kernel allows. Never freed.
-template <class T>
-T* allocate(std::size_t count) {
-    constexpr std::size_t kHuge = std::size_t(1) << 21;
-    const std::size_t bytes = (count * sizeof(T) + kHuge - 1) / kHuge * kHuge;
-    void* p = ::mmap(nullptr, bytes + kHuge, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) std::abort();
-    const std::uintptr_t aligned = (reinterpret_cast<std::uintptr_t>(p) + kHuge - 1) & ~(kHuge - 1);
-#ifdef MADV_HUGEPAGE
-    ::madvise(reinterpret_cast<void*>(aligned), bytes, MADV_HUGEPAGE);
-#endif
-    return reinterpret_cast<T*>(aligned);
-}
 
 // The rough numbers (coprime to 30030 = 2 3 5 7 11 13) as a wheel: the one with index t is
 // (t / kSpokes) kWheel + spoke[t % kSpokes]. Index 0 is 1, index 1 is 17.
@@ -386,7 +372,7 @@ void solve() {
     constexpr std::size_t kPad = 64;
     const std::size_t words = n + kPad;
     static_assert(fields::kTextBytes <= std::size_t(1) << 21);
-    auto* region = allocate<std::uint32_t>(std::max(3 * words, fields::kTextBytes / sizeof(std::uint32_t)));
+    auto* region = mem::huge<std::uint32_t>(std::max(3 * words, fields::kTextBytes / sizeof(std::uint32_t)));
     auto* pairs = reinterpret_cast<std::uint64_t*>(region);
     std::uint32_t* const b = region + 2 * words;
     io::read_bulk(in, region + 1, n);

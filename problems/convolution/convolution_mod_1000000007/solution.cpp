@@ -2,13 +2,13 @@
 // with the modulus set at run time), the Chinese remainder theorem straight to residues mod
 // 10^9 + 7 by one Montgomery reduction, fixed-width output: 10 bytes per value (fields10.hpp),
 // or 11 in the rare blocks with a value >= 10^9 (fields11.hpp).
-#include <sys/mman.h>
 #include <unistd.h>
 
 #include <array>
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
+#include "lib/mem/huge.hpp"
 #include "fields10.hpp"
 #include "fields11.hpp"
 #include "lib/multimod/transform.hpp"
@@ -71,31 +71,6 @@ constexpr Crt kCrt = [] {
     return crt;
 }();
 
-// Bump allocation in one mapping with transparent huge pages. Never freed: the program ends with _exit.
-class Arena {
-public:
-    explicit Arena(std::size_t bytes) {
-        constexpr std::size_t kHuge = std::size_t(1) << 21;
-        bytes = (bytes + kHuge - 1) / kHuge * kHuge + kHuge;
-        void* region = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (region == MAP_FAILED) std::abort();
-        cur_ = (reinterpret_cast<std::uintptr_t>(region) + kHuge - 1) & ~(kHuge - 1);
-#ifdef MADV_HUGEPAGE
-        ::madvise(reinterpret_cast<void*>(cur_), bytes - kHuge, MADV_HUGEPAGE);
-#endif
-    }
-
-    template <class T>
-    T* take(std::size_t count) {
-        T* p = reinterpret_cast<T*>(cur_);
-        cur_ += (count * sizeof(T) + 63) & ~std::size_t(63);
-        return p;
-    }
-
-private:
-    std::uintptr_t cur_;
-};
-
 #ifdef FORCE_WIDE
 constexpr bool kForceWide = true;  // test hook: every block in 11-byte fields
 #else
@@ -153,9 +128,9 @@ void solve() {
     const std::size_t len = std::size_t(1) << lg, words = len + multimod::Transform::kPadding;
     const auto padded = [](std::size_t k) { return (k + 7) & ~std::size_t(7); };
 
-    Arena arena(4 * (padded(n) + padded(m) + len + multimod::Transform::table_words(lg) + (kPrimes + 1) * words +
-                     fields11::kBlock) +
-                fields11::kTextBytes + 64 * 16);
+    mem::Arena arena(4 * (padded(n) + padded(m) + len + multimod::Transform::table_words(lg) + (kPrimes + 1) * words +
+                          fields11::kBlock) +
+                     fields11::kTextBytes + 64 * 16);
     // Zero up to half the length too: the first level reads that far. b holds the last prime's
     // transform of b in place.
     auto* a = arena.take<std::uint32_t>(std::max(padded(n), len / 2));

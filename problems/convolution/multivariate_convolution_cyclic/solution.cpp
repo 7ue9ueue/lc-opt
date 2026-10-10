@@ -4,7 +4,6 @@
 // point of the short axes' spectrum, the exact product over Z by Kronecker substitution (factor
 // r padded to 2 D_r - 1), modulo three NTT primes (lib/multimod), the CRT straight to residues
 // mod p, then folded back to cyclic.
-#include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -13,6 +12,7 @@
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
+#include "lib/mem/huge.hpp"
 #include "../convolution_mod/fields.hpp"
 #include "lib/multimod/transform.hpp"
 
@@ -71,33 +71,8 @@ std::uint32_t primitive_root(const Field& field) {
     }
 }
 
-// Bump allocation in one mapping with transparent huge pages; memory starts zeroed. Never freed:
-// the program ends with _exit.
-class Arena {
-public:
-    explicit Arena(std::size_t bytes) {
-        constexpr std::size_t kHuge = std::size_t(1) << 21;
-        bytes = (bytes + kHuge - 1) / kHuge * kHuge + kHuge;
-        void* region = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (region == MAP_FAILED) std::abort();
-        cur_ = (reinterpret_cast<std::uintptr_t>(region) + kHuge - 1) & ~(kHuge - 1);
-#ifdef MADV_HUGEPAGE
-        ::madvise(reinterpret_cast<void*>(cur_), bytes - kHuge, MADV_HUGEPAGE);
-#endif
-    }
-
-    template <class T>
-    T* take(std::size_t count) {
-        T* p = reinterpret_cast<T*>(cur_);
-        cur_ += (count * sizeof(T) + 63) & ~std::size_t(63);
-        return p;
-    }
-
-    static std::size_t bytes(std::size_t words) { return 4 * words + 64; }
-
-private:
-    std::uintptr_t cur_;
-};
+// Arena bytes that a take of `words` words may use (mem::Arena rounds takes up to 64 bytes).
+std::size_t take_bytes(std::size_t words) { return 4 * words + 64; }
 
 struct Axis {
     std::size_t length, stride;
@@ -373,7 +348,7 @@ int transform_log(std::size_t padded) { return std::max(6, int(std::bit_width(pa
 class LongProduct {
 public:
     // The long axes' cyclic factors have a padded extent of at most 2^kMaxLog.
-    LongProduct(const std::vector<Axis>& axes, const Field& field, std::uint32_t scale, Arena& arena)
+    LongProduct(const std::vector<Axis>& axes, const Field& field, std::uint32_t scale, mem::Arena& arena)
         : crt_(field, scale), p_(field.p), axes_(axes), direct_(axes.size() == 1 && axes[0].stride == 1) {
         CyclicFactors factors(axes);
         lengths_ = std::move(factors.length);
@@ -396,7 +371,7 @@ public:
     static std::size_t arena_bytes(const std::vector<Axis>& axes) {
         const int lg = transform_log(CyclicFactors(axes).padded());
         const std::size_t words = (std::size_t(1) << lg) + multimod::Transform::kPadding;
-        return (2 + kPrimes) * Arena::bytes(words) + Arena::bytes(multimod::Transform::table_words(lg));
+        return (2 + kPrimes) * take_bytes(words) + take_bytes(multimod::Transform::table_words(lg));
     }
 
     // f[base + offset] <- (f * g)[base + offset] over the long axes, times the scale. With several
@@ -612,8 +587,8 @@ void solve() {
 
     const std::size_t rows = 8 * narrow_row(short_axes);
     const std::size_t padded_total = (total + rows - 1) / rows * rows;
-    Arena arena(2 * Arena::bytes(padded_total) + Arena::bytes(fields::kTextBytes / 4 + 1) +
-                (long_axes.empty() ? 0 : LongProduct::arena_bytes(long_axes)));
+    mem::Arena arena(2 * take_bytes(padded_total) + take_bytes(fields::kTextBytes / 4 + 1) +
+                     (long_axes.empty() ? 0 : LongProduct::arena_bytes(long_axes)));
     auto* f = arena.take<std::uint32_t>(padded_total);
     auto* g = arena.take<std::uint32_t>(padded_total);
     io::read_bulk(in, f, total);

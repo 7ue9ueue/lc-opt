@@ -11,7 +11,6 @@
 // Crossings are found lazily: each column keeps a bracket around the last row where it beats the
 // one below, narrowed by bisection only when an insertion needs it, and for free as the sweep
 // passes.
-#include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -21,6 +20,7 @@
 
 #include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
+#include "lib/mem/huge.hpp"
 #include "../min_plus_convolution_convex_arbitrary/columns.hpp"
 
 namespace {
@@ -122,30 +122,16 @@ private:
     std::uint32_t top_ = 0;
 };
 
-// Zeroed memory in 2 MiB pages where the kernel allows. Never freed.
-template <class T>
-T* allocate(std::size_t count) {
-    constexpr std::size_t kHuge = std::size_t(1) << 21;
-    const std::size_t bytes = (count * sizeof(T) + kHuge - 1) / kHuge * kHuge;
-    void* p = ::mmap(nullptr, bytes + kHuge, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) std::abort();
-    const std::uintptr_t aligned = (reinterpret_cast<std::uintptr_t>(p) + kHuge - 1) & ~(kHuge - 1);
-#ifdef MADV_HUGEPAGE
-    ::madvise(reinterpret_cast<void*>(aligned), bytes, MADV_HUGEPAGE);
-#endif
-    return reinterpret_cast<T*>(aligned);
-}
-
 void solve() {
     io::Reader in;
     const auto n = in.read<std::uint32_t>();
     const auto m = in.read<std::uint32_t>();
-    std::uint32_t* const a = allocate<std::uint32_t>(n);
-    std::uint32_t* const b = allocate<std::uint32_t>(m);
+    std::uint32_t* const a = mem::huge<std::uint32_t>(n);
+    std::uint32_t* const b = mem::huge<std::uint32_t>(m);
     const std::size_t count = n + m - 1;
-    std::uint32_t* const c = allocate<std::uint32_t>((count + 15) / 16 * 16);  // tail stays 0
-    char* const text = allocate<char>(columns::kTextBytes);
-    Entry* const stack = allocate<Entry>(std::min(n, m));
+    std::uint32_t* const c = mem::huge<std::uint32_t>((count + 15) / 16 * 16);  // tail stays 0
+    char* const text = mem::huge<char>(columns::kTextBytes);
+    Entry* const stack = mem::huge<Entry>(std::min(n, m));
     io::read_bulk(in, a, n);
     io::read_bulk(in, b, m);
     std::fill(c, c + count, ~0u);

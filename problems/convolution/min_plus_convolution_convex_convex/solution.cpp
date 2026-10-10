@@ -5,7 +5,6 @@
 // starts from an argmin (i, k - i) of c[k], found by binary search: the slopes before it in a and
 // b are k smallest ones, and the rest are no smaller. It then merges slopes eight at a time with
 // a bitonic network (AVX2 min/max) and adds them up.
-#include <sys/mman.h>
 #include <unistd.h>
 
 #include <array>
@@ -13,6 +12,7 @@
 #include <climits>
 
 #include "lib/io/io.hpp"
+#include "lib/mem/huge.hpp"
 #include "../min_plus_convolution_convex_arbitrary/columns.hpp"
 
 namespace {
@@ -196,25 +196,12 @@ void read_values(const char*& p, u32* dst, std::size_t count) {
     for (; i < count; ++i) dst[i] = one_token(p);
 }
 
-// words u32 words, 2 MiB aligned, in huge pages where the kernel allows.
-u32* allocate(std::size_t words) {
-    constexpr std::size_t kHuge = std::size_t(1) << 21;
-    const std::size_t bytes = (words * sizeof(u32) + kHuge - 1) / kHuge * kHuge + kHuge;
-    void* region = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (region == MAP_FAILED) std::abort();
-    const std::uintptr_t start = (reinterpret_cast<std::uintptr_t>(region) + kHuge - 1) & ~(kHuge - 1);
-#ifdef MADV_HUGEPAGE
-    ::madvise(reinterpret_cast<void*>(start), bytes - kHuge, MADV_HUGEPAGE);
-#endif
-    return reinterpret_cast<u32*>(start);
-}
-
 void solve() {
     io::Reader in;
     const std::size_t n = in.read<u32>(), m = in.read<u32>(), count = n + m - 1;
     constexpr std::size_t kValues = columns::kBlock + 8 * kChains + 16;  // block, garbage, zeros
     const std::size_t text_words = columns::kTextBytes / sizeof(u32);
-    u32* const memory = allocate(text_words + kValues + (n + kPad) + (m + kPad));
+    u32* const memory = mem::huge<u32>(text_words + kValues + (n + kPad) + (m + kPad));
     char* const text = reinterpret_cast<char*>(memory);
     u32* const c = memory + text_words;
     u32* const a = c + kValues;

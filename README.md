@@ -37,7 +37,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [composition_of_formal_power_series_large](problems/polynomial/composition_of_formal_power_series_large) | [35 ms](https://judge.yosupo.jp/submission/409535) | 72 ms |
 | [compositional_inverse_of_formal_power_series](problems/polynomial/compositional_inverse_of_formal_power_series) | [3 ms](https://judge.yosupo.jp/submission/409399) | 14 ms |
 | [compositional_inverse_of_formal_power_series_large](problems/polynomial/compositional_inverse_of_formal_power_series_large) | [33 ms](https://judge.yosupo.jp/submission/409549) | 93 ms |
-| [inv_of_formal_power_series_sparse](problems/polynomial/inv_of_formal_power_series_sparse) | [10 ms](https://judge.yosupo.jp/submission/409351) | 24 ms |
+| [inv_of_formal_power_series_sparse](problems/polynomial/inv_of_formal_power_series_sparse) | [5 ms](https://judge.yosupo.jp/submission/409581) | 24 ms |
 | [inv_of_formal_power_series_2d](problems/polynomial/inv_of_formal_power_series_2d) | [21 ms](https://judge.yosupo.jp/submission/409570) | 197 ms |
 | [exp_of_formal_power_series_sparse](problems/polynomial/exp_of_formal_power_series_sparse) | [7 ms](https://judge.yosupo.jp/submission/409367) | 39 ms |
 | [log_of_formal_power_series_sparse](problems/polynomial/log_of_formal_power_series_sparse) | [14 ms](https://judge.yosupo.jp/submission/409396) | 38 ms |
@@ -51,6 +51,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [polynomial_taylor_shift](problems/polynomial/polynomial_taylor_shift) | [10 ms](https://judge.yosupo.jp/submission/409534) | 33 ms |
 | [shift_of_sampling_points_of_polynomial](problems/polynomial/shift_of_sampling_points_of_polynomial) | [11 ms](https://judge.yosupo.jp/submission/409556) | 41 ms |
 | [division_of_polynomials](problems/polynomial/division_of_polynomials) | [12 ms](https://judge.yosupo.jp/submission/409561) | 30 ms |
+| [inv_of_polynomials](problems/polynomial/inv_of_polynomials) | [24 ms](https://judge.yosupo.jp/submission/409586) | 104 ms |
 | [prefix_sum_of_polynomial](problems/polynomial/prefix_sum_of_polynomial) | [13 ms](https://judge.yosupo.jp/submission/409571) | 143 ms |
 | [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |
 

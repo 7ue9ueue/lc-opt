@@ -2,8 +2,9 @@
 // products against schoolbook multiplication, the inverse (also bivariate), exp, log, power and sqrt
 // against their recurrences, composition against Horner's rule and identities, product trees against
 // naive products, chirps against their recurrence, multipoint evaluation and interpolation against
-// Horner's rule, division against long division, half-gcd jumps and inverses modulo a polynomial
-// against the extended Euclidean algorithm, coefficient-wise operations against scalar code.
+// Horner's rule, the Newton basis against synthetic division, division against long division,
+// half-gcd jumps and inverses modulo a polynomial against the extended Euclidean algorithm,
+// coefficient-wise operations against scalar code.
 // Long results are checked at random coefficients (each an O(n) sum) or at random points.
 #include <algorithm>
 #include <array>
@@ -30,6 +31,7 @@
 #include "lib/poly/inverse.hpp"
 #include "lib/poly/inverse_2d.hpp"
 #include "lib/poly/log.hpp"
+#include "lib/poly/newton.hpp"
 #include "lib/poly/pow.hpp"
 #include "lib/poly/product_tree.hpp"
 #include "lib/poly/projection.hpp"
@@ -2018,6 +2020,50 @@ void test_interpolation() {
     for (int trial = 0; trial < 30; ++trial) check_interpolation(1 + pick(20000), trial % 4);
 }
 
+// Newton basis (newton.hpp).
+
+// Points of a kind, repeats allowed: random, mostly 0, mostly P - 1, all one value.
+std::vector<u32> newton_points(std::size_t n, int kind) {
+    if (kind == 3) return std::vector<u32>(n, u32(rng() % P));
+    return random_poly(n, kind);
+}
+
+// to_newton() against repeated synthetic division (n <= 3000: c_k = g(p_k), g <- g / (x - p_k)),
+// else f(x) = sum_k c_k prod_(i < k) (x - p_i) at 8 random x.
+void check_newton(std::size_t n, int kind) {
+    const auto f = random_poly(n, kind % 3), points = newton_points(n, kind);
+    std::vector<u32> c(n, 7);
+    poly::Arena arena(poly::to_newton_words(n));
+    poly::to_newton(arena, f, points, c);
+    if (n <= 3000) {
+        std::vector<u32> g = f, want(n);
+        for (std::size_t k = 0; k < n; ++k) {
+            u32 carry = 0;  // g[j] <- g[j] + p_k g[j + 1] from the top: g[0] = g(p_k), g[1 ..) the quotient
+            for (std::size_t j = n; j-- > k;) g[j] = carry = add(g[j], mul(carry, points[k]));
+            want[k] = g[k];
+        }
+        expect(c == want, "to_newton", n, kind);
+        return;
+    }
+    bool ok = true;
+    for (int i = 0; i < 8; ++i) {
+        const u32 x = u32(rng() % P);
+        u32 sum = 0, basis = 1;
+        for (std::size_t k = 0; k < n; ++k) sum = add(sum, mul(c[k], basis)), basis = mul(basis, sub(x, points[k]));
+        ok &= sum == evaluate(f, x);
+    }
+    expect(ok, "to_newton identity", n, kind);
+}
+
+void test_newton() {
+    for (std::size_t n = 1; n <= 100; ++n) check_newton(n, int(n % 4));
+    for (std::size_t n : {255, 256, 257, 263, 264, 265, 511, 512, 513, 520, 1000, 1024, 1025, 2047, 2048, 2049, 2056, 2999})
+        for (int kind = 0; kind < 4; ++kind) check_newton(n, kind);
+    for (std::size_t n : {4095, 4096, 4097, 8200, 65534, 65535, 65536, 65537, 65538, 80000, 85192, 85200, 100000, (1 << 17) - 1, 1 << 17})
+        for (int kind = 0; kind < 4; ++kind) check_newton(n, kind);
+    for (int trial = 0; trial < 30; ++trial) check_newton(1 + pick(trial < 20 ? 3000 : 40000), trial % 4);
+}
+
 // Factorials and product chains (factorials.hpp).
 
 // factorial and factorials against running products for every n < kFactorialLimit at random,
@@ -2380,6 +2426,7 @@ int main() {
     test_chirp();
     test_evaluation();
     test_interpolation();
+    test_newton();
     test_factorials();
     test_division();
     test_gcd();

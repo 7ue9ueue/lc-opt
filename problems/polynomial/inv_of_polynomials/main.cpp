@@ -7457,7 +7457,11 @@ struct DropTransforms {
 //   std::uint32_t* place(std::size_t lo, std::size_t mid, std::size_t hi, std::size_t words);
 // instead gives the room where the children of node [lo, hi), split at mid, are built: the left
 // one's transform (words words) at the result, the right one's Arena::footprint(words) words
-// later. Its operator() is not called. A Keep with root(transform) also sees the root's product
+// later. Its operator() is not called. A Keep with
+//   std::uint32_t* place_right(std::size_t lo, std::size_t mid, std::size_t hi, std::size_t words);
+// keeps the right children only: the room for the right child of node [lo, hi); the left one is
+// built in the scratch (or in the unused upper part of its parent's room), as without a Keep. Its
+// operator() is not called either. A Keep with root(transform) also sees the root's product
 // transform (length words), which stays in the scratch.
 template <class Layout, class Leaves, class Keep = DropTransforms>
 class ProductTree {
@@ -7465,6 +7469,8 @@ public:
     using Value = typename Layout::Value;
     using Node = typename Layout::Node;
     static constexpr bool kPlaces = requires(Keep k, std::size_t i) { k.place(i, i, i, i); };
+    static constexpr bool kPlacesRight = requires(Keep k, std::size_t i) { k.place_right(i, i, i, i); };
+    static constexpr bool kSeesNodes = !kPlaces && !kPlacesRight;
     struct Root {
         std::span<std::uint32_t> coefficients;  // Layout::kWords * (length + 1) words, Montgomery form
         Node node;
@@ -7495,6 +7501,7 @@ public:
         const std::size_t mid = split(0, count);
         std::uint32_t *left_out = a, *right_out = c;
         if constexpr (kPlaces) left_out = keep_.place(0, mid, count, w * length), right_out = left_out + Arena::footprint(w * length);
+        if constexpr (kPlacesRight) right_out = keep_.place_right(0, mid, count, w * length);
         const Node left = build(0, mid, left_out, length), right = build(mid, count, right_out, length);
         Layout::product(t_, left_out, right_out, {a, w * length});
         if constexpr (requires { keep_.root(std::span<const std::uint32_t>{}); }) keep_.root(std::span<const std::uint32_t>(a, w * length));
@@ -7562,7 +7569,7 @@ private:
         if (hi - lo == 1 || degree(lo, hi) <= Layout::kBase) {  // out_length > degree: not the root
             const Node node = coefficients(lo, hi, out);
             t_.forward({out, w * (degree(lo, hi) + 1)}, 0, {out, w * out_length});
-            if constexpr (!kPlaces) keep_(lo, hi, std::span<const std::uint32_t>(out, w * out_length));
+            if constexpr (kSeesNodes) keep_(lo, hi, std::span<const std::uint32_t>(out, w * out_length));
             return node;
         }
         const std::size_t length = Layout::length(degree(lo, hi)), words = w * length, mark = stack_.mark();
@@ -7571,6 +7578,10 @@ private:
         if constexpr (kPlaces) {
             mid = split(lo, hi);
             a = keep_.place(lo, mid, hi, words), b = a + Arena::footprint(words), c = stack_.take(words + w);
+        } else if constexpr (kPlacesRight) {
+            a = out_length >= 2 * length ? out + words : stack_.take(words);
+            mid = split(lo, hi);
+            b = keep_.place_right(lo, mid, hi, words), c = stack_.take(words + w);
         } else {
             a = out_length >= 2 * length ? out + words : stack_.take(words);
             b = c = stack_.take(words + w);
@@ -7591,7 +7602,7 @@ private:
             for (std::size_t m = 2 * length; m < out_length; m *= 2) t_.forward_upper({c, words + w}, 0, {out + w * m, w * m});
         }
         stack_.release(mark);
-        if constexpr (!kPlaces) keep_(lo, hi, std::span<const std::uint32_t>(out, w * out_length));
+        if constexpr (kSeesNodes) keep_(lo, hi, std::span<const std::uint32_t>(out, w * out_length));
         return node;
     }
 

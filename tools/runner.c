@@ -40,6 +40,8 @@ int main(int argc, char **argv) {
     timer.it_value.tv_usec = (suseconds_t)((kill_ms - timer.it_value.tv_sec * 1e3) * 1e3);
     signal(SIGALRM, kill_child);
 
+    // Free a previous run's output before timing; otherwise O_TRUNC frees it inside the timed region.
+    unlink(argv[3]);
     double start = now_ms();
     child = fork();
     if (child == 0) {

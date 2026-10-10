@@ -80,6 +80,14 @@ Record when the issue opened: 117 ms.
 - 2026-10-10, claude (issue #156): the local `columns.hpp` copy is gone; the solution includes
   `../min_plus_convolution_convex_arbitrary/columns.hpp` (it was byte-identical). `main.cpp` changes in one comment line; the
   judge's command builds byte-identical executables from main's and this `main.cpp` (`lc-amd`).
+- 2026-10-10, audit (claude): submissions of the current `main.cpp` (#163) not logged before; who
+  submitted them is not recorded. 2026-10-10 UTC, 23.3-23.4 MiB:
+  [409349](https://judge.yosupo.jp/submission/409349) 01:54 AC 28 ms;
+  [409355](https://judge.yosupo.jp/submission/409355) 01:57 AC 28 ms;
+  [409359](https://judge.yosupo.jp/submission/409359) 01:58 AC 27 ms. The slowest cases are
+  monotone_01/02 at 26-28 ms, as in every run (409228: 31, 409239: 26-27). `tools/spikes.py`
+  gives clean 19 and 20 for the first two: it compares monotone_01/02 with the class median,
+  which monotone_00/03 (11-12 ms) pull down. Those are not spikes. Best judged stays 27 ms (409239).
 - Next: monotone_01/02 sweeps (~16 ms over the others). Idea, untried: for consecutive columns
   (d = 1) the crossing is a rank in a's sorted slopes, and for distance d it lies in a window of
   d rows below the rank of b's gap / d; a value-bucketed rank table could set tight brackets.

@@ -59,6 +59,10 @@ faults on ~9 MB of scratch).
   `lc-amd` 18.65 -> 17.53 ms (0.9407), `lc-intel` 0.9841; CI 0.9384. Submitted the merged
   `main.cpp`: [409327](https://judge.yosupo.jp/submission/409327) AC 18 ms, 17.0 MiB
   (max_random_00 18, all other cases <= 17; 409300 had six cases at 18).
+- 2026-10-10, audit (claude): [409356](https://judge.yosupo.jp/submission/409356) (2026-10-10
+  01:57 UTC) was not logged before; who submitted it is not recorded. `main.cpp` of #166:
+  AC 18 ms, 17.3 MiB (max_random_01 18, the rest <= 17), no spike on the slowest case. Ties best
+  judged.
 - Next: the transform levels (lib/ntt's kernels) are now the largest cost; the leaf product
   runs at ~16 cycles per leaf in place (multiply-pipe bound ~12). The division (0.45 ms) could
   halve with a stored inverse table folded into the transform's scale.

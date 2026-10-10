@@ -3,8 +3,10 @@
 f with K <= 10 nonzero terms (i_0 = 0, a_0 != 0), N <= 10^6; print the first N coefficients of
 1/f mod 998244353. 10 s. Input is tiny; output up to 10 MB.
 
-Best judged: ours, 13 ms: [409329](https://judge.yosupo.jp/submission/409329) (`main.cpp` of
-#159); one launch spike, the clean score is 5 ms. Record when opened (issue #69): 24 ms.
+Best judged: ours, 10 ms: [409344](https://judge.yosupo.jp/submission/409344) and
+[409351](https://judge.yosupo.jp/submission/409351) (`main.cpp` of #159); 409351 has one launch
+spike, its clean score is 5 ms. Earlier: 13 ms, [409329](https://judge.yosupo.jp/submission/409329)
+(same version, clean 5 ms). Record when opened (issue #69): 24 ms.
 
 ## Tests
 
@@ -61,6 +63,13 @@ The gap is the solve.
   - Submitted the merged `main.cpp` (#159): [409329](https://judge.yosupo.jp/submission/409329)
     AC 13 ms, 10.3 MiB. small_dense_00 13 ms (launch spike), small_dense_01 4, _02 5, _04 5;
     all other cases at most 3. Clean score 5 ms.
+- 2026-10-10, audit (claude): submissions of `main.cpp` (#159) not logged before; who submitted
+  them is not recorded. 2026-10-10 UTC, 10.5-10.6 MiB:
+  [409340](https://judge.yosupo.jp/submission/409340) 01:47 AC 14 ms, clean 10 (spike on
+  small_dense_04); [409344](https://judge.yosupo.jp/submission/409344) 01:48 AC 10 ms (example_00
+  10 ms, the rest at most 5; `tools/spikes.py` flags nothing);
+  [409351](https://judge.yosupo.jp/submission/409351) 01:54 AC 10 ms, clean 5 (spike on
+  small_N_02). With 409329: 4/5. New best judged: 10 ms (was 13, 409329).
 - Next: the solve is at the products' pipe bound; what is left is format (0.66 ms, shared
   `fields.hpp`) and `write()` (2.9 ms, kernel). max_random's long-tap path (0.9 ms) could skip
   zero sources; it is not the slowest case.

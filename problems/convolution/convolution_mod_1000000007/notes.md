@@ -1,9 +1,11 @@
 # convolution_mod_1000000007
 
 N, M <= 2^19 coefficients mod 10^9 + 7; print the N + M - 1 coefficients of the product. 10 s.
-Record when opened: 29 ms (another user). Best judged: ours, 31 ms:
-[409262](https://judge.yosupo.jp/submission/409262) (current `main.cpp`); its large cases take
-22-23 ms, the maximum is a judge spike (clean score 23 ms, `tools/spikes.md`).
+Record when opened: 29 ms (another user). Best judged: ours, 23 ms, spike-free:
+[409310](https://judge.yosupo.jp/submission/409310) (`main.cpp` of #129) and
+[409353](https://judge.yosupo.jp/submission/409353) (current `main.cpp`, #162). Earlier: 31 ms,
+[409262](https://judge.yosupo.jp/submission/409262) (#129; a judge spike, clean score 23 ms,
+`tools/spikes.md`).
 
 ## Design
 
@@ -76,6 +78,27 @@ Record when opened: 29 ms (another user). Best judged: ours, 31 ms:
   At odd lg (2^7..2^19) a sparse input is now reduced and transformed in one pass; lg 20 is the
   same logic. Transforms alone at lg 20: ratio 1.0009; at lg 19: 0.9837. `judge.py bench`,
   31 rounds, `lc-amd`: 0.9991. 48/48 official tests. Details: `lib/multimod/notes.md`.
+- 2026-10-10, audit (claude): submissions not logged before. Who submitted them is not recorded.
+  "clean" is the score without launch spikes (`tools/spikes.py`), where it differs.
+  - `main.cpp` of #129 (equal but for the final newline), 2026-10-09 UTC, 30.9-31.0 MiB:
+    [409291](https://judge.yosupo.jp/submission/409291) 22:34 AC 33 ms, clean 24;
+    [409292](https://judge.yosupo.jp/submission/409292) 22:37 AC 33 ms, clean 23;
+    [409298](https://judge.yosupo.jp/submission/409298) 22:37 AC 31 ms, clean 24;
+    [409303](https://judge.yosupo.jp/submission/409303) 22:41 AC 31 ms, clean 23;
+    [409304](https://judge.yosupo.jp/submission/409304) 22:41 AC 33 ms, clean 24;
+    [409307](https://judge.yosupo.jp/submission/409307) 22:42 CE (submitted as C++17);
+    [409308](https://judge.yosupo.jp/submission/409308) 22:43 AC 32 ms, clean 23;
+    [409309](https://judge.yosupo.jp/submission/409309) 22:44 AC 31 ms, clean 23;
+    [409310](https://judge.yosupo.jp/submission/409310) 22:45 AC 23 ms, no spike on the slowest
+    case (linked from README.md before, not from here).
+    With 409262, 409263, 409297, 409302 and 409306, this version has 14 submissions (13 judged),
+    over the cap of 5.
+  - Current `main.cpp` (#162), 2026-10-10 UTC, 30.9 MiB:
+    [409342](https://judge.yosupo.jp/submission/409342) 01:47 AC 31 ms, clean 24;
+    [409347](https://judge.yosupo.jp/submission/409347) 01:49 AC 33 ms, clean 24;
+    [409353](https://judge.yosupo.jp/submission/409353) 01:56 AC 23 ms, no spike on the slowest
+    case.
+  - New best judged: 23 ms (409310, 409353); was 31 (409262).
 - Next: everything left is in the transforms (14.2 of ~23 ms, lib/ntt's kernels) and fixed I/O.
   No problem-local idea left that is worth more than noise.
 

@@ -80,6 +80,10 @@ N, M <= 2^19 coefficients below 2^64; print the N + M - 1 coefficients of the pr
   lg (2^7..2^19) a sparse input is now reduced and transformed in one pass; lg 20 is the same
   logic. Transforms alone at lg 20: ratio 1.0005; at lg 19: 0.9904. `judge.py bench`,
   31 rounds, `lc-amd`: 0.9998. 44/44 official tests. Details: `lib/multimod/notes.md`.
+- 2026-10-10, audit (claude): [409346](https://judge.yosupo.jp/submission/409346) (2026-10-10
+  01:48 UTC) was not logged before; who submitted it is not recorded. Current `main.cpp` (#162):
+  AC 43 ms, 52.1 MiB. `tools/spikes.py` flags gen_265721_00 (43 ms, its peers 35), but
+  all_same_01 and _03 also take 43: clean score 43. Ties best judged (409296).
 - Next: transforms are ~24.7 of ~41 ms and near lib/ntt's kernel bound; `write()` 6 ms is fixed.
   Five primes are the minimum with 30-bit primes (four give 2^120 < 2^147). Left: the radix-8
   level's reduction (1.2 ms), the subtrees (lib/ntt's kernels).

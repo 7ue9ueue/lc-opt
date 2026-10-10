@@ -4,7 +4,8 @@ N <= 500000 coefficients of f mod 998244353, f[0] = 1; print the first N coeffic
 10 s. Largest tests: max_* and random_01/03 (N close to 500000; q = f'/f has up to 499999
 coefficients, transforms up to 2^19).
 
-Best judged: ours, 15 ms: [409264](https://judge.yosupo.jp/submission/409264) (`main.cpp` of #131).
+Best judged: ours, 14 ms, no spike: [409363](https://judge.yosupo.jp/submission/409363) (`main.cpp`
+of #166). Earlier: 15 ms, [409264](https://judge.yosupo.jp/submission/409264) (#131).
 Record when opened (issue #64): 32 ms.
 
 ## Design
@@ -64,6 +65,11 @@ blocked division 15.26 ms. So log itself takes ~10.5 ms of 15.3.
   `inverse_product_sum` of 2 and 3 pairs at 2^19 -14% and -16% (`lc-amd`), -20% and -14%
   (`lc-intel`). `judge.py bench` (21 rounds): `lc-amd` 15.38 -> 14.52 ms (0.9442), `lc-intel`
   0.9700; CI 0.9529. Not submitted (0.9 ms).
+- 2026-10-10, audit (claude): submissions of the `main.cpp` of #166 not logged before; who
+  submitted them is not recorded. [409357](https://judge.yosupo.jp/submission/409357) 2026-10-10
+  01:57 UTC: AC 16 ms, 17.0 MiB, clean 14 (spike on near_262144_01);
+  [409363](https://judge.yosupo.jp/submission/409363) 01:59: AC 14 ms, 17.3 MiB, no spike on the
+  slowest case. New best judged: 14 ms (was 15, 409264).
 - Next: the transform levels (lib/ntt's kernels) are now the largest cost. Smaller: 7 buffers
   instead of 8 (T(q_2) in the work buffer), the text buffer in the scratch
   (~1.3 MB less first touch; first use costs ~0.5 ms over warm runs).

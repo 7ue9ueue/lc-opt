@@ -2,7 +2,7 @@
 description: Run optimization rounds on ready problem issues with subagents, one per problem
 argument-hint: "[agents at once, default 5]"
 ---
-Read `AGENTS.md`. Work through the open GitHub issues labeled `ready`, oldest first, with up to
+Read `AGENTS.md`. Work through the open GitHub issues labeled `ready`, fewest rounds first, then oldest, with up to
 $ARGUMENTS subagents at once (5 if no number is given). Never two subagents on the same problem.
 Start an issue only after every issue it lists under `After:` is closed.
 

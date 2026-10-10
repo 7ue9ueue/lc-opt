@@ -8,22 +8,31 @@ Record when opened (issue #62): 25 ms.
 
 ## Design
 
-- `lib/poly/inverse.hpp`: Newton iteration, 5 transforms of length 2k per step k -> 2k
-  (lib/poly/notes.md).
-- `lib/io` input; output in 10-byte fixed-width fields (`problems/convolution/convolution_mod/fields.hpp`,
-  judge-specific: the checker compares tokens).
-- Memory: one `poly::Arena` (huge pages). `poly::inverse` computes g mod x^k, k = 2^18; the last
-  step (`poly::inverse_step`) runs in f's buffer of 2^19 words, which ends up holding g[k, N).
+- `lib/poly/inverse.hpp`'s Newton iteration, 5 transforms of length 2k per step k -> 2k
+  (lib/poly/notes.md), with the step in `step.hpp` (round 3): between the two products of a step,
+  the first one's inverse top level (upper half) and the second one's forward top level are one
+  pass; the second product writes its half straight into g instead of in place and a copy.
+- `lib/io` input (`io::read_bulk`, the transposed parser on Zen 3); output in 10-byte fixed-width
+  fields (`problems/convolution/convolution_mod/fields.hpp`, judge-specific: the checker compares
+  tokens).
+- Memory: one `poly::Arena` (huge pages). `step::inverse` computes g mod x^k, k = 2^18; the last
+  step (`step::inverse_step`) runs in f's buffer of 2^19 words, which ends up holding g[k, N).
   Arrays: tables 0.5 MiB, f 2 MiB, scratch 2 MiB (the inverse's, then T(g mod x^k)), g mod x^k
   1 MiB, text 0.25 MiB: 3 huge pages, against 5 before. The output is written in two pieces
   (a newline after the first; the checker reads tokens).
-- The program runs from `.preinit_array` and ends with `_exit` (as convolution_mod).
+- The program runs from `.preinit_array` and ends with `_exit` (`lib/run/early.hpp`).
 
 ## Floor
 
 `lc-amd`, max_random_00, in-process phases (ms, `CLOCK_MONOTONIC` stamps, scratch probe): parse 0.84,
 tables 0.07, inverse 8.26, format 0.32 (to /dev/null); total 9.5. Whole process 13.2 ms, so start,
 `write()` of 5 MB and exit take ~3.7. Floor without the inverse: ~5 ms.
+
+Round 3, `lc-bench`, max_random_00, output to tmpfs, medians of 31 runs (us), main -> round 3:
+input map 18, tables 83 -> 78, parse 899 -> 822, inverse to 2^18 3521 -> 3471, last step
+3718 -> 3714, output 2054 -> 2060 (format ~0.3 ms, the rest `write()` into tmpfs); sum 10.29 ->
+10.17 ms. Whole process ~11.7 ms (`judge.py bench`), so start and exit ~1.4 ms. `bench/` (speed.py,
+`tools/floor.c`): floor 3.8 ms on `lc-amd`.
 
 ## Log
 
@@ -71,7 +80,46 @@ tables 0.07, inverse 8.26, format 0.32 (to /dev/null); total 9.5. Whole process 
   - Submitted the merged `main.cpp` (#170): [409369](https://judge.yosupo.jp/submission/409369)
     AC 18 ms from one launch spike (near_262144_02 18 ms, peers 6; `tools/spikes.py`: clean 11);
     the same file again: [409370](https://judge.yosupo.jp/submission/409370) AC 11 ms, 11.5 MiB.
-- Next: the inverse takes ~7.1 ms of ~12 (`lc-amd`); the floor (read, write) is ~5 ms. Its product
-  bottoms (~30 cycles per vector, the multiply pipes' bound ~20) are the largest part; asm
-  scheduling did not help. Smaller: the inverse top level of the first product and the forward
+- Next (round 2): the inverse takes ~7.1 ms of ~12 (`lc-amd`); the floor (read, write) is ~5 ms.
+  Its product bottoms (~30 cycles per vector, the multiply pipes' bound ~20) are the largest part;
+  asm scheduling did not help. Smaller: the inverse top level of the first product and the forward
   top level of the second as one pass (~0.3-0.5%, guess); exp and sqrt have the same pattern.
+- 2026-10-10, claude (round 3, issue #62; owner lane of lib/poly, no lib change).
+  - Kept, problem-local:
+    - `io::read_bulk` and `RUN_EARLY` (`lib/run/early.hpp`, same code as the old copy):
+      `judge.py bench` (`lc-bench`, 31 rounds) 0.9889.
+    - `step.hpp`, in-process A/B against main's lib (`lc-bench`, the problem's computation at
+      N = 500000, median ratios): the fused top pass 0.9947-0.9953 (warm, 21-31 rounds), steps to
+      2^18 0.9947, last step 0.9991; with the direct half 0.9939 (fresh arena per call, 61 rounds;
+      the fused pass alone 0.9967). The copy cost ~80 us per MiB.
+  - Whole process, round 3 against main, `judge.py bench`, slowest 3 cases: `lc-bench` 11.72 ->
+    11.61 ms (0.9882, 41 rounds); `lc-intel` 11.71 -> 11.66 (0.9936, 21 rounds; `read_bulk` is
+    `Reader::read` there).
+  - Checks: 25/25 official tests (`lc-amd`); `stress.py` 400 rounds; ASan/UBSan on all 25 official
+    cases, file and pipe input, outputs equal.
+  - Product bottom, L1 ablation (`lc-bench`, 64 groups, cycles per vector): full 30.7-31.5; leaf
+    products and inverse butterflies 20.2; forward butterflies and windows 10.6; leaf products
+    alone 15.1; forward butterflies, windows and leaf products 25.4. The parts add up almost
+    linearly. Tile and b at 32 offsets (0-3968 B): 30.3-30.7, no aliasing effect.
+  - Zen 3 probes (`lc-bench`, independent ops): strict multiply/ALU alternation (M A, M N, L A)
+    3.05 ops per cycle, but M M A A, M A A, M A M A A 4.0; vector loads (256-bit or broadcasts) at
+    most 2 per cycle in all; a 256-bit load across a 64-byte line takes 2 slots, across a 32-byte
+    boundary 1.
+  - Tried, not kept:
+    - Bottom in two phases per chunk of groups (all window fills, then all leaf products): 1.022
+      (chunks of 4), 1.025 (16) on the whole computation.
+    - Bottom in three passes per tile (asm `forward_bottom`, windows and leaf products,
+      asm `inverse_bottom`): last step 0.968-0.987 at 2^17-2^20 in the problem's arena, but
+      1.013-1.017 with the same buffers in another arena, steps to 2^18 1.0035; with a fresh arena
+      per call 0.9957 against 0.9967 for the fused pass alone. Placement decides; neutral on average.
+    - Leaf product with each window slice loaded once (9 loads instead of 16 memory operands):
+      15.4 against 15.0 cycles per leaf, bottom 31.4 against 30.7. Loads are not its limit.
+    - Leaf product with two accumulators per parity (add chains of 3): 14.8 against 14.9 per leaf,
+      bottom 30.1 against 30.65 (-1.7% in L1, ~0.5% of the inverse, estimate). A lib change for
+      every product user; not made.
+  - Not pursued (counted): Newton without truncation (g~ = g - x^k e g) needs transforms of 4k;
+    T(g_2k) from the second product's transform needs the truncated part's forward (no saving);
+    F at length 2L from F at L needs a fresh half (no saving). The step stays 5 transforms.
+- Next: the inverse is ~7.2 ms of ~11.6; output `write()` ~1.7 ms and start/exit ~1.4 ms are the
+  floor. Product bottoms run at ~2.5 vector ops per cycle (bounds: 4 ops, 2 multiplies, 2 loads per
+  cycle); what holds them back is not found (not loads, not placement, not alternation).

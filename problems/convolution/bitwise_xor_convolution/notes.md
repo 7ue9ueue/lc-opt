@@ -4,7 +4,7 @@ N <= 20; a, b of 2^N values < 998244353; print c_k = sum over i xor j = k of a_i
 Input ~20.7 MB (2^21 tokens), output ~10.4 MB.
 
 Best judged: ours, [409428](https://judge.yosupo.jp/submission/409428), 13 ms (lib/io #21 round 5,
-PR #198). Round 2: 409210, 14 ms. Round 1: 409198, 15 ms.
+PR #198). Round 3 (PR #249): 409530, 13 ms. Round 2: 409210, 14 ms. Round 1: 409198, 15 ms.
 Record when opened: 25 ms.
 
 ## Design
@@ -195,6 +195,15 @@ stamps in-process plus fork-to-exit wall time, max_random_00, output unlinked be
 - Checks: 13/13 official tests (`judge.py test`, `lc-amd`); `stress.py` 200 rounds and the three
   N = 20 known-answer cases (judge image); ASan/UBSan on all 13 official inputs, file and pipe;
   outputs of every variant byte-identical to main on max_random_00.
+- Also no gain: the forward first pass in the inverse's stage order (64-bit stage, a level,
+  128-bit stage, a level): kernel micro 5.42 → 5.40.
+- PR #249 merged; CI 0.9896 (EPYC 7763 0.9849 and 0.9895, EPYC 9V45 0.9944). `judge.py bench`
+  against main after the rebase onto `lib/run` (41 rounds): 12.91 → 12.79 ms (0.9921).
+- Submitted the #249 `main.cpp` twice (2/5 this round):
+  [409529](https://judge.yosupo.jp/submission/409529) AC 14 ms (max_random_00/01/02 12/14/13;
+  large_02 13 against its usual 3, a spike), [409530](https://judge.yosupo.jp/submission/409530)
+  AC 13 ms (13/13/13; small_00 9 ms, a spike). Best judged stays 13 ms: the ~0.15 ms gain is
+  below the judge's 1 ms resolution and its run-to-run spread.
 
 ## Next
 

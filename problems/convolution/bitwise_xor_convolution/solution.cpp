@@ -11,11 +11,11 @@
 // Order: a's rows as it is parsed, a's columns, a / 2^N mod P kept as dwords; then b in the same
 // array: rows, columns, the products with a, the inverse columns; the inverse rows, printed in
 // chunks. Each int64 array is transformed while it is still in the cache.
-#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/run/early.hpp"
 #include "../convolution_mod/fields.hpp"
 #include "../text_buffer.hpp"
+#include "progress_read.hpp"
 
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -32,7 +32,7 @@ using VecD = __m256d;
 
 constexpr std::uint32_t kP = 998244353;
 constexpr int kMaxRowLog = 12;
-constexpr int kChunkLog = 16;            // values per bulk parse
+constexpr int kChunkLog = 16;            // values per output chunk
 constexpr std::size_t kStrip = 2;        // vectors per row in a column strip: one cache line
 
 // P^-1 mod 2^32 by Newton's iteration.
@@ -488,15 +488,16 @@ void solve() {
     Vec* const a = x + rows * stride;
     auto* const values = reinterpret_cast<std::uint32_t*>(a);
 
-    // Each chunk is parsed into the end of its own rows and widened in place: the vectors of a
-    // row, and of each 64-vector piece of it, end before the input values not yet read.
+    // The values are parsed into the end of x and widened in place, row by row as the parser
+    // finishes them. Row r ends at or before the values of row r + 1, and the last row's vectors,
+    // 16 values at a time, end before its values not yet read.
+    auto* const input = reinterpret_cast<std::uint32_t*>(x + rows * stride) - rows * row_values;
     const auto forward_rows = [&] {
-        for (std::size_t r = 0; r < rows; r += chunk_rows) {
-            auto* const input = reinterpret_cast<std::uint32_t*>(x + (r + chunk_rows) * stride - chunk / 8);
-            io::read_bulk(in, input, chunk);
-            for (std::size_t i = 0; i < chunk_rows; ++i)
-                forward_row(input + i * row_values, x + (r + i) * stride, row_log);
-        }
+        std::size_t done = 0;
+        progress::read(in, input, rows * row_values, [&](std::size_t parsed) {
+            for (; done < parsed / row_values; ++done)
+                forward_row(input + done * row_values, x + done * stride, row_log);
+        });
     };
     forward_rows();
     forward_columns(x, a, rows_log, row_vectors, stride, n_log);

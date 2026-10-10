@@ -252,19 +252,34 @@ root is power(f, 1/2, sqrt(f[0])).
 - Against log then exp, this skips the integral of q (`divide_by_index`), exp's derivative and
   the passes f / f[0], times e, times c.
 - In place: the sink writes g only where log_derivative no longer reads f.
-- Scratch: q's lower part (2^exp_log(n) words), then the larger of log_derivative's 2B buffers
-  and exp_newton's 6 buffers of 2^exp_log(n) words. log_derivative_scratch counts at least 3
-  buffers: for B = 1 (n <= 33, only power) the inverse's scratch follows T(h).
-- In process at N = 500000 (`lc-amd`, warm, medians of 11): log_derivative 9.93 ms (blocks
-  4.32, 1.70, 1.97, 1.93; block 0 includes the inverse, T(h) and the forwards of W_t),
-  exp_newton 13.34 ms; first use +0.6 ms (page faults).
+- Transforms from the division: when its blocks d_j of f'/f have k = m/2 coefficients
+  (m = exp_length(n) / 2 >= 128; every n except n - 1 a power of two), its stored T(d_0),
+  T(d_1), T(d_2) have exp's last-step length m and give two of that step's forwards:
+  q mod x^m = e x (d_0 + x^k d_1) - q[m] x^m and q_2 = q[m, m + k) = q[m] + e x d_2 -
+  q[m + k] x^k. Leaf by leaf, x^k = 1 on the lower half of the leaves and -1 on the upper half,
+  x^m = 1, and x a mod (x^8 - w_p) = (w_p a_7, a_0, .., a_6). `detail::times_x` computes them
+  from log_derivative's callback `transformed(j, T(d_j))` right after blocks 1 and 2 (the next
+  block overwrites T(d_1), T(d_2)); `exp_newton` takes them as a `QTransforms` (exp passes none).
+  T_m(q_2) only when block 3 runs (n - m > k) and the division has 4 blocks.
+- times_x per 8 leaves: e (a + s b) by one Shoup product per vector; lanes 7 gathered into one
+  vector (unpackhi, permute2x128), times the 8 w_p (r[p/2 + i] from one table block, negated
+  for odd p), put into lane 0 after the rotation. 0.094 ms for a + b at 2^18 (`lc-bench`), 0.069
+  for a alone; with one product by w_p per leaf 0.167 and 0.114; a forward of 2^18 is ~0.28.
+- Scratch: q's lower part and the two transforms (3 x 2^exp_log(n) words), then the larger of
+  log_derivative's 2B buffers and exp_newton's 6 buffers of 2^exp_log(n) words (9 MB at
+  N = 500000, was 7). log_derivative_scratch counts at least 3 buffers: for B = 1 (n <= 33, only
+  power) the inverse's scratch follows T(h).
+- In process at N = 500000 (`lc-bench`, warm, means of 41 calls): power 19.45 ms; division
+  8.67 (inverse 1.60, T(h) 0.25, T(W_t) 0.89, blocks 1.03, 1.62, 2.02, 1.26 with times_x after
+  blocks 1 and 2), exp's full steps 5.73, last step 5.05.
 - Alternatives considered, not tried:
   - Newton directly on the ODE f g' = e f' g: residual A = e f' g - f g' from fresh
     transforms of f, x f', g and x g' (length 2m), then A / (f g) by two products with 1/f and
     1/g, then g s. About 14.5 transforms of length 2m per step plus 1/f to n/2: ~34 T(n)
     against 27.5 T(n) for log (11.5) and exp (16).
-  - exp's T_m(x q) at m = 2^17, 2^18 from the log's stored T(q_0), T(q_1) by leaf-wise shifts
-    (x^k is a scalar per leaf): saves ~0.4 ms of forwards, keeps 2 MB more live.
+  - The full step at m = k from T(d_0) as well (T_k(q mod x^k) = e x T(d_0) - q[k] on the lower
+    half of the leaves, times G_lo instead of `forward_product`): ~0.26 against ~0.21 ms
+    (`multiply` at 2^17 0.17 plus a pass), and T(d_0)'s lower half must outlive exp's first steps.
 
 ## Sqrt
 
@@ -1735,6 +1750,33 @@ product-tree lanes):
   all 4 0.9812. pow sparse judged [409705](https://judge.yosupo.jp/submission/409705) and
   [409706](https://judge.yosupo.jp/submission/409706) AC 10 ms, each with a launch spike; clean
   7 ms, as before.
+
+2026-10-10, claude (issue #65, pow round 2; owner lane):
+- `pow.hpp`: exp's last step takes T_m(q mod x^m) and T_m(q_2) from the division's T(d_0),
+  T(d_1), T(d_2) (Power above; `detail::times_x`), two forwards of 2^18 fewer at N = 500000.
+  `log.hpp`: `log_derivative` calls `transformed(j, T(d_j))` after each block's forward
+  (`IgnoreTransforms` by default; log's code is identical). `exp.hpp`: `exp_newton` and
+  `exp_last_step` take a `QTransforms` (exp: `NoQTransforms`). Public signatures unchanged;
+  power_scratch two buffers of 2^exp_log(n) words larger.
+- In process (`lc-bench`, A/B against main, 41 calls, outputs equal): power at N = 500000 19.81
+  -> 19.42 ms (0.980) warm, 0.984 fresh; N = 389813 (block 2 only, T_m(q mod x^m) alone)
+  0.987. With one product by w_p per leaf in times_x: 0.986. exp alone (its own unit) 1.0001,
+  0.9975 at N = 389813 in one run, 1.0052, 0.9999 in another.
+- `judge.py bench` (21 rounds, new/main), `lc-bench` (`lc-intel`): pow 0.9820 (0.9788), exp
+  1.0032 (1.0004), log 0.9989 (1.0012), compositional_inverse 0.9996 (0.9948),
+  compositional_inverse_large 0.9917 (0.9979). pow's ratio includes the problem's own change
+  (`io::read_bulk`, `RUN_EARLY`: 0.9933 alone).
+- `.text` (judge flags, `lc-amd`, bytes): log identical; exp 84350 -> 84406 (register allocation
+  in `exp` only); pow 104017 -> 109661; compositional_inverse 202473 -> 205576, _large 203207
+  -> 206310.
+- Tests: `test.cpp` at -O2 and ASan/UBSan (`lc-amd` native, `lc-intel` x86-64-v3 and native).
+  The power tests cover the reuse (n >= 129 with 3 or 4 blocks), block 3 without T_m(q_2)
+  (n - 1 = 3k) and n - 1 a power of two (no reuse). A first version also reused at m = 64,
+  where 8 leaves straddle the halves: the tests failed at n = 66 .. 72; reuse now needs m >= 128.
+  Mutations (beta's sign, alpha of q mod x^m, no w_p, s = 1 on every leaf, one table half for
+  w_p, odd w_p not negated, one constant for both halves, no e, the last step's product with the
+  given T_m(q mod x^m) in the lower half only, block 3 from lo instead of the given T_m(q_2))
+  fail them.
 
 ## Sources
 

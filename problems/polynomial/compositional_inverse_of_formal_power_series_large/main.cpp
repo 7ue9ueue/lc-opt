@@ -6865,6 +6865,8 @@ inline void divide_by_index(std::span<const std::uint32_t> a, std::size_t first,
 // For an integer M >= 0 and n <= P, f^M = power(f, M mod P, f[0]^M): (f / f[0])^M has constant
 // term 1, so it depends on M mod P only. A square root of f is power(f, 1 / 2, sqrt(f[0])).
 
+#include <immintrin.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -6885,6 +6887,7 @@ inline void divide_by_index(std::span<const std::uint32_t> a, std::size_t first,
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <type_traits>
 
 // lib/poly/inverse.hpp
 // Inverse of a power series modulo 998244353: g = 1 / f mod x^n. Design: lib/poly/notes.md.
@@ -7009,6 +7012,13 @@ inline int exp_log(std::size_t n) { return std::countr_zero(detail::exp_length(n
 
 namespace detail {
 
+// Transforms of length m = exp_length(n) / 2 of q mod x^m (low) and of q[m, 3m/2) (block2) that a
+// caller of exp_newton already has; empty if not. exp has none (NoQTransforms).
+struct QTransforms {
+    std::span<const std::uint32_t> low, block2;
+};
+struct NoQTransforms {};
+
 // A product as Transform's run() computes it (the forward top level of in if the bottom has one,
 // the subtrees, the inverse top level times scale), its output half written to `to` (at most n/2
 // words, any alignment) instead of out's: the caller needs no copy. out (n words) is the work span.
@@ -7062,13 +7072,22 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
 // 14 transforms and 7 leaf products of length m (a full step: 16 and 7); 7 and 3 when n - m <= B.
 // q as for exp_newton: q mod x^m in lo (overwritten here), the rest in g[m, n) until g_2 and g_3
 // replace it. Spans: gt = [G0, T_m(g)] and w of 2m words, work of m words; ht holds H.
+// given (a QTransforms) may hold T_m(q mod x^m) and T_m(q_2).
+template <class Given>
 [[gnu::always_inline]] inline void exp_last_step(const Transform& t, std::span<std::uint32_t> lo, std::span<std::uint32_t> g,
                                                  std::size_t m, bool first, std::span<std::uint32_t> gt,
                                                  std::span<const std::uint32_t> ht, std::span<std::uint32_t> w,
-                                                 std::span<std::uint32_t> work) {
+                                                 std::span<std::uint32_t> work, const Given& given) {
     const std::size_t n = g.size(), half = m / 2, rest = n - m, count = std::min(rest, half);
     const bool upper = rest > half;  // block 3
-    const std::span<std::uint32_t> g0t = gt.first(m), glt = gt.subspan(m, m), qt = w.first(m), r = w.subspan(m, m);
+    const std::span<std::uint32_t> g0t = gt.first(m), glt = gt.subspan(m, m), own = w.first(m), r = w.subspan(m, m);
+    std::span<const std::uint32_t> qt = own, q2t = lo;
+    bool given_low = false, given_block2 = false;
+    if constexpr (std::is_same_v<Given, QTransforms>) {
+        given_low = !given.low.empty(), given_block2 = !given.block2.empty();
+        if (given_low) qt = given.low;
+        if (given_block2) q2t = given.block2;
+    }
     const auto q = [g, n](std::size_t i) {  // q[i, i + 8) for m <= i < n, from g; zero from n on
         if (i + 8 <= n) return load_unaligned(g.data() + i);
         alignas(32) std::uint32_t x[8] = {};
@@ -7077,9 +7096,11 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
     };
     if (first) t.forward(g.first(half), 0, g0t);
     t.forward(g.first(m), 0, glt);
-    if (upper) {  // T_m(q mod x^m) in qt, again for block 3
-        t.forward(lo, 0, qt);
-        t.inverse_product(qt, glt, r);
+    if (given_low) {
+        t.inverse_product(qt, glt, r, upper ? Half::kBoth : Half::kLower);
+    } else if (upper) {  // T_m(q mod x^m) in own, again for block 3
+        t.forward(lo, 0, own);
+        t.inverse_product(own, glt, r);
     } else {
         t.cyclic_product(lo, 0, r, glt, Half::kLower);
     }
@@ -7090,7 +7111,7 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
         const Vec x = reduce(add(load(work.data() + i), q(m + i)), kP);
         return add(x, _mm256_sub_epi32(broadcast(kP), load(lo.data() + i)));
     });
-    if (upper) t.forward(g.subspan(m, half), 0, lo);  // T_m(q_2): q mod x^m is no longer read
+    if (upper && !given_block2) t.forward(g.subspan(m, half), 0, lo);  // T_m(q_2): q mod x^m is no longer read
     t.forward(r.first(count), 0, work);
     const std::uint32_t scale = kInverseScales[1][std::countr_zero(m)];
     const Source none(nullptr, 0, 0);
@@ -7099,7 +7120,7 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
     if (!upper) return;
     // Block 3: (q G)[3B, 4B) at r[B, 2B), s at r[0, rest - B), then g_3.
     t.forward(g.subspan(m, half), 0, work);
-    const Transform::Pair pairs[] = {{work, qt}, {lo, glt}};
+    const Transform::Pair pairs[] = {{work, qt}, {q2t, glt}};
     t.inverse_product_sum(pairs, work, Half::kUpper);
     Indices index(half);
     for (std::size_t i = half; i < m; i += 8, index.next()) {
@@ -7107,21 +7128,23 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
         const Vec sum = add(load(r.data() + i), load(work.data() + i));
         store(r.data() + i, canonical(_mm256_sub_epi32(add(sum, broadcast(2 * kP)), xg)));
     }
-    t.forward(r.subspan(half, half), 0, qt);
-    t.inverse_product(ht, qt, qt, Half::kLower);
+    t.forward(r.subspan(half, half), 0, own);
+    t.inverse_product(ht, own, own, Half::kLower);
     detail::divide_by_index(m + half, r.first(rest - half),
-                            [&](std::size_t i) { return add(load(qt.data() + i), q(m + half + i)); });
-    t.forward(r.first(rest - half), 0, qt);
-    product_to(t, qt, none, InverseProductBottom{{t.roots(), t.inverse_roots(), qt.data()}, g0t.data()}, scale,
+                            [&](std::size_t i) { return add(load(own.data() + i), q(m + half + i)); });
+    t.forward(r.first(rest - half), 0, own);
+    product_to(t, own, none, InverseProductBottom{{t.roots(), t.inverse_roots(), own.data()}, g0t.data()}, scale,
                Half::kLower, g.subspan(m + half, rest - half));
 }
 
 // The Newton steps of exp() below, from g mod x^kExpBase (given) to g mod x^n, n = g.size() >
 // kExpBase, for x g' = q g: q[i] is lo[i] below m = lo.size() = exp_length(n) / 2 and g[i] from
 // m on (g's coefficients replace it); lo is overwritten. Each step is invariant under scaling g,
-// so g[0] may be any nonzero constant. scratch: exp_newton_scratch(n).
+// so g[0] may be any nonzero constant. scratch: exp_newton_scratch(n). given: transforms for the
+// last step (exp_last_step), outside the scratch.
+template <class Given = NoQTransforms>
 [[gnu::always_inline]] inline void exp_newton(const Transform& t, std::span<std::uint32_t> lo, std::span<std::uint32_t> g,
-                                              std::span<std::uint32_t> scratch) {
+                                              std::span<std::uint32_t> scratch, const Given& given = {}) {
     const std::size_t n = g.size(), len = 2 * lo.size();
     const auto take = [&scratch](std::size_t words) {
         const std::span<std::uint32_t> s = scratch.first(words);
@@ -7157,7 +7180,7 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
         product_to(t, w.first(2 * m), Source(w.data() + m, m, m), ProductBottom{t.roots(), t.inverse_roots(), gt.data()},
                    kInverseScales[1][std::countr_zero(2 * m)], Half::kUpper, g.subspan(m, m));
     }
-    exp_last_step(t, lo, g, m, m == kExpBase, gt, ht, w, h);
+    exp_last_step(t, lo, g, m, m == kExpBase, gt, ht, w, h, given);
 }
 
 inline std::size_t exp_newton_scratch(std::size_t n) {
@@ -7344,6 +7367,11 @@ struct SideProductBottom {
     }
 };
 
+// A log_derivative callback for the blocks' transforms that ignores them.
+struct IgnoreTransforms {
+    void operator()(std::size_t, std::span<const std::uint32_t>) const {}
+};
+
 // Buffers of length 2k log_derivative uses: T(h), W_1 .. W_(B-1), q_0's, and one for the later
 // blocks; at least 3 (for B = 1: the inverse's scratch, 2 buffers, follows T(h)).
 inline std::size_t log_buffers(std::size_t n) { return std::max<std::size_t>(log_blocks(n) + 2, 3); }
@@ -7359,10 +7387,13 @@ inline std::size_t log_buffers(std::size_t n) { return std::max<std::size_t>(log
 // Blocks j >= 1 share one buffer: the residual (over T(q_(j-1)) for j >= 2), q_j, T(q_j).
 // sink(first, q) receives q[first, first + q.size()), block by block, as an aligned span
 // readable to the next multiple of 8. After it returns, f is read only at indices
-// > first + q.size(). scratch: log_derivative_scratch(n) words; t: lg_max >= log_derivative_log(n).
-template <class Sink>
+// > first + q.size(). transformed(j, T(q_j)) receives the transform of length 2k of each block
+// but the last, valid until the next block starts (T(q_0) until the end).
+// scratch: log_derivative_scratch(n) words; t: lg_max >= log_derivative_log(n).
+template <class Sink, class Transformed = IgnoreTransforms>
 [[gnu::always_inline]] inline void log_derivative(const Transform& t, std::span<const std::uint32_t> f, std::size_t n,
-                                                  std::span<std::uint32_t> scratch, const Sink& sink) {
+                                                  std::span<std::uint32_t> scratch, const Sink& sink,
+                                                  const Transformed& transformed = {}) {
     const std::size_t k = log_block(n), len = 2 * k, blocks = log_blocks(n);
     const auto buffer = [&scratch, len](std::size_t i) { return scratch.subspan(i * Arena::footprint(len), len); };
     const std::span<std::uint32_t> ht = buffer(0), q0 = buffer(blocks);
@@ -7397,7 +7428,10 @@ template <class Sink>
         }
         t.cyclic_product(work.first(count), 0, work, ht, Half::kLower);
         sink(first, std::span<const std::uint32_t>(work.first(count)));
-        if (j + 1 < blocks) t.forward(work.first(k), 0, work);
+        if (j + 1 < blocks) {
+            t.forward(work.first(k), 0, work);
+            transformed(j, std::span<const std::uint32_t>(work));
+        }
     }
 }
 
@@ -7439,12 +7473,56 @@ inline void log(const Transform& t, std::span<const std::uint32_t> f, std::span<
 
 namespace poly {
 
+namespace detail {
+
+// out = e x (a + s b) + (alpha + s beta) for transforms a, b of length n = out.size() >= 128
+// (b only if kSum) and alpha, beta <= P, where s = x^(n/2) is 1 on the lower half of the leaves
+// and -1 on the upper half. Leaf p of x a is (w_p a_7, a_0, .., a_6): per 8 leaves, the lanes 7
+// are gathered into one vector for their products with w_p. out may be a or b.
+template <bool kSum>
+void times_x(const std::uint32_t* roots, const std::uint32_t* a, const std::uint32_t* b, std::uint32_t e,
+             std::uint32_t alpha, std::uint32_t beta, std::span<std::uint32_t> out) {
+    const std::size_t leaves = out.size() / 8;
+    const Factor scale(e);
+    const Vec rotate = _mm256_setr_epi32(7, 0, 1, 2, 3, 4, 5, 6), odd = _mm256_setr_epi32(0, -1, 0, -1, 0, -1, 0, -1);
+    const std::uint32_t constants[2] = {(alpha + beta) % kP, (alpha + kP - beta) % kP};
+    for (std::size_t p = 0; p < leaves; p += 8) {
+        const bool upper = p >= leaves / 2;
+        // w_p for leaves p .. p + 7: r[p/2 + i] for even p, -r[p/2 + i] (quotient ~q) for odd p
+        const Factors r = entries(roots, p / 16 * 8);
+        const Vec pick = p % 16 ? _mm256_setr_epi32(4, 4, 5, 5, 6, 6, 7, 7) : _mm256_setr_epi32(0, 0, 1, 1, 2, 2, 3, 3);
+        const Vec rw = _mm256_permutevar8x32_epi32(r.w, pick), rq = _mm256_permutevar8x32_epi32(r.q, pick);
+        const Factors w{_mm256_blend_epi32(rw, _mm256_sub_epi32(broadcast(kP), rw), 0xAA), _mm256_xor_si256(rq, odd)};
+        Vec y[8];  // e (a + s b), canonical
+#pragma GCC unroll 8
+        for (std::size_t i = 0; i < 8; ++i) {
+            Vec c = load(a + 8 * (p + i));
+            if constexpr (kSum) c = upper ? difference(c, load(b + 8 * (p + i))) : reduce(add(c, load(b + 8 * (p + i))), kP);
+            y[i] = reduce(times(c, scale), kP);
+        }
+        // lane i of z: lane 7 of y[i] times w_(p+i), plus the constant
+        const Vec t01 = _mm256_unpackhi_epi32(y[0], y[1]), t23 = _mm256_unpackhi_epi32(y[2], y[3]);
+        const Vec t45 = _mm256_unpackhi_epi32(y[4], y[5]), t67 = _mm256_unpackhi_epi32(y[6], y[7]);
+        const Vec u03 = _mm256_unpackhi_epi64(t01, t23), u47 = _mm256_unpackhi_epi64(t45, t67);
+        const Vec z = canonical(add(times(_mm256_permute2x128_si256(u03, u47, 0x31), w), broadcast(constants[upper])));
+        const Vec zh = _mm256_permute2x128_si256(z, z, 0x11);
+        const Vec lane0[8] = {z,  _mm256_srli_si256(z, 4),  _mm256_srli_si256(z, 8),  _mm256_srli_si256(z, 12),
+                              zh, _mm256_srli_si256(zh, 4), _mm256_srli_si256(zh, 8), _mm256_srli_si256(zh, 12)};
+#pragma GCC unroll 8
+        for (std::size_t i = 0; i < 8; ++i)
+            store(out.data() + 8 * (p + i), _mm256_blend_epi32(_mm256_permutevar8x32_epi32(y[i], rotate), lane0[i], 1));
+    }
+}
+
+}  // namespace detail
+
 // Transform length power uses for n coefficients: the Transform needs lg_max >= this.
 inline int power_log(std::size_t n) { return std::max(detail::log_derivative_log(n), exp_log(n)); }
 
 // Scratch words for power() of n coefficients.
 inline std::size_t power_scratch(std::size_t n) {
-    return Arena::footprint(detail::exp_length(n) / 2) + std::max(detail::log_derivative_scratch(n), detail::exp_newton_scratch(n));
+    return 3 * Arena::footprint(detail::exp_length(n) / 2) +
+           std::max(detail::log_derivative_scratch(n), detail::exp_newton_scratch(n));
 }
 
 // g = c exp(e log(f / f[0])) mod x^n for n = g.size() >= 1, f[0] != 0, e and c residues.
@@ -7454,36 +7532,52 @@ inline std::size_t power_scratch(std::size_t n) {
 // g solves x g' = q g with q = e x f'/f and g[0] = c: f'/f by the blocked division of log, then
 // the Newton steps of exp, which do not depend on the scale of g. q is kept as exp_newton takes
 // it: below m = exp_length(n) / 2 in the scratch, from m on in g, where log_derivative no longer
-// reads f.
+// reads f. When the division's blocks d_j of f'/f have k = m/2 coefficients, the last step's
+// transforms of length m of q mod x^m and of q[m, m + k) come from the division's T(d_0), T(d_1)
+// and T(d_2): q mod x^m = e x (d_0 + x^k d_1) - q[m] x^m and q[m, m + k) = q[m] + e x d_2 -
+// q[m + k] x^k, with x^m = 1 on every leaf.
 inline void power(const Transform& t, std::span<const std::uint32_t> f, std::uint32_t e, std::uint32_t c,
                   std::span<std::uint32_t> g, std::span<std::uint32_t> scratch) {
     using namespace detail;
-    const std::size_t n = g.size(), m = exp_length(n) / 2;
+    const std::size_t n = g.size(), m = exp_length(n) / 2, k = m / 2, stride = Arena::footprint(m);
     if (f.empty() || f[0] == 0) std::abort();
-    const std::span<std::uint32_t> lo = scratch.first(m), rest = scratch.subspan(Arena::footprint(m));
+    const std::span<std::uint32_t> lo = scratch.first(m), rest = scratch.subspan(3 * stride);
     const auto q = [&](std::size_t i) { return i < m ? lo.data() + i : g.data() + i; };
     const Factor factor(e);
+    // T_m(q mod x^m) and T_m(q[m, m + k)), if the division has the transforms they come from
+    const bool reuse = m >= 128 && log_block(n) == k && log_blocks(n) >= 3;
+    const bool block2 = reuse && log_blocks(n) == 4 && n - m > k;
+    const std::span<std::uint32_t> qt = scratch.subspan(stride, reuse ? m : 0);
+    const std::span<std::uint32_t> q2t = scratch.subspan(2 * stride, block2 ? m : 0);
+    const std::uint32_t* d0t = nullptr;
     lo[0] = 0;
     if (n >= 2)
-        log_derivative(t, f, n, rest, [&](std::size_t first, std::span<const std::uint32_t> d) {  // q[first + 1 + i] = e d[i]
-            std::size_t i = 0;
-            for (; i + 8 <= d.size(); i += 8) {
-                const std::size_t at = first + 1 + i;
-                const Vec x = reduce(times(load(d.data() + i), factor), kP);
-                if (at + 8 <= m || at >= m) {
-                    store_unaligned(q(at), x);
-                } else {
-                    alignas(32) std::uint32_t words[8];
-                    store(words, x);
-                    for (std::size_t j = 0; j < 8; ++j) *q(at + j) = words[j];
+        log_derivative(
+            t, f, n, rest,
+            [&](std::size_t first, std::span<const std::uint32_t> d) {  // q[first + 1 + i] = e d[i]
+                std::size_t i = 0;
+                for (; i + 8 <= d.size(); i += 8) {
+                    const std::size_t at = first + 1 + i;
+                    const Vec x = reduce(times(load(d.data() + i), factor), kP);
+                    if (at + 8 <= m || at >= m) {
+                        store_unaligned(q(at), x);
+                    } else {
+                        alignas(32) std::uint32_t words[8];
+                        store(words, x);
+                        for (std::size_t j = 0; j < 8; ++j) *q(at + j) = words[j];
+                    }
                 }
-            }
-            for (; i < d.size(); ++i) *q(first + 1 + i) = ntt::detail::multiply_mod(d[i], e);
-        });
+                for (; i < d.size(); ++i) *q(first + 1 + i) = ntt::detail::multiply_mod(d[i], e);
+            },
+            [&](std::size_t j, std::span<const std::uint32_t> dt) {  // dt = T(d_j)
+                if (j == 0) d0t = dt.data();
+                if (j == 1 && reuse) times_x<true>(t.roots(), d0t, dt.data(), e, kP - *q(m), 0, qt);
+                if (j == 2 && block2) times_x<false>(t.roots(), dt.data(), nullptr, e, *q(m), kP - *q(m + k), q2t);
+            });
     const std::span<std::uint32_t> start = g.first(std::min(n, kExpBase));
     exp_direct(lo, start);
     for (std::uint32_t& x : start) x = ntt::detail::multiply_mod(x, c);
-    if (n > kExpBase) exp_newton(t, lo, g, rest);
+    if (n > kExpBase) exp_newton(t, lo, g, rest, QTransforms{qt, q2t});
 }
 
 }  // namespace poly

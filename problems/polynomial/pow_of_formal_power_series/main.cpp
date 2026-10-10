@@ -2,9 +2,18 @@
 // f^M mod x^N, N <= 500000, M <= 10^18. With f = x^k (f_k u), u[0] = 1: f^M = x^(kM) f_k^M u^M,
 // u^M = exp((M mod P) log u) by lib/poly/pow.hpp. Output in fixed-width fields
 // (problems/convolution/convolution_mod/fields.hpp). One arena holds every array.
-#include <unistd.h>
-
 #include <algorithm>
+
+// lib/io/bulk32.hpp
+// Bulk read of uint32 arrays with AVX2, on top of io::Reader:
+//
+//   io::Reader in;
+//   io::read_bulk(in, a.data(), n);  // same values as in.read(a.data(), n); faster on Zen 3
+//
+// On Zen 3 (the judge's CPU) it uses BulkParser32 below; elsewhere it is Reader::read, which is
+// faster there. -DIO_BULK32_TRANSPOSE=0 or 1 forces either. Kept apart from io.hpp so that the
+// code of the programs that do not need it stays unchanged. Design and measurements:
+// lib/io/notes.md.
 
 // lib/io/io.hpp
 // Fast integer and text I/O on file descriptors (stdin and stdout by default).
@@ -762,6 +771,220 @@ private:
 };
 
 }  // namespace io
+
+#ifndef IO_BULK32_TRANSPOSE
+#ifdef __znver3__
+#define IO_BULK32_TRANSPOSE 1
+#else
+#define IO_BULK32_TRANSPOSE 0
+#endif
+#endif
+
+namespace io {
+namespace detail {
+
+// Parses uint32 tokens of at most 16 characters from the token at p into dst: at most count,
+// which must be the tokens that follow. Stops when fewer than kMinTokens tokens remain. Returns
+// where it stopped and the tokens parsed. As BulkParser in io.hpp, each chunk of input is cut into
+// four streams at token boundaries that advance in lockstep, two tokens per step. A step stores
+// its eight values as one vector, [a0 a1 a2 a3 b0 b1 b2 b3] for tokens a_k, b_k of stream k, and
+// a transpose then puts each stream's values in order. On Zen 3 this is 17% faster than four
+// 8-byte stores per step; on Intel (Emerald Rapids) 5% slower.
+class BulkParser32 {
+public:
+    static constexpr std::size_t kMinTokens = 1024;
+
+    struct Result {
+        const char* end;
+        std::size_t parsed;
+    };
+
+    static Result parse(const char* p, std::uint32_t* dst, std::size_t count) {
+        std::uint32_t* const first = dst;
+        while (count >= kMinTokens) {
+            // The count tokens span at least 2 * count - 1 bytes. A chunk spans at most chunk + 17
+            // bytes, so it holds at most chunk / 2 + 9 < count tokens, and loads stay below
+            // p + chunk + 33: all within those bytes.
+            const std::size_t chunk = std::min(kChunk, 2 * (count - 32)) & ~std::size_t(3);
+            const std::size_t stream = chunk / 4;
+            const char* s[4] = {p, after_separator(p + stream), after_separator(p + 2 * stream),
+                                after_separator(p + 3 * stream)};
+            const char* const end[4] = {s[1], s[2], s[3], after_separator(p + chunk)};
+            __m256i invalid = _mm256_setzero_si256();
+            const std::size_t steps = lockstep(s, end, invalid);
+            std::size_t tail[4];
+            bool overrun = false;
+            for (int k = 0; k < 4; ++k) {
+                tail[k] = 0;
+                while (s[k] < end[k] && tail[k] < kTail) tails_[k][tail[k]++] = one_token(s[k], invalid);
+                overrun |= s[k] != end[k];
+            }
+            if (overrun || (std::uint32_t(_mm256_movemask_epi8(invalid)) & 0x80008000)) [[unlikely]] {
+                // Irregular whitespace or tokens: this chunk one token at a time.
+                const std::size_t tokens = std::min(count_tokens(p, end[3]), count);
+                p = parse_slowly(p, dst, tokens);
+                dst += tokens;
+                count -= tokens;
+                continue;
+            }
+            std::uint32_t* out[4] = {dst};
+            for (int k = 0; k < 3; ++k) out[k + 1] = out[k] + 2 * steps + tail[k];
+            transpose(steps, out);
+            for (int k = 0; k < 4; ++k) std::memcpy(out[k] + 2 * steps, tails_[k], tail[k] * sizeof(std::uint32_t));
+            const auto parsed = std::size_t(out[3] + 2 * steps + tail[3] - dst);
+            dst += parsed;
+            count -= parsed;
+            p = skip_whitespace(end[3]);
+        }
+        return {p, std::size_t(dst - first)};
+    }
+
+    static const char* skip_whitespace(const char* p) {
+        while (static_cast<unsigned char>(*p) <= ' ') ++p;
+        return p;
+    }
+
+private:
+    static constexpr std::size_t kChunk = std::size_t(1) << 17;
+    // A step of valid tokens advances a stream by at least 4 bytes; lockstep stops at kSteps.
+    static constexpr std::size_t kSteps = kChunk / 16 + 16;
+    // A token takes at least 2 bytes of a stream.
+    static constexpr std::size_t kTail = kChunk / 8 + 32;
+    alignas(64) static inline std::uint32_t steps_[8 * kSteps];
+    alignas(64) static inline std::uint32_t tails_[4][kTail];
+
+    // Steps all streams while each has 33 bytes left; returns the steps. Step j stores its values
+    // at steps_ + 8j. Works on local copies of the stream state, which stay in registers.
+    static std::size_t lockstep(const char* (&streams)[4], const char* const (&end)[4], __m256i& flags) {
+        const char* s[4] = {streams[0], streams[1], streams[2], streams[3]};
+        __m256i invalid = flags;
+        std::size_t done = 0;
+        for (;;) {
+            std::ptrdiff_t left = end[0] - s[0];
+            for (int k = 1; k < 4; ++k) left = std::min(left, end[k] - s[k]);
+            const std::ptrdiff_t steps = std::min(left / 33, std::ptrdiff_t(kSteps - done));
+            if (steps <= 0) break;
+            for (std::uint32_t* v = steps_ + 8 * done; v != steps_ + 8 * (done + std::size_t(steps)); v += 8) {
+                const __m256i g0 = two_tokens(s[0], invalid), g1 = two_tokens(s[1], invalid);
+                const __m256i g2 = two_tokens(s[2], invalid), g3 = two_tokens(s[3], invalid);
+                const __m256i k = _mm256_set1_epi32(0x00012710);
+                // 8-digit halves: [s0 high, s0 low, s1 high, s1 low | second tokens likewise].
+                const __m256 h01 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g0, g1), k));
+                const __m256 h23 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g2, g3), k));
+                const __m256i high = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0x88));
+                const __m256i low = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0xDD));
+                _mm256_store_si256(reinterpret_cast<__m256i*>(v),
+                                   _mm256_add_epi32(_mm256_mullo_epi32(high, _mm256_set1_epi32(100000000)), low));
+            }
+            done += std::size_t(steps);
+        }
+        for (int k = 0; k < 4; ++k) streams[k] = s[k];
+        flags = invalid;
+        return done;
+    }
+
+    // The 2 * steps values of stream k from steps_ to out[k]: a 4x4 transpose of value pairs.
+    static void transpose(std::size_t steps, std::uint32_t* const (&out)[4]) {
+        const auto pairs = [](std::size_t j) {  // step j as [a0 b0 a1 b1 | a2 b2 a3 b3]
+            const __m256i v = _mm256_load_si256(reinterpret_cast<const __m256i*>(steps_ + 8 * j));
+            return _mm256_permutevar8x32_epi32(v, _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7));
+        };
+        std::size_t j = 0;
+        for (; j + 4 <= steps; j += 4) {
+            const __m256i p0 = pairs(j), p1 = pairs(j + 1), p2 = pairs(j + 2), p3 = pairs(j + 3);
+            const __m256i t0 = _mm256_unpacklo_epi64(p0, p1), t1 = _mm256_unpackhi_epi64(p0, p1);
+            const __m256i t2 = _mm256_unpacklo_epi64(p2, p3), t3 = _mm256_unpackhi_epi64(p2, p3);
+            const auto put = [j](std::uint32_t* to, __m256i v) {
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(to + 2 * j), v);
+            };
+            put(out[0], _mm256_permute2x128_si256(t0, t2, 0x20));
+            put(out[1], _mm256_permute2x128_si256(t1, t3, 0x20));
+            put(out[2], _mm256_permute2x128_si256(t0, t2, 0x31));
+            put(out[3], _mm256_permute2x128_si256(t1, t3, 0x31));
+        }
+        for (; j < steps; ++j)
+            for (int k = 0; k < 4; ++k) {
+                out[k][2 * j] = steps_[8 * j + k];
+                out[k][2 * j + 1] = steps_[8 * j + 4 + k];
+            }
+    }
+
+    // Two tokens at s, as 4-digit groups [first | second]. Lengths outside 1..16 (repeated
+    // whitespace, long tokens) set the sign bit of byte 15 or 31 of invalid.
+    [[gnu::always_inline]] static __m256i two_tokens(const char*& s, __m256i& invalid) {
+        const __m256i bytes = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(s));
+        const std::uint32_t sep = separators(bytes);
+        const auto first = std::size_t(std::countr_zero(sep));              // length of the first token
+        const auto second = std::size_t(std::countr_zero(sep & (sep - 1)));  // 32 if none
+        const __m256i windows =
+            _mm256_inserti128_si256(bytes, _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + first + 1)), 1);
+        const __m256i rows = _mm256_set_m128i(align_row(second - first), align_row(first + 1));
+        invalid = _mm256_or_si256(invalid, rows);
+        s += second + 1;
+        return digit_groups(_mm256_shuffle_epi8(_mm256_subs_epu8(windows, _mm256_set1_epi8('0')), rows));
+    }
+
+    static std::uint32_t one_token(const char*& s, __m256i& invalid) {
+        const __m128i window = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s));
+        const unsigned n = unsigned(std::countr_zero(separators(window) | 0x10000));
+        invalid = _mm256_or_si256(invalid, _mm256_castsi128_si256(align_row(n + 1)));
+        s += n + 1;
+        return std::uint32_t(parse16(window, n));
+    }
+
+    // The byte after the first separator at or after q.
+    static const char* after_separator(const char* q) {
+        for (;; q += 32)
+            if (const std::uint32_t sep = separators(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(q))))
+                return q + std::countr_zero(sep) + 1;
+    }
+
+    // Tokens in [p, end), where p starts a token.
+    static std::size_t count_tokens(const char* p, const char* end) {
+        std::size_t tokens = 1;
+        for (const char* q = p + 1; q < end; ++q)
+            tokens += static_cast<unsigned char>(*q) > ' ' && static_cast<unsigned char>(q[-1]) <= ' ';
+        return tokens;
+    }
+
+    static const char* parse_slowly(const char* p, std::uint32_t* dst, std::size_t count) {
+        for (std::size_t i = 0; i < count; ++i) {
+            p = skip_whitespace(p);
+            const __m128i window = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+            const unsigned n = unsigned(std::countr_zero(separators(window) | 0x10000));
+            dst[i] = std::uint32_t(parse16(window, n));
+            p += n + 1;
+        }
+        return p;
+    }
+};
+
+// count uint32 tokens into dst with BulkParser32, the rest one at a time.
+inline void read_transposed(Reader& in, std::uint32_t* dst, std::size_t count) {
+    std::size_t parsed = 0;
+    if (count >= BulkParser32::kMinTokens) {
+        const char* const start = BulkParser32::skip_whitespace(in.scan().cur);
+        const auto [stop, done] = BulkParser32::parse(start, dst, count);
+        // Continue the Reader at stop: its separator mask from there on.
+        const auto* block = reinterpret_cast<const char*>(reinterpret_cast<std::uintptr_t>(stop) & ~std::uintptr_t(63));
+        in.resume({stop, block, block_separators(block) & ~std::uint64_t(0) << (stop - block)});
+        parsed = done;
+    }
+    for (std::size_t i = parsed; i < count; ++i) dst[i] = in.read<std::uint32_t>();
+}
+
+}  // namespace detail
+
+// count uint32 tokens into dst: the same values as in.read(dst, count).
+inline void read_bulk(Reader& in, std::uint32_t* dst, std::size_t count) {
+#if IO_BULK32_TRANSPOSE
+    detail::read_transposed(in, dst, count);
+#else
+    in.read(dst, count);
+#endif
+}
+
+}  // namespace io
 // lib/poly/pow.hpp
 // Powers of a power series modulo 998244353: g = c (f / f[0])^e mod x^n, that is
 // c exp(e log(f / f[0])), for any residue e. Design: lib/poly/notes.md.
@@ -773,6 +996,8 @@ private:
 //
 // For an integer M >= 0 and n <= P, f^M = power(f, M mod P, f[0]^M): (f / f[0])^M has constant
 // term 1, so it depends on M mod P only. A square root of f is power(f, 1 / 2, sqrt(f[0])).
+
+#include <immintrin.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -794,6 +1019,7 @@ private:
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <type_traits>
 
 // lib/poly/calculus.hpp
 // Coefficient-wise operations on power series modulo 998244353: derivative and division by
@@ -6764,6 +6990,13 @@ inline int exp_log(std::size_t n) { return std::countr_zero(detail::exp_length(n
 
 namespace detail {
 
+// Transforms of length m = exp_length(n) / 2 of q mod x^m (low) and of q[m, 3m/2) (block2) that a
+// caller of exp_newton already has; empty if not. exp has none (NoQTransforms).
+struct QTransforms {
+    std::span<const std::uint32_t> low, block2;
+};
+struct NoQTransforms {};
+
 // A product as Transform's run() computes it (the forward top level of in if the bottom has one,
 // the subtrees, the inverse top level times scale), its output half written to `to` (at most n/2
 // words, any alignment) instead of out's: the caller needs no copy. out (n words) is the work span.
@@ -6817,13 +7050,22 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
 // 14 transforms and 7 leaf products of length m (a full step: 16 and 7); 7 and 3 when n - m <= B.
 // q as for exp_newton: q mod x^m in lo (overwritten here), the rest in g[m, n) until g_2 and g_3
 // replace it. Spans: gt = [G0, T_m(g)] and w of 2m words, work of m words; ht holds H.
+// given (a QTransforms) may hold T_m(q mod x^m) and T_m(q_2).
+template <class Given>
 [[gnu::always_inline]] inline void exp_last_step(const Transform& t, std::span<std::uint32_t> lo, std::span<std::uint32_t> g,
                                                  std::size_t m, bool first, std::span<std::uint32_t> gt,
                                                  std::span<const std::uint32_t> ht, std::span<std::uint32_t> w,
-                                                 std::span<std::uint32_t> work) {
+                                                 std::span<std::uint32_t> work, const Given& given) {
     const std::size_t n = g.size(), half = m / 2, rest = n - m, count = std::min(rest, half);
     const bool upper = rest > half;  // block 3
-    const std::span<std::uint32_t> g0t = gt.first(m), glt = gt.subspan(m, m), qt = w.first(m), r = w.subspan(m, m);
+    const std::span<std::uint32_t> g0t = gt.first(m), glt = gt.subspan(m, m), own = w.first(m), r = w.subspan(m, m);
+    std::span<const std::uint32_t> qt = own, q2t = lo;
+    bool given_low = false, given_block2 = false;
+    if constexpr (std::is_same_v<Given, QTransforms>) {
+        given_low = !given.low.empty(), given_block2 = !given.block2.empty();
+        if (given_low) qt = given.low;
+        if (given_block2) q2t = given.block2;
+    }
     const auto q = [g, n](std::size_t i) {  // q[i, i + 8) for m <= i < n, from g; zero from n on
         if (i + 8 <= n) return load_unaligned(g.data() + i);
         alignas(32) std::uint32_t x[8] = {};
@@ -6832,9 +7074,11 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
     };
     if (first) t.forward(g.first(half), 0, g0t);
     t.forward(g.first(m), 0, glt);
-    if (upper) {  // T_m(q mod x^m) in qt, again for block 3
-        t.forward(lo, 0, qt);
-        t.inverse_product(qt, glt, r);
+    if (given_low) {
+        t.inverse_product(qt, glt, r, upper ? Half::kBoth : Half::kLower);
+    } else if (upper) {  // T_m(q mod x^m) in own, again for block 3
+        t.forward(lo, 0, own);
+        t.inverse_product(own, glt, r);
     } else {
         t.cyclic_product(lo, 0, r, glt, Half::kLower);
     }
@@ -6845,7 +7089,7 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
         const Vec x = reduce(add(load(work.data() + i), q(m + i)), kP);
         return add(x, _mm256_sub_epi32(broadcast(kP), load(lo.data() + i)));
     });
-    if (upper) t.forward(g.subspan(m, half), 0, lo);  // T_m(q_2): q mod x^m is no longer read
+    if (upper && !given_block2) t.forward(g.subspan(m, half), 0, lo);  // T_m(q_2): q mod x^m is no longer read
     t.forward(r.first(count), 0, work);
     const std::uint32_t scale = kInverseScales[1][std::countr_zero(m)];
     const Source none(nullptr, 0, 0);
@@ -6854,7 +7098,7 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
     if (!upper) return;
     // Block 3: (q G)[3B, 4B) at r[B, 2B), s at r[0, rest - B), then g_3.
     t.forward(g.subspan(m, half), 0, work);
-    const Transform::Pair pairs[] = {{work, qt}, {lo, glt}};
+    const Transform::Pair pairs[] = {{work, qt}, {q2t, glt}};
     t.inverse_product_sum(pairs, work, Half::kUpper);
     Indices index(half);
     for (std::size_t i = half; i < m; i += 8, index.next()) {
@@ -6862,21 +7106,23 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
         const Vec sum = add(load(r.data() + i), load(work.data() + i));
         store(r.data() + i, canonical(_mm256_sub_epi32(add(sum, broadcast(2 * kP)), xg)));
     }
-    t.forward(r.subspan(half, half), 0, qt);
-    t.inverse_product(ht, qt, qt, Half::kLower);
+    t.forward(r.subspan(half, half), 0, own);
+    t.inverse_product(ht, own, own, Half::kLower);
     detail::divide_by_index(m + half, r.first(rest - half),
-                            [&](std::size_t i) { return add(load(qt.data() + i), q(m + half + i)); });
-    t.forward(r.first(rest - half), 0, qt);
-    product_to(t, qt, none, InverseProductBottom{{t.roots(), t.inverse_roots(), qt.data()}, g0t.data()}, scale,
+                            [&](std::size_t i) { return add(load(own.data() + i), q(m + half + i)); });
+    t.forward(r.first(rest - half), 0, own);
+    product_to(t, own, none, InverseProductBottom{{t.roots(), t.inverse_roots(), own.data()}, g0t.data()}, scale,
                Half::kLower, g.subspan(m + half, rest - half));
 }
 
 // The Newton steps of exp() below, from g mod x^kExpBase (given) to g mod x^n, n = g.size() >
 // kExpBase, for x g' = q g: q[i] is lo[i] below m = lo.size() = exp_length(n) / 2 and g[i] from
 // m on (g's coefficients replace it); lo is overwritten. Each step is invariant under scaling g,
-// so g[0] may be any nonzero constant. scratch: exp_newton_scratch(n).
+// so g[0] may be any nonzero constant. scratch: exp_newton_scratch(n). given: transforms for the
+// last step (exp_last_step), outside the scratch.
+template <class Given = NoQTransforms>
 [[gnu::always_inline]] inline void exp_newton(const Transform& t, std::span<std::uint32_t> lo, std::span<std::uint32_t> g,
-                                              std::span<std::uint32_t> scratch) {
+                                              std::span<std::uint32_t> scratch, const Given& given = {}) {
     const std::size_t n = g.size(), len = 2 * lo.size();
     const auto take = [&scratch](std::size_t words) {
         const std::span<std::uint32_t> s = scratch.first(words);
@@ -6912,7 +7158,7 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
         product_to(t, w.first(2 * m), Source(w.data() + m, m, m), ProductBottom{t.roots(), t.inverse_roots(), gt.data()},
                    kInverseScales[1][std::countr_zero(2 * m)], Half::kUpper, g.subspan(m, m));
     }
-    exp_last_step(t, lo, g, m, m == kExpBase, gt, ht, w, h);
+    exp_last_step(t, lo, g, m, m == kExpBase, gt, ht, w, h, given);
 }
 
 inline std::size_t exp_newton_scratch(std::size_t n) {
@@ -7099,6 +7345,11 @@ struct SideProductBottom {
     }
 };
 
+// A log_derivative callback for the blocks' transforms that ignores them.
+struct IgnoreTransforms {
+    void operator()(std::size_t, std::span<const std::uint32_t>) const {}
+};
+
 // Buffers of length 2k log_derivative uses: T(h), W_1 .. W_(B-1), q_0's, and one for the later
 // blocks; at least 3 (for B = 1: the inverse's scratch, 2 buffers, follows T(h)).
 inline std::size_t log_buffers(std::size_t n) { return std::max<std::size_t>(log_blocks(n) + 2, 3); }
@@ -7114,10 +7365,13 @@ inline std::size_t log_buffers(std::size_t n) { return std::max<std::size_t>(log
 // Blocks j >= 1 share one buffer: the residual (over T(q_(j-1)) for j >= 2), q_j, T(q_j).
 // sink(first, q) receives q[first, first + q.size()), block by block, as an aligned span
 // readable to the next multiple of 8. After it returns, f is read only at indices
-// > first + q.size(). scratch: log_derivative_scratch(n) words; t: lg_max >= log_derivative_log(n).
-template <class Sink>
+// > first + q.size(). transformed(j, T(q_j)) receives the transform of length 2k of each block
+// but the last, valid until the next block starts (T(q_0) until the end).
+// scratch: log_derivative_scratch(n) words; t: lg_max >= log_derivative_log(n).
+template <class Sink, class Transformed = IgnoreTransforms>
 [[gnu::always_inline]] inline void log_derivative(const Transform& t, std::span<const std::uint32_t> f, std::size_t n,
-                                                  std::span<std::uint32_t> scratch, const Sink& sink) {
+                                                  std::span<std::uint32_t> scratch, const Sink& sink,
+                                                  const Transformed& transformed = {}) {
     const std::size_t k = log_block(n), len = 2 * k, blocks = log_blocks(n);
     const auto buffer = [&scratch, len](std::size_t i) { return scratch.subspan(i * Arena::footprint(len), len); };
     const std::span<std::uint32_t> ht = buffer(0), q0 = buffer(blocks);
@@ -7152,7 +7406,10 @@ template <class Sink>
         }
         t.cyclic_product(work.first(count), 0, work, ht, Half::kLower);
         sink(first, std::span<const std::uint32_t>(work.first(count)));
-        if (j + 1 < blocks) t.forward(work.first(k), 0, work);
+        if (j + 1 < blocks) {
+            t.forward(work.first(k), 0, work);
+            transformed(j, std::span<const std::uint32_t>(work));
+        }
     }
 }
 
@@ -7194,12 +7451,56 @@ inline void log(const Transform& t, std::span<const std::uint32_t> f, std::span<
 
 namespace poly {
 
+namespace detail {
+
+// out = e x (a + s b) + (alpha + s beta) for transforms a, b of length n = out.size() >= 128
+// (b only if kSum) and alpha, beta <= P, where s = x^(n/2) is 1 on the lower half of the leaves
+// and -1 on the upper half. Leaf p of x a is (w_p a_7, a_0, .., a_6): per 8 leaves, the lanes 7
+// are gathered into one vector for their products with w_p. out may be a or b.
+template <bool kSum>
+void times_x(const std::uint32_t* roots, const std::uint32_t* a, const std::uint32_t* b, std::uint32_t e,
+             std::uint32_t alpha, std::uint32_t beta, std::span<std::uint32_t> out) {
+    const std::size_t leaves = out.size() / 8;
+    const Factor scale(e);
+    const Vec rotate = _mm256_setr_epi32(7, 0, 1, 2, 3, 4, 5, 6), odd = _mm256_setr_epi32(0, -1, 0, -1, 0, -1, 0, -1);
+    const std::uint32_t constants[2] = {(alpha + beta) % kP, (alpha + kP - beta) % kP};
+    for (std::size_t p = 0; p < leaves; p += 8) {
+        const bool upper = p >= leaves / 2;
+        // w_p for leaves p .. p + 7: r[p/2 + i] for even p, -r[p/2 + i] (quotient ~q) for odd p
+        const Factors r = entries(roots, p / 16 * 8);
+        const Vec pick = p % 16 ? _mm256_setr_epi32(4, 4, 5, 5, 6, 6, 7, 7) : _mm256_setr_epi32(0, 0, 1, 1, 2, 2, 3, 3);
+        const Vec rw = _mm256_permutevar8x32_epi32(r.w, pick), rq = _mm256_permutevar8x32_epi32(r.q, pick);
+        const Factors w{_mm256_blend_epi32(rw, _mm256_sub_epi32(broadcast(kP), rw), 0xAA), _mm256_xor_si256(rq, odd)};
+        Vec y[8];  // e (a + s b), canonical
+#pragma GCC unroll 8
+        for (std::size_t i = 0; i < 8; ++i) {
+            Vec c = load(a + 8 * (p + i));
+            if constexpr (kSum) c = upper ? difference(c, load(b + 8 * (p + i))) : reduce(add(c, load(b + 8 * (p + i))), kP);
+            y[i] = reduce(times(c, scale), kP);
+        }
+        // lane i of z: lane 7 of y[i] times w_(p+i), plus the constant
+        const Vec t01 = _mm256_unpackhi_epi32(y[0], y[1]), t23 = _mm256_unpackhi_epi32(y[2], y[3]);
+        const Vec t45 = _mm256_unpackhi_epi32(y[4], y[5]), t67 = _mm256_unpackhi_epi32(y[6], y[7]);
+        const Vec u03 = _mm256_unpackhi_epi64(t01, t23), u47 = _mm256_unpackhi_epi64(t45, t67);
+        const Vec z = canonical(add(times(_mm256_permute2x128_si256(u03, u47, 0x31), w), broadcast(constants[upper])));
+        const Vec zh = _mm256_permute2x128_si256(z, z, 0x11);
+        const Vec lane0[8] = {z,  _mm256_srli_si256(z, 4),  _mm256_srli_si256(z, 8),  _mm256_srli_si256(z, 12),
+                              zh, _mm256_srli_si256(zh, 4), _mm256_srli_si256(zh, 8), _mm256_srli_si256(zh, 12)};
+#pragma GCC unroll 8
+        for (std::size_t i = 0; i < 8; ++i)
+            store(out.data() + 8 * (p + i), _mm256_blend_epi32(_mm256_permutevar8x32_epi32(y[i], rotate), lane0[i], 1));
+    }
+}
+
+}  // namespace detail
+
 // Transform length power uses for n coefficients: the Transform needs lg_max >= this.
 inline int power_log(std::size_t n) { return std::max(detail::log_derivative_log(n), exp_log(n)); }
 
 // Scratch words for power() of n coefficients.
 inline std::size_t power_scratch(std::size_t n) {
-    return Arena::footprint(detail::exp_length(n) / 2) + std::max(detail::log_derivative_scratch(n), detail::exp_newton_scratch(n));
+    return 3 * Arena::footprint(detail::exp_length(n) / 2) +
+           std::max(detail::log_derivative_scratch(n), detail::exp_newton_scratch(n));
 }
 
 // g = c exp(e log(f / f[0])) mod x^n for n = g.size() >= 1, f[0] != 0, e and c residues.
@@ -7209,39 +7510,84 @@ inline std::size_t power_scratch(std::size_t n) {
 // g solves x g' = q g with q = e x f'/f and g[0] = c: f'/f by the blocked division of log, then
 // the Newton steps of exp, which do not depend on the scale of g. q is kept as exp_newton takes
 // it: below m = exp_length(n) / 2 in the scratch, from m on in g, where log_derivative no longer
-// reads f.
+// reads f. When the division's blocks d_j of f'/f have k = m/2 coefficients, the last step's
+// transforms of length m of q mod x^m and of q[m, m + k) come from the division's T(d_0), T(d_1)
+// and T(d_2): q mod x^m = e x (d_0 + x^k d_1) - q[m] x^m and q[m, m + k) = q[m] + e x d_2 -
+// q[m + k] x^k, with x^m = 1 on every leaf.
 inline void power(const Transform& t, std::span<const std::uint32_t> f, std::uint32_t e, std::uint32_t c,
                   std::span<std::uint32_t> g, std::span<std::uint32_t> scratch) {
     using namespace detail;
-    const std::size_t n = g.size(), m = exp_length(n) / 2;
+    const std::size_t n = g.size(), m = exp_length(n) / 2, k = m / 2, stride = Arena::footprint(m);
     if (f.empty() || f[0] == 0) std::abort();
-    const std::span<std::uint32_t> lo = scratch.first(m), rest = scratch.subspan(Arena::footprint(m));
+    const std::span<std::uint32_t> lo = scratch.first(m), rest = scratch.subspan(3 * stride);
     const auto q = [&](std::size_t i) { return i < m ? lo.data() + i : g.data() + i; };
     const Factor factor(e);
+    // T_m(q mod x^m) and T_m(q[m, m + k)), if the division has the transforms they come from
+    const bool reuse = m >= 128 && log_block(n) == k && log_blocks(n) >= 3;
+    const bool block2 = reuse && log_blocks(n) == 4 && n - m > k;
+    const std::span<std::uint32_t> qt = scratch.subspan(stride, reuse ? m : 0);
+    const std::span<std::uint32_t> q2t = scratch.subspan(2 * stride, block2 ? m : 0);
+    const std::uint32_t* d0t = nullptr;
     lo[0] = 0;
     if (n >= 2)
-        log_derivative(t, f, n, rest, [&](std::size_t first, std::span<const std::uint32_t> d) {  // q[first + 1 + i] = e d[i]
-            std::size_t i = 0;
-            for (; i + 8 <= d.size(); i += 8) {
-                const std::size_t at = first + 1 + i;
-                const Vec x = reduce(times(load(d.data() + i), factor), kP);
-                if (at + 8 <= m || at >= m) {
-                    store_unaligned(q(at), x);
-                } else {
-                    alignas(32) std::uint32_t words[8];
-                    store(words, x);
-                    for (std::size_t j = 0; j < 8; ++j) *q(at + j) = words[j];
+        log_derivative(
+            t, f, n, rest,
+            [&](std::size_t first, std::span<const std::uint32_t> d) {  // q[first + 1 + i] = e d[i]
+                std::size_t i = 0;
+                for (; i + 8 <= d.size(); i += 8) {
+                    const std::size_t at = first + 1 + i;
+                    const Vec x = reduce(times(load(d.data() + i), factor), kP);
+                    if (at + 8 <= m || at >= m) {
+                        store_unaligned(q(at), x);
+                    } else {
+                        alignas(32) std::uint32_t words[8];
+                        store(words, x);
+                        for (std::size_t j = 0; j < 8; ++j) *q(at + j) = words[j];
+                    }
                 }
-            }
-            for (; i < d.size(); ++i) *q(first + 1 + i) = ntt::detail::multiply_mod(d[i], e);
-        });
+                for (; i < d.size(); ++i) *q(first + 1 + i) = ntt::detail::multiply_mod(d[i], e);
+            },
+            [&](std::size_t j, std::span<const std::uint32_t> dt) {  // dt = T(d_j)
+                if (j == 0) d0t = dt.data();
+                if (j == 1 && reuse) times_x<true>(t.roots(), d0t, dt.data(), e, kP - *q(m), 0, qt);
+                if (j == 2 && block2) times_x<false>(t.roots(), dt.data(), nullptr, e, *q(m), kP - *q(m + k), q2t);
+            });
     const std::span<std::uint32_t> start = g.first(std::min(n, kExpBase));
     exp_direct(lo, start);
     for (std::uint32_t& x : start) x = ntt::detail::multiply_mod(x, c);
-    if (n > kExpBase) exp_newton(t, lo, g, rest);
+    if (n > kExpBase) exp_newton(t, lo, g, rest, QTransforms{qt, q2t});
 }
 
 }  // namespace poly
+// lib/run/early.hpp
+// Program entry for solutions. RUN_EARLY(solve) runs solve() from the executable's
+// pre-initializers (.preinit_array), before the C++ runtime initializes iostreams and locales
+// (lib/io uses neither) and before any static constructor, then ends the process with _exit(0):
+// no exit handlers, no teardown, no unmapping. Elsewhere it defines main() { solve(); }.
+// Measurements: lib/run/notes.md.
+//
+//   namespace {
+//   void solve() { ... }  // flushes its output (io::Writer does on destruction)
+//   }  // namespace
+//
+//   RUN_EARLY(solve)      // at namespace scope, once per program
+
+#include <unistd.h>
+
+#ifdef __ELF__
+#define RUN_EARLY(solve)                                                                                  \
+    namespace {                                                                                           \
+    void run_early(int, char**, char**) {                                                                 \
+        solve();                                                                                          \
+        ::_exit(0);                                                                                       \
+    }                                                                                                     \
+    [[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early; \
+    }                                                                                                     \
+    int main() { solve(); }  // reached only if the loader skips .preinit_array
+#else
+#define RUN_EARLY(solve) \
+    int main() { solve(); }
+#endif
 // problems/convolution/convolution_mod/fields.hpp
 // Fixed-width output of residues < 10^9, byte for byte as ../fixed_width.hpp: each value
 // right-aligned in 9 characters, then a space; the last separator is a newline. Judge-specific:
@@ -7448,24 +7794,13 @@ void solve() {
     poly::Arena arena(poly::Arena::footprint(n) + poly::Arena::footprint(kTextWords) +
                       poly::Transform::words(poly::power_log(n)) + poly::power_scratch(n));
     const std::span<std::uint32_t> b = arena.take(n);
-    in.read(b.data(), n);
+    io::read_bulk(in, b.data(), n);
     char* const text = reinterpret_cast<char*>(arena.take(kTextWords).data());
     power(arena, b, m);
     io::Writer out;
     fields::write(out, b.data(), n, text);
 }
 
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here). _exit skips their teardown too.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
-
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

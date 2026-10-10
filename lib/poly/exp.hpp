@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <type_traits>
 
 #include "lib/poly/calculus.hpp"
 #include "lib/poly/inverse.hpp"
@@ -59,6 +60,13 @@ inline std::size_t exp_length(std::size_t n) {
 inline int exp_log(std::size_t n) { return std::countr_zero(detail::exp_length(n)) - 1; }
 
 namespace detail {
+
+// Transforms of length m = exp_length(n) / 2 of q mod x^m (low) and of q[m, 3m/2) (block2) that a
+// caller of exp_newton already has; empty if not. exp has none (NoQTransforms).
+struct QTransforms {
+    std::span<const std::uint32_t> low, block2;
+};
+struct NoQTransforms {};
 
 // A product as Transform's run() computes it (the forward top level of in if the bottom has one,
 // the subtrees, the inverse top level times scale), its output half written to `to` (at most n/2
@@ -113,13 +121,22 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
 // 14 transforms and 7 leaf products of length m (a full step: 16 and 7); 7 and 3 when n - m <= B.
 // q as for exp_newton: q mod x^m in lo (overwritten here), the rest in g[m, n) until g_2 and g_3
 // replace it. Spans: gt = [G0, T_m(g)] and w of 2m words, work of m words; ht holds H.
+// given (a QTransforms) may hold T_m(q mod x^m) and T_m(q_2).
+template <class Given>
 [[gnu::always_inline]] inline void exp_last_step(const Transform& t, std::span<std::uint32_t> lo, std::span<std::uint32_t> g,
                                                  std::size_t m, bool first, std::span<std::uint32_t> gt,
                                                  std::span<const std::uint32_t> ht, std::span<std::uint32_t> w,
-                                                 std::span<std::uint32_t> work) {
+                                                 std::span<std::uint32_t> work, const Given& given) {
     const std::size_t n = g.size(), half = m / 2, rest = n - m, count = std::min(rest, half);
     const bool upper = rest > half;  // block 3
-    const std::span<std::uint32_t> g0t = gt.first(m), glt = gt.subspan(m, m), qt = w.first(m), r = w.subspan(m, m);
+    const std::span<std::uint32_t> g0t = gt.first(m), glt = gt.subspan(m, m), own = w.first(m), r = w.subspan(m, m);
+    std::span<const std::uint32_t> qt = own, q2t = lo;
+    bool given_low = false, given_block2 = false;
+    if constexpr (std::is_same_v<Given, QTransforms>) {
+        given_low = !given.low.empty(), given_block2 = !given.block2.empty();
+        if (given_low) qt = given.low;
+        if (given_block2) q2t = given.block2;
+    }
     const auto q = [g, n](std::size_t i) {  // q[i, i + 8) for m <= i < n, from g; zero from n on
         if (i + 8 <= n) return load_unaligned(g.data() + i);
         alignas(32) std::uint32_t x[8] = {};
@@ -128,9 +145,11 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
     };
     if (first) t.forward(g.first(half), 0, g0t);
     t.forward(g.first(m), 0, glt);
-    if (upper) {  // T_m(q mod x^m) in qt, again for block 3
-        t.forward(lo, 0, qt);
-        t.inverse_product(qt, glt, r);
+    if (given_low) {
+        t.inverse_product(qt, glt, r, upper ? Half::kBoth : Half::kLower);
+    } else if (upper) {  // T_m(q mod x^m) in own, again for block 3
+        t.forward(lo, 0, own);
+        t.inverse_product(own, glt, r);
     } else {
         t.cyclic_product(lo, 0, r, glt, Half::kLower);
     }
@@ -141,7 +160,7 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
         const Vec x = reduce(add(load(work.data() + i), q(m + i)), kP);
         return add(x, _mm256_sub_epi32(broadcast(kP), load(lo.data() + i)));
     });
-    if (upper) t.forward(g.subspan(m, half), 0, lo);  // T_m(q_2): q mod x^m is no longer read
+    if (upper && !given_block2) t.forward(g.subspan(m, half), 0, lo);  // T_m(q_2): q mod x^m is no longer read
     t.forward(r.first(count), 0, work);
     const std::uint32_t scale = kInverseScales[1][std::countr_zero(m)];
     const Source none(nullptr, 0, 0);
@@ -150,7 +169,7 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
     if (!upper) return;
     // Block 3: (q G)[3B, 4B) at r[B, 2B), s at r[0, rest - B), then g_3.
     t.forward(g.subspan(m, half), 0, work);
-    const Transform::Pair pairs[] = {{work, qt}, {lo, glt}};
+    const Transform::Pair pairs[] = {{work, qt}, {q2t, glt}};
     t.inverse_product_sum(pairs, work, Half::kUpper);
     Indices index(half);
     for (std::size_t i = half; i < m; i += 8, index.next()) {
@@ -158,21 +177,23 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
         const Vec sum = add(load(r.data() + i), load(work.data() + i));
         store(r.data() + i, canonical(_mm256_sub_epi32(add(sum, broadcast(2 * kP)), xg)));
     }
-    t.forward(r.subspan(half, half), 0, qt);
-    t.inverse_product(ht, qt, qt, Half::kLower);
+    t.forward(r.subspan(half, half), 0, own);
+    t.inverse_product(ht, own, own, Half::kLower);
     detail::divide_by_index(m + half, r.first(rest - half),
-                            [&](std::size_t i) { return add(load(qt.data() + i), q(m + half + i)); });
-    t.forward(r.first(rest - half), 0, qt);
-    product_to(t, qt, none, InverseProductBottom{{t.roots(), t.inverse_roots(), qt.data()}, g0t.data()}, scale,
+                            [&](std::size_t i) { return add(load(own.data() + i), q(m + half + i)); });
+    t.forward(r.first(rest - half), 0, own);
+    product_to(t, own, none, InverseProductBottom{{t.roots(), t.inverse_roots(), own.data()}, g0t.data()}, scale,
                Half::kLower, g.subspan(m + half, rest - half));
 }
 
 // The Newton steps of exp() below, from g mod x^kExpBase (given) to g mod x^n, n = g.size() >
 // kExpBase, for x g' = q g: q[i] is lo[i] below m = lo.size() = exp_length(n) / 2 and g[i] from
 // m on (g's coefficients replace it); lo is overwritten. Each step is invariant under scaling g,
-// so g[0] may be any nonzero constant. scratch: exp_newton_scratch(n).
+// so g[0] may be any nonzero constant. scratch: exp_newton_scratch(n). given: transforms for the
+// last step (exp_last_step), outside the scratch.
+template <class Given = NoQTransforms>
 [[gnu::always_inline]] inline void exp_newton(const Transform& t, std::span<std::uint32_t> lo, std::span<std::uint32_t> g,
-                                              std::span<std::uint32_t> scratch) {
+                                              std::span<std::uint32_t> scratch, const Given& given = {}) {
     const std::size_t n = g.size(), len = 2 * lo.size();
     const auto take = [&scratch](std::size_t words) {
         const std::span<std::uint32_t> s = scratch.first(words);
@@ -208,7 +229,7 @@ void product_to(const Transform& t, std::span<std::uint32_t> out, const Source& 
         product_to(t, w.first(2 * m), Source(w.data() + m, m, m), ProductBottom{t.roots(), t.inverse_roots(), gt.data()},
                    kInverseScales[1][std::countr_zero(2 * m)], Half::kUpper, g.subspan(m, m));
     }
-    exp_last_step(t, lo, g, m, m == kExpBase, gt, ht, w, h);
+    exp_last_step(t, lo, g, m, m == kExpBase, gt, ht, w, h, given);
 }
 
 inline std::size_t exp_newton_scratch(std::size_t n) {

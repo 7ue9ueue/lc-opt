@@ -1,9 +1,11 @@
 # convolution_mod_1000000007
 
 N, M <= 2^19 coefficients mod 10^9 + 7; print the N + M - 1 coefficients of the product. 10 s.
-Record when opened: 29 ms (another user). Best judged: ours, 23 ms, spike-free:
-[409310](https://judge.yosupo.jp/submission/409310) (`main.cpp` of #129) and
-[409353](https://judge.yosupo.jp/submission/409353) (`main.cpp` of #162). Earlier: 31 ms,
+Record when opened: 29 ms (another user). Best judged: ours, 22 ms, spike-free:
+[409640](https://judge.yosupo.jp/submission/409640) and
+[409643](https://judge.yosupo.jp/submission/409643) (`main.cpp` of #305). Before: 23 ms,
+[409310](https://judge.yosupo.jp/submission/409310) (#129) and
+[409353](https://judge.yosupo.jp/submission/409353) (#162); 31 ms,
 [409262](https://judge.yosupo.jp/submission/409262) (#129; a judge spike, clean score 23 ms,
 `tools/spikes.md`).
 
@@ -153,6 +155,13 @@ Record when opened: 29 ms (another user). Best judged: ours, 23 ms, spike-free:
     of the generator (one reduction dropped) fail it; `stress.py` 500 rounds, 200 with
     `-DFORCE_WIDE`, 100 with x86-64-v3, 100 with ASan/UBSan; ASan/UBSan build on 9 official
     cases, file and pipe input.
+  - CI (#305, merged): geomean 0.9617 (EPYC 7763 0.9378, 9V74 0.9955, 9V45 0.9528).
+  - Submitted the merged `main.cpp` (#305), 2026-10-10:
+    [409640](https://judge.yosupo.jp/submission/409640) AC 22 ms (no spike on the slowest
+    cases; large cases 20-22, most at 21), [409642](https://judge.yosupo.jp/submission/409642)
+    AC 25 ms (spike on small_and_large_03; clean 21),
+    [409643](https://judge.yosupo.jp/submission/409643) AC 22 ms (clean 22). 28.9 MiB (was
+    30.9). Best judged 23 -> 22 ms.
 - Next: the first level waits on memory (about 0.5 ms over its 6 calls; a fused radix-8 and
   radix-4 first pass might hide it); primes below 2^27. `product.hpp` and convolution_mod_2_64's
   differ only in the kernels' ranges and the input: one run-time-modulus Product in lib/multimod

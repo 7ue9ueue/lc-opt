@@ -92,13 +92,17 @@ N values with `fields.hpp`, nothing else (scratch `floor_main.cpp`): 4.31 ms med
 - 2026-10-10, claude (issue #80 round, shared code): the factorial table, `Chain`, the
   transposes and the pipelined scan moved to `lib/poly/factorials.hpp` (generator
   `lib/poly/gen_factorials.py`, table to 2^20 + 1023); `factorials.hpp`/`factorials.py` here
-  are gone. Same arithmetic; the passes call `poly::detail::scan` with lambdas. `judge.py bench`,
-  `lc-bench`, 21 rounds, fft_killer_00..02: main 9.91 ms, lib version 9.97, ratio 1.0002
-  (noise); CI: 1.0008 and 1.0050. Cause: the lambdas captured by reference and read members,
-  which `__m256i` stores force to reload: weights 0.41 -> 0.50 ms (warm pass microbenchmark,
-  `lc-bench`). With local copies captured by value: lane factorials 0.0065 -> 0.0035 (masked
-  steps stop at the largest count), weights 0.41 -> 0.42, output 0.33 -> 0.32 ms; `judge.py
-  bench` 31 rounds 1.0008. 38/38 official tests, `stress.py` 200 rounds.
+  are gone. Same arithmetic.
+  - First with `poly::detail::scan` and lambdas: `judge.py bench`, `lc-bench`, 21 rounds,
+    fft_killer_00..02: main 9.91 ms, lib version 9.97, ratio 1.0002 (noise); CI: 1.0008 and
+    1.0050. The lambdas captured by reference and read members, which `__m256i` stores force
+    to reload: weights 0.41 -> 0.50 ms (warm pass microbenchmark, `lc-bench`). By value: weights
+    0.42, output 0.32 (main 0.41, 0.33); `judge.py bench` 31 rounds 1.0008; CI 1.0038 (8573C
+    1.0023 and 1.0080, 7763 1.0012).
+  - Kept: the loops written out as before, with the header's `Chain`, `ChainBlock` and
+    `transpose_steps`: the passes' code within 1% of main's in size; lane factorials 0.0065 ->
+    0.0035 ms (masked steps stop at the largest count), weights 0.413 -> 0.410, output 0.319 ->
+    0.316 (warm, 3 runs each). 38/38 official tests, `stress.py` 200 rounds.
 - Next:
   - The transform (`ntt::Product`'s) is 82% of the time above the floor.
   - Fuse the E chain into b's radix-8 pass: saves E's stores (0.015 ms measured) and part of

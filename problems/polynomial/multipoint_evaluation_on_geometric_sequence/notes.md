@@ -81,6 +81,12 @@ write M values with `fields.hpp`, nothing else (`floor.cpp`): 4.92-4.99 ms media
   steps by x_(32v+l) = D_v E_l(v) (per-lane geometric E by a Shoup product, scalar D_v with its
   quotient computed on the scalar side): 8 multiplies per vector instead of 10, ~0.08 ms.
   Odd lg (radix-4 top) for mid sizes, which only helps cases below the score.
+- 2026-10-10, claude (lib, issue #156 round 2): convolution_mod's `Subtrees`, `forward_radix8` and
+  `bottom.hpp` moved to `lib/ntt/product.hpp`; the copies here are gone and the problem uses
+  `ntt::detail::Subtrees` and `forward_radix8`. Same asm kernels; GCC now keeps `visit` and the
+  radix-8 pass out of line (they were partly inlined). `judge.py bench`, `lc-bench`, 31 rounds,
+  slowest 3 cases: 9.87 -> 9.82 ms, ratio 0.9965 (noise). 25/25 official tests, `stress.py` 300
+  rounds, ASan/UBSan on all 25 official cases (file and pipe input).
 
 ## Sources
 

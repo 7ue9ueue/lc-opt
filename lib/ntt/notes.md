@@ -104,7 +104,9 @@ asm is the same text as before. New: the odd-lg path (radix-4 top as `ntt::Convo
 instead of even lg >= 10, `extra` bytes instead of convolution_mod's text buffer, `length()`.
 `ntt.hpp` and `kernels.hpp` are unchanged, so no other problem's `main.cpp` changes.
 - Users: convolution_mod (moved), convolution_mod_large and mul_modp_convolution (were on
-  `ntt::Convolution` and a copy of the radix-8 level with lib/ntt's recursion).
+  `ntt::Convolution` and a copy of the radix-8 level with lib/ntt's recursion);
+  multipoint_evaluation_on_geometric_sequence takes `detail::Subtrees` and `forward_radix8`
+  (it had copies and included `bottom.hpp`).
 - convolution_mod's compiled code (judge flags, `lc-amd`): `forward_radix8`, the `tile<64>` and
   `tile<256>` functions, the parser and the formatter are instruction-identical to main's; the
   bottom stage's asm is the same, but the loop around it uses other registers (+13 of 2033
@@ -113,11 +115,12 @@ instead of even lg >= 10, `extra` bytes instead of convolution_mod's text buffer
 - `judge.py bench` on `lc-bench` (EPYC 7B13), slowest 3 cases, against main's `main.cpp`:
   convolution_mod 12.88 -> 12.93 ms median, ratio 0.9976 (31 rounds; noise),
   convolution_mod_large 413.44 -> 405.62, 0.9794 (15 rounds), mul_modp_convolution
-  12.18 -> 11.91, 0.9764 (31 rounds).
+  12.18 -> 11.91, 0.9764 (31 rounds), multipoint_evaluation_on_geometric_sequence 9.87 -> 9.82,
+  0.9965 (31 rounds; noise).
 - Checks (`lc-amd`): `test.cpp` (new: `Product` at every lg 9..25, both top levels, `fits()`
   bounds, extra bytes, garbage in the upper halves) at -O2 and with ASan/UBSan; official tests
-  53/53, 54/54, 40/40; stress 500, 200 and 300 rounds; ASan/UBSan builds on 8, 5 and 7 official
-  cases each, file and pipe input.
+  53/53, 54/54, 40/40, 25/25; stress 500, 200, 300 and 300 rounds; ASan/UBSan builds on 8, 5, 7
+  and 25 official cases, file and pipe input.
 
 ## Sources
 

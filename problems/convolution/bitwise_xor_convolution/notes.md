@@ -31,11 +31,15 @@ Record when opened: 25 ms.
   Software-pipelined (round 3): h and M + l of the next row before q, r of this one.
 - The input mapping is advised `MADV_SEQUENTIAL` (round 3): its `munmap` skips marking pages
   accessed.
-- Order: a's rows while it is parsed (chunks of 2^16 tokens: smaller bulk reads leave ~1000
-  tokens per call to the scalar path), a's columns, a / 2^N kept as dwords (4 MiB); b reuses the
+- Order: a's rows while it is parsed, a's columns, a / 2^N kept as dwords (4 MiB); b reuses the
   int64 array: rows, columns with the products, inverse columns; inverse rows, printed per chunk.
-- Each chunk is parsed into the last 256 KiB of its own 16 rows and widened in place (round 2):
-  a row's int64 vectors end before input values not yet read. No separate input buffer.
+- One parse per array (round 4): `progress_read.hpp`, a copy of lib/io's `BulkParser32` that
+  calls back after each 256 KiB chunk of text, so each row is widened and transformed as soon as
+  its values are parsed, while they are in L2. Each `read_bulk` call ends with shrinking chunks
+  and ~1000 tokens parsed one at a time; 2^16-token calls (rounds 1-3) cost 0.25 ms more.
+- An array's values are parsed into the last 4 MiB of x and widened in place: row r ends at or
+  before the values of row r + 1, and the last row's vectors, 16 values at a time, end before its
+  values not yet read. No separate input buffer.
 - Output: `../convolution_mod/fields.hpp` per chunk of 2^16 values, so a newline ends every chunk
   (judge-specific; the checker compares tokens). Its text follows the chunk in a (dead by then).
 - Memory: 8 MiB + 16 KiB int64 + 4 MiB dwords: 6 huge pages and 4 small ones below them. a's
@@ -205,10 +209,50 @@ stamps in-process plus fork-to-exit wall time, max_random_00, output unlinked be
   AC 13 ms (13/13/13; small_00 9 ms, a spike). Best judged stays 13 ms: the ~0.15 ms gain is
   below the judge's 1 ms resolution and its run-to-run spread.
 
+2026-10-10, claude, round 4 (`agent/bitwise_xor_convolution-r4`). Judge image and flags; timing
+on `lc-k68` (EPYC 7B13, Linux 6.8 as the judge) unless noted. Probe and micro programs, scripts and
+raw numbers: `lc-opt-explore/bitwise_xor_convolution/r4/`. Wall times fork to exit, medians of 31
+runs unless noted.
+- Phases of main (probe, 41 runs, ms): start 1.13, init 0.04, parse 3.99 (incl. 4 huge-page
+  faults of x, ~0.35), rows 0.96, columns a 0.70, columns b 0.81, inverse rows 0.64, format 0.66,
+  `write()` 3.81, input `munmap` 0.64, exit 0.21; total 13.67.
+- Start: an empty program (`.preinit_array` entry, `_exit`) takes 1.31 ms dynamic, 0.54 static.
+  The image's g++ links without `--as-needed`: libstdc++, libm and libgcc_s are always loaded.
+  ld.so itself (`LD_DEBUG=statistics`) takes 222-508 K TSC ticks (0.07-0.17 ms); the rest is
+  kernel work on the libraries' mappings. Nothing in the source can drop it.
+- Input, kernel side (micro: separator scan of the 20.7 MB input): mapped 1.83 + `munmap` 0.60
+  ms; `read()` into a reused page-aligned buffer at d = 0: 2.25 (128 KiB), 2.33 (64 KiB), 2.28 +
+  0.48 for the buffer's huge page (1 MiB); at d = 16: 8.67. `MADV_POPULATE_READ` 1.50 against
+  ~1.2 for the faults it saves. Whole parse (`read_bulk`, 2^16-token calls): mapped 3.60 + 0.70
+  `munmap`; `read()` streaming 4.29-4.43 plus its buffer. No gain, as lib/io round 2 found.
+- Parse alone on a populated mapping (ms per 2^21 tokens) by tokens per `read_bulk` call: 2^14
+  2.82, 2^16 2.36, 2^18 2.18, 2^20 2.11. Each call ends with ~18 shrinking chunks and ~900
+  tokens parsed one at a time. Round 2 lost with longer calls because rows then left the cache.
+- Kept: `progress_read.hpp`, `BulkParser32` with a callback after each chunk, one call per array;
+  the array's values at the end of x, each row widened and transformed as soon as it is parsed.
+  Probe: parse + rows 4.95 → 4.75 ms; wall 13.76 → 13.41 (0.978, 41 runs). Chunks of 2^18 bytes
+  instead of 2^17: 0.9907 and 0.9927 (41 and 51 runs); 2^16 1.0046, 2^19 1.0014.
+- No gain: output chunks of 2^14 or 2^15 values instead of 2^16 (0.9988, 1.0007).
+- Page faults per phase (`getrusage`): init 9, parse 344 (316 input, 8 of x, the parser's
+  statics), columns a 2. No huge page is read before it is written.
+- L1 bank conflicts as the radix-16 cause (round 3's open question): all 16 inputs of a call sit
+  at the same offset in their lines when the step is even. Odd steps are not faster (core cycles
+  per call: step 8 21.4, 9 22.8, 16 21.4, 17 22.2, 31 21.0, 32 21.4). Not the cause.
+- `judge.py bench`, 41 rounds, slowest 3 cases: `lc-k68` 14.05 → 13.73 ms (0.9800), `lc-bench`
+  13.97 → 13.60 (0.9796).
+- Checks: 13/13 official tests on `lc-amd` and `lc-intel`; `stress.py` 300 rounds (every third
+  input now with irregular whitespace, which takes the parser's slow path) and 4 known N = 20
+  cases (one irregular) on both; ASan/UBSan on all official inputs, file and pipe; each parser
+  path forced on the other CPU (`-DIO_BULK32_TRANSPOSE=0` on `lc-amd`, `=1` on `lc-intel`), with
+  ASan/UBSan, on all official inputs and 4 irregular ones (N = 10, 12, 14, 20): outputs equal.
+
 ## Next
 
-- Compute left (probe): rows 0.96 (both arrays, with x's huge-page faults), columns a 0.60,
-  columns b 0.80, inverse rows 0.64; the rest is I/O and process start/exit (~9.9 ms).
+- Where 13.4 ms go (`lc-k68`): fixed kernel and loader work ~7.6 (start 1.13, input faults 1.2
+  and `munmap` 0.65, huge-page zeroing 0.53, `write()` 3.8, exit 0.21); parse ~2.1; transforms,
+  products and reductions ~3.0; format 0.66.
+- lib/io: a progress callback in `io::read_bulk` would give every problem that consumes values
+  chunk by chunk the gain above; then delete `progress_read.hpp`.
 - Radix-16 passes are ~1.4 ms of it at 1.34-1.63 cycles per vector; 1.07 would be the store
   bound. The kernel study above found no lever yet.
 - The 128-bit transpose stages (`vinserti128`, `vperm2i128`) take one cycle each on one pipe:
@@ -231,3 +275,5 @@ stamps in-process plus fork-to-exit wall time, max_random_00, output unlinked be
 - Software pipelining (round 3): the standard technique, e.g. M. Lam, Software pipelining: an
   effective scheduling technique for VLIW machines, PLDI 1988.
 - Zen 3 costs: measured here; see AGENTS.md for uops.info.
+- `progress_read.hpp` (round 4): `BulkParser32` copied from `lib/io/bulk32.hpp` (ours), plus a
+  callback.

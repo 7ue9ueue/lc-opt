@@ -3,8 +3,8 @@
 N <= 10^6, a_i, b_i < 998244353; print c_k = sum over lcm(i, j) = k of a_i b_j for k = 1..N. 5 s.
 Large tests: N = 10^6 (max_random), near primes and near prime squares; ~20 MB input, 10 MB output.
 
-Record when opened: 37 ms. Best judged: ours, [409237](https://judge.yosupo.jp/submission/409237),
-16 ms.
+Record when opened: 37 ms. Best judged: ours, [409551](https://judge.yosupo.jp/submission/409551),
+14 ms. Earlier: 16 ms, [409237](https://judge.yosupo.jp/submission/409237).
 
 ## Design
 
@@ -157,6 +157,12 @@ Record when opened: 37 ms. Best judged: ours, [409237](https://judge.yosupo.jp/s
   - Checks (final): 29/29 official tests (`judge.py test`, slowest 15.2 ms on `lc-amd`);
     `stress.py` 300 rounds (gcc:15.2.0); ASan/UBSan (-O1, x86-64-v3) on all 29 tests, file and
     pipe input, tokens equal to the expected output.
+  - PR #265 merged. CI: geomean 0.947 (EPYC 7763 0.932, EPYC 9V74 0.952 and 0.959).
+- 2026-10-10, claude: submitted the PR #265 `main.cpp`.
+  - [409550](https://judge.yosupo.jp/submission/409550): AC 22 ms, 20.5 MiB; clean 14 ms
+    (`tools/spikes.py`: max_random_01 22 against 14 in its peers). 1/5 for this version.
+  - [409551](https://judge.yosupo.jp/submission/409551), same file: AC 14 ms, 20.5 MiB, no
+    spike. Large cases 13-14 ms. New best judged (was 16 ms). 2/5.
 
 ## Next
 

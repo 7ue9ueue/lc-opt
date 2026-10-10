@@ -4,7 +4,8 @@ f of N <= 2^19 coefficients and c mod 998244353; print the N coefficients of f(x
 Slowest tests: the 12 at N = 2^19 (fft_killer_00..09, max_random_00/01), all about the same.
 random_00/01 have N > 2^18 (same transform length, 2^20). c = 0 in medium_c_zero; small N <= 16.
 
-Best judged: none yet.
+Best judged: ours, 10 ms: [409534](https://judge.yosupo.jp/submission/409534) (`main.cpp` of #251),
+clean (`tools/spikes.py`).
 Record when opened (issue #79): 33 ms.
 
 ## Design
@@ -78,11 +79,19 @@ N values with `fields.hpp`, nothing else (scratch `floor_main.cpp`): 4.31 ms med
     f(x + c) at 8 points; c in {0, 1, 2, P - 1} or random; sizes 1-8, 63-66, near powers of
     two, 512 (2m + 1) +- 2 (no partial lane), up to 2^19; ASan/UBSan on all 38 official cases,
     file and pipe input.
+  - Merged as #251 (new problem: CI checks only).
+  - Submitted the merged `main.cpp` three times (3 of 5 this session; 12 cases at N = 2^19, so
+    `spikes.py` gives P(clean run) = 0.45): [409532](https://judge.yosupo.jp/submission/409532)
+    AC 18 ms, from a launch spike on fft_killer_02 (18 ms, peers 10; clean 10);
+    [409533](https://judge.yosupo.jp/submission/409533) AC 18 ms, spikes on fft_killer_08 (18,
+    peers 10) and small_06 (9, peers 0; clean 10); [409534](https://judge.yosupo.jp/submission/409534)
+    AC 10 ms, clean: 8 of the 12 large cases 10 ms, the rest 9, random_00 7.
+  - Warm microbenchmark (n = 2^19, min of 30): E's stores in the weights pass cost 0.015 ms
+    (0.41 -> 0.40 without them), so fusing the E chain into b's radix-8 pass would save little.
 - Next:
   - The transform (`ntt::Product`'s) is 82% of the time above the floor.
-  - Fuse the E chain into b's radix-8 pass (E depends only on position, so overlapping lanes
-    can avoid the 64 KiB-stride cache-set conflicts): saves E's 2 MiB store and reload (guess:
-    0.05-0.1 ms).
+  - Fuse the E chain into b's radix-8 pass: saves E's stores (0.015 ms measured) and part of
+    the pass's reads; likely below noise.
   - Fuse the halves' top inverse groups into the output pass with z precomputed in natural
     order (guess: 0.1 ms, minus the z buffer's fault).
   - 8 lanes for the weights pass only (0.36 against 0.40 ms warm).

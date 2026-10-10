@@ -346,13 +346,16 @@ the same with e = 1/2. log is `Recurrence` on G = n g (taps (d, -f_d), r = n f_n
   n = 0, F[0] = 1) solves the n = 0 operator, so G = F U gives (1 - B) F (n + θ) U = R:
   G = F (y ⊙ W) mod x^16, W = Q R, Q = 1 / ((1 - B) F), y[t] = 1 / (n + t) (variation of
   constants). Long taps add Q R_long (a 16 x 16 triangle). Verified first in a Python prototype.
-- Slopes: from the state S (last w values), R = R0 + n R1, and n y[t] = 1 - t y[t] gives
-  y ⊙ W = y ⊙ (Q R0 - t Q R1) + Q R1. So H = y ⊙ (V S) + V' S with V = Q R0 - t Q R1 and
-  V' = Q R1 (w columns each); V' S joins the product with y before its Montgomery step.
-- Per block: W = V S (4w `vpmuludq`, partial Montgomery step to < 4P), H = y ⊙ W + V' S (one
-  product, 4w with slopes, one step, 1 to 3 subtractions), G = F H (triangle: 46 `vpmuludq`,
-  upper half with 16 products folded). The next block's state is G's upper half, broadcast from
-  registers.
+- Slopes: from the state S (last w values), R = R0 + n R1, so W = V(n) S with
+  V(n) = V0 + n V1, V0 = Q R0, V1 = Q R1 (w columns each). Where no long tap reaches, the kernels
+  keep V(n) in registers or on the stack and add 16 V1 per block (8 M1 in the chained kernel):
+  3 additions per vector of 8 (#72 round 2), no products. Blocks with long taps and the first
+  block of a chained call use n y[t] = 1 - t y[t] instead: H = y ⊙ (V S) + V' S with
+  V = Q R0 - t Q R1 and V' = Q R1, V' S joining the product with y before its Montgomery step.
+- Per block: W = V S (4w `vpmuludq`, partial Montgomery step to < 4P), H = y ⊙ W (one product,
+  one step, 1 subtraction), G = F H (triangle: 46 `vpmuludq`, upper half with 16 products
+  folded). The next block's state is G's upper half, broadcast from registers. V(n) columns are
+  packed (t = 0 .. 7 and 8 .. 15 as dwords: 2 vectors to advance, a shift for the odd lanes).
 - Costs per coefficient (w = 7): W 7 products, H 1, triangle 8.5, against w = 7 for 1/f. About
   260 vector ops per block; 1.975 ms for 10^6 coefficients without the dependency from block to
   block, 2.21 ms with it (`lc-amd`, in memory, reciprocals included): mostly throughput.
@@ -362,25 +365,30 @@ the same with e = 1/2. log is `Recurrence` on G = n g (taps (d, -f_d), r = n f_n
   (2 MiB at N = 10^6) is in transparent huge pages. The kernel loop runs the next window's batch
   inversion, a half step (two chains of 8 lanes) per block: independent work for the cycles the
   chain from block to block leaves free. The 32 lane totals by a product tree (as `Divider`).
-  Without slopes the half step goes before the triangle, with slopes after it (each 1-3% faster
-  than the other place).
-- Chained kernel (w <= 8; used from w = 5 without slopes and at w = 8 with them, where it wins):
-  blocks of 8. A block's state is the previous block's top w values, T H_prev (T: those rows of
-  F mod x^8), so W = M H_prev and V' S = M' H_prev with M = V T, M' = V' T (8 x 8). The chain
+  The block kernel runs the half step before the triangle (1-3% faster than after it, w <= 4).
+  Without the inversion (a probe, outputs wrong) the kernels take 0.18 (w = 2) to 0.31 ms
+  (chained) less: 9-14% of the solve.
+- Chained kernel (w <= 8; used from w = 5 without slopes and from w = 6 with them, where it
+  wins): blocks of 8. A block's state is the previous block's top w values, T H_prev (T: those
+  rows of F mod x^8), so W = M(n) H_prev with M(n) = V(n) T = M0 + n M1 (8 x 8). The chain
   from block to block is W, partial step, scale, H, broadcasts, M H: no triangle and no
   reduction of G on it. G = F H (15 products) comes off the chain; its reduction and store run
   after the next block's chain products (Zen 3 issues the oldest ready operations first).
   Per 16 coefficients: 32 + 30 products for M H and F H, against 4w + 46 for the block kernel.
+  With slopes M(n) is packed (8 vectors: rows 0 .. 3 of column k and 4 .. 7 of column k ^ 4 as
+  dwords) and advanced by 8 M1 per block after its products; GCC keeps it on the stack.
 - Crossed broadcasts (chained kernel): x[k] holds H[k] in its lower 128-bit half and H[k ^ 4] in
   its upper half, so half of them need no lane crossing (2 `vperm2i128` + 8 `vpshufd` per block
   of 8); the constant matrices are laid out to match (rows i, i + 2 at column k, rows i + 4, i + 6
   at column k ^ 4).
 - Costs (`lc-bench`, 10^6 coefficients in chunks of 25600, ms): chained 2.01 without slopes and
-  2.52 with them, flat in w; block kernel without slopes 1.91 (w = 3) .. 2.19 (w = 8), with slopes
-  2.02 (w = 2) .. 2.61 (w = 8). `lc-intel` gives the same crossovers. The chained kernel is
-  latency-bound (2.01 against 1.77 without the dependency from block to block); the block kernel
-  is not (the same time without it). `-DHOLONOMIC_CHAINED=0` or `1` forces it off, or on for
-  every w <= 8 (tests).
+  2.22-2.26 with them (2.52 with M' H products), flat in w; block kernel without slopes 1.91
+  (w = 3) .. 2.19 (w = 8), with slopes 1.92 (w = 2), 2.02, 2.14, 2.24 (w = 5), 2.37 (w = 6)
+  (2.00 .. 2.61 for w = 2 .. 8 with V' S products). The chained kernel is latency-bound (2.01
+  against 1.77 without the dependency from block to block); the block kernel is not (the same
+  time without it). Zen 3 at 3.43 GHz (`lc-bench`): the chained kernel with slopes takes 123
+  cycles per 16 coefficients for about 310 vector ops; its chain is about 36 cycles per 8.
+  `-DHOLONOMIC_CHAINED=0` or `1` forces it off, or on for every w <= 8 (tests).
 
 `Divider` (`divider.hpp`): g[n] = G[n] / n, called on consecutive ranges (multiples of 64 but
 the last), in place or not. For log: G from `Recurrence` in chunks, divided after the chunk's
@@ -1706,6 +1714,23 @@ product-tree lanes):
 - Merged as #334. CI (each problem the geomean over 3 machines): log 0.9867, pow 0.9931,
   division 0.9931, exp 0.9942, sqrt 0.9963, composition 0.9967, newton 0.9967, multipoint
   0.9968; the other 14 0.9973-1.0049 (identical `.text`: 0.9991-1.0049); all 22 0.9980.
+
+2026-10-10, claude (issue #72 round 2, pow_of_formal_power_series_sparse; sparse lane):
+- `holonomic.hpp`: slopes as V(n) = V0 + n V1 and M(n) = M0 + n M1, advanced by additions per
+  block (Sparse above), in packed layouts (`PackedColumn`, `Packed`); the chained kernel from
+  w = 6 with slopes (was 8); the block kernel's inverter half step before the triangle with slopes
+  too. API unchanged. Bundles changed: exp, log, pow, sqrt sparse (log's stripped executable is
+  byte-identical).
+- In process (`lc-bench`, 10^6 coefficients, medians of 11 x 5 interleaved rounds, ms), main ->
+  this: pow w = 2, 3, 4, 6: 2.00, 2.10, 2.20, 2.38 -> 1.92, 2.02, 2.14, 2.23; sqrt w = 8: 2.51 ->
+  2.22; exp w = 3, 7: 1.89, 2.00, unchanged. `judge.py bench` (`lc-bench`, 21 rounds): pow
+  0.9808, sqrt 0.9610, exp 0.9907, log 1.0079 (identical executable).
+- Tests: the existing suites at -O2 (default, `-DHOLONOMIC_CHAINED=0`, `1`) and ASan/UBSan
+  cover both kernels with slopes for w <= 8 over random chunk lengths (kernel entries at many
+  n). Mutations fail them: M step 7 M1, M(n) one block early, V step 15 V1, V(n) at n + 1, M0's
+  even rows not halved, a packed column's odd lanes unshifted, V0 replaced by V, M0 from V.
+- Not kept (problem notes): the text formatted by a sink inside the kernel loop (slower by
+  0.3-0.4 ms); G = F H deferred one block with broadcasts from memory (2.26 -> 2.41).
 
 ## Sources
 

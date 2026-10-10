@@ -76,3 +76,8 @@ first version 8.49 (w = 3), 8.55 (w = 4), 8.63 (w = 5), 8.96 (w = 8).
 - 2026-10-10, claude (issue #71, log_of_formal_power_series_sparse round 2): the bundle changed
   with `lib/poly/sparse.hpp` (`Recurrence` broadcasts its state once per step; unused here). The
   stripped executable is byte-identical (judge's command, `lc-amd`).
+- 2026-10-10, claude (issue #72, pow_of_formal_power_series_sparse round 2): the bundle changed
+  with `lib/poly/holonomic.hpp` (slopes by V(n) = V0 + n V1 advanced per block, no products;
+  chained kernel from w = 6 with slopes). In process (`lc-bench`, 10^6 coefficients) w = 8:
+  2.51 -> 2.22 ms; w = 3, 4, 5 (small_dense_00, 06, 08): -0.08, -0.06, -0.05.
+  `judge.py bench` (`lc-bench`, 21 rounds, 4 slowest cases): 7.84 -> 7.61 ms (0.9610).

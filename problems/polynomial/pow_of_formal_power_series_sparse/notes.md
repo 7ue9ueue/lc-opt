@@ -25,7 +25,9 @@ Best judged: ours, 13 ms: [409426](https://judge.yosupo.jp/submission/409426) (`
 - g = (1 + h)^M: (1 + h) g' = M h' g gives n g[n] = sum_d ((M + 1) d c_d - c_d n) g[n - d],
   g[0] = a^M, c_d the coefficients of h. `poly::sparse::Holonomic` (`lib/poly/holonomic.hpp`)
   with taps (d, (M + 1) d c_d, -c_d), M + 1 taken mod P (the coefficients of (1 + h)^M are
-  polynomials in M). Taps with d >= N - sM are dropped.
+  polynomials in M). Taps with d >= N - sM are dropped. Every short tap has a slope; the
+  kernels take them as V(n) = V0 + n V1, advanced by additions (`lib/poly/notes.md`, "Sparse"):
+  the block kernel for w <= 5, the chained kernel for w = 6 .. 8.
 - Output as in exp_of_formal_power_series_sparse: sM zeros as "0 " first, then g in chunks of
   25600 in a ring (or one array if a tap reaches back further), groups of 16 zeros as
   "0 0 ... 0 ", other groups as fixed-width fields (`fields.hpp`), `write(2)` per chunk, run from
@@ -39,6 +41,10 @@ Best judged: ours, 13 ms: [409426](https://judge.yosupo.jp/submission/409426) (`
 scratch), slowest case per round, medians: floor (read, fill 10^6 nonzero values, the same output
 code) 6.63 ms; first version 9.45 (1.42); this round 8.86 (1.33). The gap is the solve: in
 process, small_dense_02, 10^6 coefficients: 2.95 -> 2.35 ms.
+
+Round 2, `lc-bench` (3.43 GHz), same cases, judge's runner, 31 rounds, medians of the slowest case
+per round: floor 5.69 ms (each case 5.40-5.44); main 7.71 (1.36; small_dense_02 7.66); this
+round 7.49 (1.32; small_dense_02 7.48). The gap is still the solve, 1.92-2.23 ms in process.
 
 ## Log
 
@@ -69,3 +75,33 @@ process, small_dense_02, 10^6 coefficients: 2.95 -> 2.35 ms.
 - 2026-10-10, claude (issue #71, log_of_formal_power_series_sparse round 2): the bundle changed
   with `lib/poly/sparse.hpp` (`Recurrence` broadcasts its state once per step; unused here). The
   stripped executable is byte-identical (judge's command, `lc-amd`).
+- 2026-10-10, claude (round 2): slopes without products in `lib/poly/holonomic.hpp`. Files:
+  `lc-opt-explore/pow_of_formal_power_series_sparse/round2`.
+  - Main re-measured (`lc-bench`, in process, 10^6 coefficients, chunks of 25600, medians of
+    11 x 3-5 interleaved rounds, ms): pow w = 2, 3, 4, 6: 2.00, 2.10, 2.20, 2.38; the chained
+    kernel with slopes (M' H products) 2.54 flat in w.
+  - W = V(n) S with V(n) = V0 + n V1 kept in registers and advanced by 16 V1 per block (block
+    kernel) or M(n) = M0 + n M1 by 8 M1 per block of 8 (chained kernel): 3 additions per vector
+    of 8 instead of 4w products (block) or 16 (chained) per block. Chained with slopes 2.54 ->
+    2.24, now ahead of the block kernel from w = 6 (w = 5: 2.24 both). Block kernel with slopes:
+    w = 2, 3, 4, 5, 6: 2.02, 2.13, 2.23, 2.31, 2.40 -> 1.96, 2.06, 2.16, 2.24, 2.37; its
+    inverter half step before the triangle (was after it with slopes): w = 2, 3, 4 -> 1.94, 2.04,
+    2.16 (w = 5: 2.27). Placing the M(n) update before, after the products or at the end of the
+    block: equal (2.24-2.26).
+  - Result (`lc-bench`, in process): pow w = 2, 3, 4, 6: 2.00, 2.10, 2.20, 2.38 -> 1.92, 2.02,
+    2.14, 2.23; sqrt w = 8: 2.51 -> 2.22; exp w = 3, 7 unchanged (1.89, 2.00).
+  - Whole process (`lc-bench`, small_dense, 31 rounds): 7.71 -> 7.49 ms (paired 0.972), floor
+    5.69. `judge.py bench` (21 rounds, 4 slowest cases): pow 0.9808, sqrt 0.9610, exp 0.9907,
+    log 1.0079 (its stripped executable is byte-identical: noise).
+  - Probe: without the batch inversion (outputs wrong) the kernels take 0.18 (w = 2) to 0.31 ms
+    (chained) less. The reciprocals are 9-14% of the solve.
+  - Not kept:
+    - Formatting each block of 16 inside the kernel loop (a sink called by `next`, overlapping the
+      text with the next blocks' chain): in process (solve and text, ms) w = 3 2.75 -> 3.03,
+      w = 6 2.91 -> 3.19-3.33 (sink inlined, called mid-iteration or at its end; not inlined:
+      3.26). The fused loop runs at about 2.3 ops per cycle against 2.5 and 2.75 apart.
+    - G = F H of a block deferred to the next block, after its chain, from H stored and broadcast
+      from memory (`vpbroadcastq`, no shuffles): chained 2.26 -> 2.41.
+  - Checks: 35/35 official tests (`judge.py test`; exp 25/25, log 24/24, sqrt 45/45);
+    `stress.py` 300 rounds each for pow, sqrt and exp; `lib/poly/test.cpp` at -O2 with default
+    kernels, `-DHOLONOMIC_CHAINED=0` and `1`, and ASan/UBSan; mutations fail it (below).

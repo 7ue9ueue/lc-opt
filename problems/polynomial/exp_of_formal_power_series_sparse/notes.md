@@ -104,3 +104,7 @@ the slowest: every block still takes reciprocals and the long-tap path).
   with `lib/poly/sparse.hpp` (`Recurrence` broadcasts its state once per step; unused here). The
   stripped executable is byte-identical (judge's command, `lc-amd`).
   `judge.py bench` (41 rounds): 0.9972, noise.
+- 2026-10-10, claude (issue #72, pow_of_formal_power_series_sparse round 2): the bundle changed
+  with `lib/poly/holonomic.hpp` (slopes by additions; exp has none). The kernels without slopes
+  are unchanged in time (`lc-bench`, in process, w = 3, 7: 1.89, 2.00 ms both);
+  `judge.py bench` (21 rounds) 0.9907.

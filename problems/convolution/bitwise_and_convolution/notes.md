@@ -108,9 +108,9 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
 - 2026-10-09, claude: submitted the round-2 `main.cpp` (PR #48),
   [409202](https://judge.yosupo.jp/submission/409202): AC, 12 ms, 19.0 MiB (3/5). max_random_00,
   _01, _02: 12 ms each (round 1: 12-13 ms).
-- Next: the transforms (1.5 ms) run at ~3 vector ops per butterfly plus one store per element
-  per pass, near the 4-pipe bound; little left there. Remaining time is lib/io (parse 2.5 ms,
-  input faults and `munmap` 1.6 ms), `../fixed_width.hpp` (1.13 ms) and `write()` (3.4 ms).
+- Next (round 2): the transforms (1.5 ms) run at ~3 vector ops per butterfly plus one store per
+  element per pass, near the 4-pipe bound; little left there. Remaining time is lib/io (parse
+  2.5 ms, input faults and `munmap` 1.6 ms), `../fixed_width.hpp` (1.13 ms) and `write()` (3.4 ms).
 - 2026-10-10, claude (lib/io #21, round 3): uint32 arrays read with `io::read_bulk`
   (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
   values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
@@ -139,6 +139,47 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
   PR #198 merged; CI 0.9693 (EPYC 9V74 0.967, EPYC 9V45 0.984, Xeon 8573C 0.958). Submitted
   [409430](https://judge.yosupo.jp/submission/409430): AC 12 ms, 18.8 MiB, no spike. Best judged
   stays 12 ms (the gain is 0.3 ms).
+- 2026-10-10, claude, round 3: no gain; code unchanged. `lc-amd`, judge image and flags,
+  max_random_01, medians. Scripts, sources and raw numbers: `lc-opt-explore/bitwise_and_convolution/`
+  (`results.txt`).
+  - Where the time goes. In-process (31 runs): parse 3.30 (input faults ~0.96 and a/b huge pages
+    ~0.23 included), forward rows 0.72, column pass 0.39, inverse rows 0.39, format 0.65,
+    `write()` 3.40, input `munmap` 0.68; total 9.58. Outside it (41 runs, own runner): fork to
+    `.preinit_array` 1.03, exit 0.19. Page faults: 104 before preinit, 339 in the parse, 7 after.
+  - Startup: empty programs, 300 runs: `g++` 1.13 ms, `g++` with the preinit `_exit` 0.965, `gcc`
+    0.549, `-Wl,--as-needed` 0.555, `-static` 0.384. Loading libstdc++, libm and libgcc_s costs
+    ~0.41 ms; the judge's link line adds them, so the source cannot avoid it.
+  - `tools/runner.c` opens the output with `O_TRUNC`, and `judge.py` reuses each output path, so
+    each timed run also frees the previous run's 10.5 MB output: fork to preinit 2.27 ms against
+    1.03 with the file unlinked first (whole run 12.01 → 10.74). A constant for this problem; it
+    explains why `judge.py bench` (12.3) reads above the judge (12).
+  - Zen 3 vector pipes (12 independent chains): add, sub, min, or, `vpblendd` 4 per cycle;
+    multiplies (`vpmuludq`, `vpmulld`, `vpmulhuw`, `vpmullw`, `vpmaddwd`) and `vpblendvb` 2 per
+    cycle on one pipe pair; `vpshufb`, unpacks and immediate shifts 2 per cycle on the other.
+  - Transform work inside the parser loop (a copy of `BulkParser32`'s lockstep with one radix-8
+    or radix-4 group per step; 2^20 tokens in memory): parse 0.99 ms, groups alone 0.46 / 0.26,
+    fused 1.65 / 1.24. Slower than the sum: the parser leaves no vector slots free. Dropped.
+  - Inverse tiles fused with the text (each tile's 8 vectors formatted from registers), 2^20
+    values in memory: 1.036 ms against 0.806 separate; tile i+1 before the text of tile i 0.838;
+    per 4096-value piece 0.810. Dropped.
+  - Formatter (`../convolution_mod/fields.hpp`, 0.647 ms per 2^20 values): 28 ops per 16 values
+    on the multiply pair, 33 on the shuffle/shift pair, 38 on any pipe; ~25 cycles at full issue,
+    34.4 measured. Variants: 32 values per step 0.681; odd lanes by offset loads instead of
+    shifts 0.655; `<< 8` as a multiply 0.647; text without `vpblendvb` 0.658; combined
+    0.664-0.670. None kept.
+  - Column pass with software prefetch 16, 64, 256 vectors ahead: 0.48-0.52 ms against 0.36.
+    Input unmapped before the output: `write()` 3.40 vs 3.43 ms. Pieces of 2^11 / 2^13 values:
+    forward rows 0.733 / 0.769 ms against 0.728 (in memory). None kept.
+  - Transforms at ~77-80% of the 4-pipe issue bound (L1 pieces 0.49 ms per 2^21 values against
+    ~0.40; column pass 0.35 against ~0.27, estimates from op counts); upper row sweeps (in L2)
+    ~0.1 ms above their ALU time. The gap to a perfect schedule is ~0.45 ms over all transforms;
+    no tested change closed any of it.
+  - Next: the kernel holds ~6.5 of ~10.7 ms (start 1.03, input faults and `munmap` 1.64, a/b
+    zeroing 0.23, `write()` 3.40, exit 0.19), user code ~4.3 (parse 2.1, transforms 1.5, format
+    0.65). Untried: `MADV_SEQUENTIAL` on the input (-0.04 ms, `lib/io/notes.md` round 4; belongs
+    in lib/io); the upper 5 row bits in the column pass (8 bits per column block, in an L1
+    scratch) instead of L2 sweeps: at most ~0.15 ms (a guess), and it needs a layout skewed per
+    piece, which costs many `read_bulk` calls.
 
 ## Sources
 

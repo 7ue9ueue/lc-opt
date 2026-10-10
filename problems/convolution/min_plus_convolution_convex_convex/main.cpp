@@ -852,7 +852,7 @@ private:
 #define RUN_EARLY(solve) \
     int main() { solve(); }
 #endif
-// problems/convolution/min_plus_convolution_convex_arbitrary/columns.hpp
+// problems/convolution/min_plus_convolution_convex_convex/columns.hpp
 // Fixed-width output of values < 2^31: each value right-aligned in W - 1 characters, then a space;
 // the last separator is a newline. W = 10 for blocks whose values are all below 10^9, else 11.
 // Judge-specific: the checker compares tokens, so the padding is accepted.
@@ -863,10 +863,14 @@ private:
 // are issued before the digits of this one, so the two dependency chains overlap.
 // Same scheme as ../convolution_mod/fields.hpp (W = 10 only); here the shuffle controls are
 // generated for either width.
+// Copy of ../min_plus_convolution_convex_arbitrary/columns.hpp with two code-generation fixes
+// (W = 11: 1.04 -> 0.81 ns per value, notes.md): the constants are read through a pointer GCC
+// cannot see through, so they stay memory operands (otherwise GCC rebuilds splats with
+// vmovd + vpbroadcastd and turns vpmullw by a constant into shifts and adds, on the shuffle
+// pipes); and the store loops are unrolled (otherwise the chunks go through the stack).
 
 #include <immintrin.h>
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -1062,8 +1066,10 @@ template <int W>
     }(std::make_integer_sequence<std::size_t, kLow>());
     // Vector k whole at chunk kLow + k - 1: its high lane lands in place, its low lane on the slot
     // of the previous vector's high lane (or of chunk kLow - 1), which a later store fixes.
+#pragma GCC unroll 8
     for (int i = kHigh - 1; i >= 0; --i)
         _mm256_storeu_si256(reinterpret_cast<__m256i*>(p + 16 * (kLow + i - 1)), c[i]);
+#pragma GCC unroll 8
     for (int i = 0; i < kLow; ++i)
         _mm_store_si128(reinterpret_cast<__m128i*>(p + 16 * i), _mm256_castsi256_si128(c[i]));
 }
@@ -1080,7 +1086,9 @@ template <int W>
 // Text of x[0, count), count a positive multiple of 16, at p (16-byte aligned).
 template <int W>
 void format(char* p, const u32* x, std::size_t count) {
-    const Common& k = kCommon;
+    const Common* opaque = &kCommon;
+    asm("" : "+r"(opaque));
+    const Common& k = *opaque;
     Divided dl, dh;
     divide16<W>(x, dl, dh, k);
     for (std::size_t i = 16; i < count; i += 16, p += 16 * W) {
@@ -1092,32 +1100,22 @@ void format(char* p, const u32* x, std::size_t count) {
     store<W>(p, dl, dh, k);
 }
 
-inline u32 maximum(const u32* x, std::size_t count) {
-    __m256i m = _mm256_setzero_si256();
-    for (std::size_t i = 0; i < count; i += 8)
-        m = _mm256_max_epu32(m, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(x + i)));
-    alignas(32) u32 lane[8];
-    _mm256_store_si256(reinterpret_cast<__m256i*>(lane), m);
-    return *std::max_element(lane, lane + 8);
-}
-
 }  // namespace detail
 
 inline constexpr std::size_t kBlock = 25600;  // values per write(2), a multiple of 16
 inline constexpr std::size_t kTextBytes = 11 * kBlock;
 
-// values[0, count), count >= 1, each < 2^31; values[count, count rounded up to 16) must be
-// readable and zero. text: kTextBytes bytes, 16-byte aligned. Blocks are longer than the
-// Writer's buffer, so it hands each to write(2) directly.
-inline void write(io::Writer& out, const std::uint32_t* values, std::size_t count, char* text) {
-    for (std::size_t i = 0; i < count; i += kBlock) {
-        const std::size_t n = std::min(kBlock, count - i), padded = (n + 15) / 16 * 16;
-        const std::size_t width = detail::maximum(values + i, padded) < 1'000'000'000 ? 10 : 11;
-        if (width == 10) detail::format<10>(text, values + i, padded);
-        else detail::format<11>(text, values + i, padded);
-        if (i + n == count) text[width * n - 1] = '\n';
-        out.write(std::string_view(text, width * n));
-    }
+// One block of values[0, count), 1 <= count <= kBlock, each < 2^31 and at most largest;
+// values[count, count rounded up to 16) must be readable, with any contents. With last, the final
+// separator is '\n'. text: kTextBytes bytes, 16-byte aligned. Blocks are longer than the Writer's
+// buffer, so it hands each to write(2) directly.
+inline void write_block(io::Writer& out, const std::uint32_t* values, std::size_t count, std::uint32_t largest,
+                        bool last, char* text) {
+    const std::size_t padded = (count + 15) / 16 * 16, width = largest < 1'000'000'000 ? 10 : 11;
+    if (width == 10) detail::format<10>(text, values, padded);
+    else detail::format<11>(text, values, padded);
+    if (last) text[width * count - 1] = '\n';
+    out.write(std::string_view(text, width * count));
 }
 
 }  // namespace columns
@@ -1281,11 +1279,12 @@ __m256i eight_tokens(const char* p, std::size_t s, __m256i row) {
     return _mm256_add_epi32(_mm256_mullo_epi32(upper, _mm256_set1_epi32(100000000)), lower);
 }
 
-// count values from p into dst; p ends past the last one's separator. Tokens have at most 10
-// digits; the 64 bytes after the input read as zeros. Fast path: runs of tokens of one length,
-// each followed by one separator (most tests: 9 digits throughout, or long runs of one length),
-// 8 at a time. Within a run p advances by a constant, so steps do not wait on each other.
-void read_values(const char*& p, u32* dst, std::size_t count) {
+// count values from position into dst; position ends past the last one's separator. Tokens have
+// at most 10 digits; the 64 bytes after the input read as zeros. Fast path: runs of tokens of one
+// length, each followed by one separator (most tests: 9 digits throughout, or long runs of one
+// length), 8 at a time. Within a run p advances by a constant, so steps do not wait on each other.
+void read_values(const char*& position, u32* dst, std::size_t count) {
+    const char* p = position;  // through the reference, GCC stored and reloaded p every step
     std::size_t i = 0;
     // 64 tokens left span >= 127 bytes, so loads (< 96 bytes from p) stay in the input.
     while (i + 64 <= count) {
@@ -1301,12 +1300,13 @@ void read_values(const char*& p, u32* dst, std::size_t count) {
         if (i + 64 <= count) dst[i++] = one_token(p);
     }
     for (; i < count; ++i) dst[i] = one_token(p);
+    position = p;
 }
 
 void solve() {
     io::Reader in;
     const std::size_t n = in.read<u32>(), m = in.read<u32>(), count = n + m - 1;
-    constexpr std::size_t kValues = columns::kBlock + 8 * kChains + 16;  // block, garbage, zeros
+    constexpr std::size_t kValues = (columns::kBlock + 8 * kChains + 1 + 15) / 16 * 16;  // block, garbage
     const std::size_t text_words = columns::kTextBytes / sizeof(u32);
     u32* const memory = mem::huge<u32>(text_words + kValues + (n + kPad) + (m + kPad));
     char* const text = reinterpret_cast<char*>(memory);
@@ -1323,8 +1323,8 @@ void solve() {
     for (std::size_t k0 = 0; k0 < count; k0 += columns::kBlock) {
         const std::size_t size = std::min(columns::kBlock, count - k0);
         block(a, n, b, m, k0, size, c);
-        std::fill_n(c + size, 16, 0);
-        columns::write(out, c, size, text);
+        // c is convex, so the largest value of a block is at one of its ends.
+        columns::write_block(out, c, size, std::max(c[0], c[size - 1]), k0 + size == count, text);
     }
 }
 

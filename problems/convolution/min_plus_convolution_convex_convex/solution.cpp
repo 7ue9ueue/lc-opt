@@ -12,7 +12,7 @@
 #include "lib/io/io.hpp"
 #include "lib/mem/huge.hpp"
 #include "lib/run/early.hpp"
-#include "../min_plus_convolution_convex_arbitrary/columns.hpp"
+#include "columns.hpp"
 
 namespace {
 
@@ -173,11 +173,12 @@ __m256i eight_tokens(const char* p, std::size_t s, __m256i row) {
     return _mm256_add_epi32(_mm256_mullo_epi32(upper, _mm256_set1_epi32(100000000)), lower);
 }
 
-// count values from p into dst; p ends past the last one's separator. Tokens have at most 10
-// digits; the 64 bytes after the input read as zeros. Fast path: runs of tokens of one length,
-// each followed by one separator (most tests: 9 digits throughout, or long runs of one length),
-// 8 at a time. Within a run p advances by a constant, so steps do not wait on each other.
-void read_values(const char*& p, u32* dst, std::size_t count) {
+// count values from position into dst; position ends past the last one's separator. Tokens have
+// at most 10 digits; the 64 bytes after the input read as zeros. Fast path: runs of tokens of one
+// length, each followed by one separator (most tests: 9 digits throughout, or long runs of one
+// length), 8 at a time. Within a run p advances by a constant, so steps do not wait on each other.
+void read_values(const char*& position, u32* dst, std::size_t count) {
+    const char* p = position;  // through the reference, GCC stored and reloaded p every step
     std::size_t i = 0;
     // 64 tokens left span >= 127 bytes, so loads (< 96 bytes from p) stay in the input.
     while (i + 64 <= count) {
@@ -193,12 +194,13 @@ void read_values(const char*& p, u32* dst, std::size_t count) {
         if (i + 64 <= count) dst[i++] = one_token(p);
     }
     for (; i < count; ++i) dst[i] = one_token(p);
+    position = p;
 }
 
 void solve() {
     io::Reader in;
     const std::size_t n = in.read<u32>(), m = in.read<u32>(), count = n + m - 1;
-    constexpr std::size_t kValues = columns::kBlock + 8 * kChains + 16;  // block, garbage, zeros
+    constexpr std::size_t kValues = (columns::kBlock + 8 * kChains + 1 + 15) / 16 * 16;  // block, garbage
     const std::size_t text_words = columns::kTextBytes / sizeof(u32);
     u32* const memory = mem::huge<u32>(text_words + kValues + (n + kPad) + (m + kPad));
     char* const text = reinterpret_cast<char*>(memory);
@@ -215,8 +217,8 @@ void solve() {
     for (std::size_t k0 = 0; k0 < count; k0 += columns::kBlock) {
         const std::size_t size = std::min(columns::kBlock, count - k0);
         block(a, n, b, m, k0, size, c);
-        std::fill_n(c + size, 16, 0);
-        columns::write(out, c, size, text);
+        // c is convex, so the largest value of a block is at one of its ends.
+        columns::write_block(out, c, size, std::max(c[0], c[size - 1]), k0 + size == count, text);
     }
 }
 

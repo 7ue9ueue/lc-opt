@@ -81,7 +81,11 @@ score = slowest of max_random_00, max_random_03, hack_02, random_04): read and w
   m is now at least 256. compose in process (`lc-amd`, median of 20): 1342 -> 1150 us, first
   call ~1450 -> ~1220. Whole process (`judge.py bench`, 21 rounds): `lc-amd` 0.9275 (2.66 ->
   2.46 ms), `lc-intel` 0.9631. PR #242.
-- Next: level T - 4 one-dimensional; the y levels by doubling (composition_of_formal_power_series_large/notes.md).
+- 2026-10-10, claude (composition_of_formal_power_series_large round 1): no work spans in
+  composition.hpp (temporaries in level slots). In process: first call 1260 -> 1170 us, warm
+  unchanged (1146). Whole process (`judge.py bench`, 21 rounds): `lc-amd` 0.9831, `lc-intel` 0.9573.
+- Next: the y levels by doubling (composition_of_formal_power_series_large/notes.md); level
+  T - 4 one-dimensional was tried there without gain.
 
 ## Sources
 

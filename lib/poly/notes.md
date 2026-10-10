@@ -856,6 +856,10 @@ products 1.77 and 1.69).
   sqrt 0.9935 (0.9997), composition 0.9761 (0.9858). All official tests pass (`lc-amd`);
   `test.cpp` at -O2 and ASan/UBSan, `-march=native` and `-march=x86-64-v3` (`lc-intel`).
 - Huge pages on `lc-amd`: first touch ~0.035 ms per 2 MB (map, touch, unmap; 2-12 MB).
+- Merged as #208. CI: composition 0.9709, compositional_inverse 1.0052, exp 1.0004, inv 0.9998,
+  log 0.9760, pow 0.9853, product_of_polynomial_sequence 1.0002, sqrt 0.9898; all 8 0.9909.
+  Judged: log [409452](https://judge.yosupo.jp/submission/409452) AC 13 ms (was 14; four
+  earlier runs had launch spikes, clean 13).
 
 ## Sources
 

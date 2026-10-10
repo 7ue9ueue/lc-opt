@@ -253,6 +253,11 @@ tokens, 90% of 9 digits), in-process, ns per token, medians of 21; "in L2" parse
   `lc-amd` and `lc-intel`; the transposed parser is tested on every CPU through
   `detail::read_transposed`. Every switched problem passes all official tests; ASan/UBSan builds
   pass on the 3 largest cases of each (but convolution_mod_large), file and pipe input.
+- PR #176 merged; CI geomean 0.9885 over the 11 problems. EPYC 7763 (Zen 3) runs 0.961-0.993
+  (one bitwise_and run 1.010); EPYC 9V74/9V45 and Xeon 8573C run the unchanged path: 0.98-1.014.
+- Submitted 5 (the round's cap): gcd 409380 14 ms (was 15); bitwise_xor 409379 14, lcm 409381
+  16 (unchanged); bitwise_and 409382 21 and min_plus convex_arbitrary 409383 15, launch spikes
+  (`tools/spikes.py`: clean 12 and 11, unchanged). Details in each problem's notes.
 
 ## Sources
 

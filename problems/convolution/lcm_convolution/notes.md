@@ -97,6 +97,9 @@ Record when opened: 37 ms. Best judged: ours, [409237](https://judge.yosupo.jp/s
   (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
   values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
   16.37 → 16.05 ms (0.981). 29/29 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
+- 2026-10-10, claude (lib/io #21, round 3): submitted the #176 `main.cpp`,
+  [409381](https://judge.yosupo.jp/submission/409381): AC 16 ms, 22.5 MiB; clean 16 ms
+  (`tools/spikes.py`). Best judged stays 16 ms.
 
 ## Next
 

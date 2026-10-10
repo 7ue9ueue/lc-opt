@@ -115,6 +115,9 @@ Round 1, v2: `perf` on `lc-intel` (static build): 40% of cycles in the kernel
   (`lib/io/bulk32.hpp`; on Zen 3 each parser step stores one vector and a transpose orders the
   values; elsewhere it is `Reader::read`). `judge.py bench`, `lc-amd`, 21 rounds, slowest 3 cases:
   13.17 → 12.79 ms (0.979). 13/13 official tests. ASan/UBSan on the 3 largest cases, file and pipe.
+- 2026-10-10, claude (lib/io #21, round 3): submitted the #176 `main.cpp`,
+  [409382](https://judge.yosupo.jp/submission/409382): AC 21 ms, 19.0 MiB; one launch spike
+  (max_random_01 21, peers 12), clean 12 ms (`tools/spikes.py`). Best judged stays 12 ms.
 
 ## Sources
 

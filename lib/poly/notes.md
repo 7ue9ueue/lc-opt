@@ -729,6 +729,10 @@ products 1.77 and 1.69).
 - Measured at 2^18 (`lc-amd`, cycles per vector): forward 30.7, inverse 29.5,
   `inverse_product` 51.4, `cyclic_product` 79.9, `forward_product` 56.1, `inverse_product_sum`
   of 2 72.3. A leaf product with its windows costs 20-25 cycles per vector in the bottoms.
+- Merged as #185 (with exp's `io::read_bulk`). CI: exp 0.9724, pow 0.9750,
+  compositional_inverse 1.0017; all 3 0.9830. Judged: exp
+  [409402](https://judge.yosupo.jp/submission/409402) AC 16 ms (was 18; two earlier runs had
+  launch spikes, clean 16).
 
 ## Sources
 

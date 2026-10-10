@@ -1,13 +1,14 @@
 // Tests for lib/poly against O(n^2) references: transforms leaf by leaf against their definition,
 // products against schoolbook multiplication, the inverse, exp, log, power and sqrt against their recurrences,
 // composition against Horner's rule and identities, product trees against naive products, chirps
-// against their recurrence, multipoint evaluation and interpolation against Horner's rule, coefficient-wise
-// operations against scalar code. Long results are checked at random coefficients (each an O(n)
-// sum).
+// against their recurrence, multipoint evaluation and interpolation against Horner's rule, division
+// against long division, coefficient-wise operations against scalar code. Long results are checked
+// at random coefficients (each an O(n) sum) or at random points.
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdio>
+#include <limits>
 #include <random>
 #include <utility>
 #include <vector>
@@ -17,6 +18,7 @@
 #include "lib/poly/composition.hpp"
 #include "lib/poly/compositional_inverse.hpp"
 #include "lib/poly/divider.hpp"
+#include "lib/poly/division.hpp"
 #include "lib/poly/evaluation.hpp"
 #include "lib/poly/exp.hpp"
 #include "lib/poly/factorials.hpp"
@@ -2000,6 +2002,86 @@ void test_factorials() {
     test_chains();
 }
 
+// q and r of f by g by long division.
+std::pair<std::vector<u32>, std::vector<u32>> long_divide(std::vector<u32> f, const std::vector<u32>& g) {
+    const std::size_t d = g.size() - 1;
+    std::vector<u32> q(f.size() > d ? f.size() - d : 0);
+    const u32 lead = power(g[d], P - 2);
+    for (std::size_t i = q.size(); i-- > 0;) {
+        q[i] = mul(f[i + d], lead);
+        for (std::size_t t = 0; t <= d; ++t) f[i + t] = sub(f[i + t], mul(q[i], g[t]));
+    }
+    f.resize(std::min(f.size(), d));
+    return {q, f};
+}
+
+// divide() with plan (or the default plan if null) against long division (n m <= 2^22), else
+// f = q g + r at 8 random points.
+void check_division(const std::vector<u32>& f, const std::vector<u32>& g, const poly::detail::DivisionPlan* plan) {
+    const std::size_t n = f.size(), m = g.size();
+    std::vector<u32> q(poly::quotient_size(n, m), 7), r(poly::remainder_size(n, m), 7);
+    poly::Arena arena(plan ? plan->words() : poly::divide_words(n, m));
+    if (plan) {
+        poly::detail::divide(arena, *plan, f, g, q, r);
+    } else {
+        poly::divide(arena, f, g, q, r);
+    }
+    const std::size_t s = plan ? plan->quotient.s : 0;
+    if (n * m <= (std::size_t(1) << 22)) {
+        const auto [eq, er] = long_divide(f, g);
+        expect(q == eq, "division quotient", n * 1000000 + m, s);
+        expect(r == er, "division remainder", n * 1000000 + m, s);
+        return;
+    }
+    bool ok = true;
+    for (int i = 0; i < 8; ++i) {
+        const u32 x = u32(rng() % P);
+        ok &= evaluate(f, x) == add(mul(evaluate(q, x), evaluate(g, x)), evaluate(r, x));
+    }
+    expect(ok, "division identity", n * 1000000 + m, s);
+}
+
+// Every block size (with at most kDivisionTerms windows) and every remainder method that applies.
+void check_division_plans(std::size_t n, std::size_t m, int kind) {
+    const auto f = random_poly(n, kind), g = random_degree(m - 1, kind);
+    check_division(f, g, nullptr);
+    if (n < m || m == 1) return;
+    const std::size_t k = n - m + 1;
+    for (std::size_t s = 32; s < 2 * k || s == 32; s *= 2) {
+        using poly::detail::Remainder;
+        for (auto how : {Remainder::kDirect, Remainder::kWrap, Remainder::kSplit, Remainder::kTail}) {
+            const poly::detail::DivisionPlan plan(n, m, s, how);
+            constexpr double kInfinity = std::numeric_limits<double>::infinity();
+            if (plan.quotient.ns != kInfinity && plan.remainder.ns != kInfinity) check_division(f, g, &plan);
+        }
+    }
+}
+
+void test_division() {
+    for (std::size_t n = 1; n <= 40; ++n)
+        for (std::size_t m = 1; m <= 40; ++m) check_division(random_poly(n, int(n % 3)), random_degree(m - 1, int(m % 3)), nullptr);
+    // Blocks: tails and windows (up to 8 terms at s = 32: k = 288, d = 300); folds of q and g
+    // (d = 64, 128: L = d); short quotients.
+    const std::size_t sizes[][2] = {{100, 37},  {200, 65},    {200, 64},    {300, 129},  {588, 301},  {600, 33},
+                                    {1000, 500}, {1000, 10},   {2000, 1999}, {2000, 1990}, {3000, 2950}, {4096, 1025},
+                                    {5000, 2},   {5000, 4500}, {5000, 4936}, {3000, 1000}, {2049, 1024}, {1500, 1500}};
+    for (const auto& [n, m] : sizes)
+        for (int kind = 0; kind < 3; ++kind) check_division_plans(n, m, kind);
+    for (int trial = 0; trial < 40; ++trial) {
+        const std::size_t n = 1 + pick(3000), m = 1 + pick(n + 10);
+        check_division_plans(n, m, trial % 3);
+    }
+    const std::size_t large[][2] = {{(1 << 18) + 5, (1 << 14) + 3}, {300000, 150000}, {1 << 18, (1 << 17) + 1},
+                                    {200000, 199990},                 {500000, 53336},  {500000, 499999},
+                                    {300000, 10},                     {200000, 1 << 16},
+                                    {500000, 277012},                 {500000, 389813}};
+    for (const auto& [n, m] : large) check_division(random_poly(n), random_degree(m - 1, 0), nullptr);
+    for (std::size_t s : {1 << 12, 1 << 15}) {
+        const poly::detail::DivisionPlan plan(200000, 30000, s, poly::detail::Remainder::kWrap);
+        check_division(random_poly(200000), random_degree(29999, 0), &plan);
+    }
+}
+
 int main() {
     static Fixture fx;
     test_leaf_kernels(fx);
@@ -2025,6 +2107,7 @@ int main() {
     test_evaluation();
     test_interpolation();
     test_factorials();
+    test_division();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

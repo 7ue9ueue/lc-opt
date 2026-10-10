@@ -1,5 +1,6 @@
 // Tests for lib/poly against O(n^2) references: transforms leaf by leaf against their definition,
 // products against schoolbook multiplication, the inverse, exp, log, power and sqrt against their recurrences,
+// composition against Horner's rule and identities,
 // coefficient-wise operations against scalar code. Long results are checked at random
 // coefficients (each an O(n) sum).
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "lib/poly/calculus.hpp"
+#include "lib/poly/composition.hpp"
 #include "lib/poly/exp.hpp"
 #include "lib/poly/inverse.hpp"
 #include "lib/poly/log.hpp"
@@ -788,6 +790,92 @@ void test_recurrence() {
     check_recurrence(random_taps(range(1, 40), 16, true), {{0, P - 1}, {30, P - 1}}, 20000);
 }
 
+// h = f(g) mod x^n by Horner's rule.
+std::vector<u32> compose_reference(const std::vector<u32>& f, const std::vector<u32>& g, std::size_t n) {
+    std::vector<u32> h(n, 0);
+    for (std::size_t i = std::min(f.size(), n); i-- > 0;) {
+        std::vector<u32> next(n, 0);
+        for (std::size_t a = 0; a < n; ++a)
+            for (std::size_t b = 1; b < g.size() && a + b < n; ++b) next[a + b] = u32((next[a + b] + u64(h[a]) * g[b]) % P);
+        next[0] = f[i];
+        h = std::move(next);
+    }
+    return h;
+}
+
+constexpr std::size_t kComposeMax = std::size_t(1) << 17;
+
+// poly::compose with its own arena (tables and scratch for up to kComposeMax coefficients); the
+// scratch is filled with garbage first.
+std::vector<u32> compose(const std::vector<u32>& f, const std::vector<u32>& g, std::size_t n) {
+    static poly::Arena arena(poly::Transform::words(poly::compose_log(kComposeMax)) + poly::compose_scratch(kComposeMax) + 64);
+    static const poly::Transform t(arena, poly::compose_log(kComposeMax));
+    static const std::span<u32> scratch = arena.take(poly::compose_scratch(kComposeMax));
+    std::vector<u32> h(n, 0xFFFFFFFF);
+    std::fill(scratch.begin(), scratch.end(), 0xFFFFFFFF);
+    poly::compose(t, f, g, h, scratch);
+    return h;
+}
+
+// Random g with g[0] = 0; kind 3: a random number of leading zeros.
+std::vector<u32> random_inner(std::size_t n, int kind) {
+    auto g = random_poly(n, kind % 3);
+    if (kind == 3) std::fill(g.begin(), g.begin() + std::ptrdiff_t(pick(n)), 0);
+    if (!g.empty()) g[0] = 0;
+    return g;
+}
+
+// Long results by identities, at coefficients i (O(n) each): f = sum c^i y^i gives h = 1 / (1 - c g),
+// so h - c h g = 1; the chain rule h' = (f' o g) g'; f = y^2 gives g^2.
+void check_compose_identities(const std::vector<u32>& g, std::size_t n) {
+    std::vector<std::size_t> at = {0, 1, 2, n - 1, n - 2, n / 2, n / 2 - 1};
+    for (int i = 0; i < 20; ++i) at.push_back(pick(n));
+    const u32 c = u32(pick(P));
+    std::vector<u32> geometric(n);
+    for (std::size_t i = 0, ci = 1; i < n; ++i, ci = mul(u32(ci), c)) geometric[i] = u32(ci);
+    const auto h = compose(geometric, g, n);
+    for (std::size_t i : at)
+        expect(sub(h[i], mul(c, product_coefficient(h, g, i))) == (i == 0 ? 1 : 0), "compose: 1 / (1 - c g)", n, i);
+
+    const auto f = random_poly(n);
+    std::vector<u32> df(n - 1), dg(g.size() - 1);
+    for (std::size_t i = 0; i + 1 < n; ++i) df[i] = mul(u32(i + 1), f[i + 1]);
+    for (std::size_t i = 0; i + 1 < g.size(); ++i) dg[i] = mul(u32(i + 1), g[i + 1]);
+    const auto h1 = compose(f, g, n), h2 = compose(df, g, n);
+    for (std::size_t i : at)
+        if (i + 1 < n) expect(mul(u32(i + 1), h1[i + 1]) == product_coefficient(h2, dg, i), "compose: chain rule", n, i);
+
+    const auto h3 = compose({0, 0, 1}, g, n);
+    for (std::size_t i : at) expect(h3[i] == product_coefficient(g, g, i), "compose: y^2", n, i);
+}
+
+void test_compose() {
+    for (std::size_t n = 1; n <= 160; ++n)
+        for (int kind = 0; kind < 4; ++kind) {
+            const auto f = random_poly(n, (kind + 1) % 3), g = random_inner(n, kind);
+            expect(compose(f, g, n) == compose_reference(f, g, n), "compose", n, kind);
+        }
+    // f and g shorter and longer than n; g = 0 (h = f[0]) and g = x (h = f).
+    for (std::size_t n : {33, 63, 64, 65, 200, 256, 257}) {
+        for (std::size_t size : {std::size_t(1), std::size_t(2), n / 3 + 1, 2 * n}) {
+            const auto f = random_poly(size), g = random_inner(n / 2 + 2, 0);
+            const auto f2 = random_poly(n / 2 + 2), g2 = random_inner(size, 0);
+            expect(compose(f, g, n) == compose_reference(f, g, n), "compose: f size", n, size);
+            expect(compose(f2, g2, n) == compose_reference(f2, g2, n), "compose: g size", n, size);
+        }
+        const auto f = random_poly(n);
+        std::vector<u32> constant(n, 0), x(n, 0);
+        constant[0] = f[0], x[1] = 1;
+        expect(compose(f, std::vector<u32>(n, 0), n) == constant, "compose: g = 0", n);
+        expect(compose(f, x, n) == f, "compose: g = x", n);
+    }
+    for (int lg = 6; lg <= 17; ++lg) {
+        const std::size_t n = std::size_t(1) << lg;
+        for (std::size_t m : {n - 1, n, n + 1})
+            if (m <= kComposeMax) check_compose_identities(random_inner(m, int(pick(4))), m);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -802,6 +890,7 @@ int main() {
     test_power(fx);
     test_sqrt(fx);
     test_recurrence();
+    test_compose();
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

@@ -14,7 +14,8 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
   `solution.cpp` replaces the top level: one radix-8 pass per factor reads its lower half once
   and writes the first radix-4 group of both halves (no copy of the lower half, no separate
   pass for the upper half's group); the rest is `lib/ntt`'s recursion and kernels.
-- `lib/io` for input (bulk `uint32_t` read straight into the transform buffers).
+- `lib/io` for input: `io::read_bulk` (`lib/io/bulk32.hpp`, the transposed parser on Zen 3)
+  straight into the transform buffers.
 - Output: `fields.hpp`, every value in a 10-byte field (judge-specific; the checker compares
   tokens), the same bytes as `../fixed_width.hpp`. Per value: w = v / 10 as 8 digits, most
   significant first, in a qword; leading zeros from x ^ (x - 1) and `vpblendvb`; the units digit
@@ -111,6 +112,46 @@ submission times and `lib/io/notes.md`). Next other user: 23 ms (393435).
   409208 above plus 409220-409224 and 409226, none logged before (not from this session).
   Judged 19, 21, 23, 21, 21, 13 ms. Each slow run has one or two outlier cases (19-23 ms); the
   large cases are otherwise 12-13 ms, matching `lc-amd` (13.49 ms). No further submissions.
-- Next: assembly for the formatter loop (34 cycles per 16 values against ~25); the parse
-  (lib/io) and the transform kernels (lib/ntt) are the largest parts left in user code.
-  `convolution_mod_large` could use `fields.hpp` (its formatter takes ~35 ms of 425).
+- 2026-10-09, claude (round 3). `lc-amd`, judge flags, fft_killer_04, medians of 21 runs (ms)
+  unless noted. Scratch probes, not committed.
+  - Phases now: parse 1.69, tables 0.08 (mostly the fifth huge page's fault), top 0.29, subtrees
+    3.95, inverse top groups 0.12, scale 0.12, format 0.65, `write()` 3.39, unmapping the input
+    0.34 and the arrays 0.04; 10.75 in process.
+  - Kept: `io::read_bulk` (`lib/io/bulk32.hpp`, issue #21) instead of `Reader::read`: parse
+    1.86 -> 1.69, in process 10.91 -> 10.75. `judge.py bench`, 41 rounds, slowest 3 cases:
+    13.50 -> 13.28 ms, ratio 0.986.
+  - Transform levels (both factors, per radix-4 level over 2^20 values): forward 0.27-0.28 at
+    every depth (L1 to L3), h = 4 (`forward_pair`) 0.31; inverse 0.13-0.14, h = 4 0.15; bottom
+    (h = 1, leaf products, first inverse level) 1.38. Compute-bound at every depth.
+  - Zen 3 (4 ops of one kind + 12 independent `vpaddd` per iteration; 4 cycles = one vector pipe
+    slot each): stores (xmm or ymm) take a slot; plain loads, `vpbroadcastd` and
+    `vbroadcasti128` from memory do not; `vbroadcastss` from memory does; register moves are
+    free; `vpermq` takes two. With stores counted, `forward` runs at 90% of 4 slots per cycle.
+  - lib/ntt kernels with `vpbroadcastd` instead of `vbroadcastss` (generator change): bottom
+    1.38 vs 1.38 ms; in isolation 145 vs 146 cycles per group. Not kept.
+  - Bottom stage in isolation (one 256-vector tile): `bottom_first` 76, `bottom_last` 93,
+    `bottom_both` 146 cycles per group (~100 by slot count). Leaf windows read 2 or 3 batches
+    after they are written (store forwarding): 1.42 and 1.39 vs 1.35-1.39 ms. Not kept.
+  - Formatter in memory (2^20 values, cycles per 16 values): GCC 34.2; blanks by `and`/`sub`
+    instead of `vpblendvb` 34.7; odd lanes from loads instead of shifts 34.9; stages interleaved
+    in source order 38.5; text blocks of 1600 to 25600 values 33.8-34.3. A list-scheduled inline
+    asm loop (prototype generator: next step's divisions with this step's digits and stores,
+    seven knob sets, up to 4 constants in registers) 33.8-35.2. Its ablations: no chunks 25.5,
+    no divisions 25.4, no digits 20.2, no blanks 29.2. Bound by slot count 27.3 (99 ops,
+    10 stores). Not kept.
+  - Radix-2 and scale fused into the formatter (sums formatted, differences stored for the
+    second half): 0.803 vs 0.772 ms for scale and format. The scale pass runs at 3.5 ops per
+    cycle on its own. Not kept.
+  - Unmapping the input right after parsing (Reader in `std::optional`): 0.341 vs 0.337. In a
+    probe, `MADV_SEQUENTIAL` or `MADV_RANDOM` before `munmap` saves 0.02 of 0.33 ms. Not pursued.
+  - Each factor's top pass right after its parse (tables first): 10.755 vs 10.745. Not kept.
+  - Huge page first touch: 0.04-0.11 ms per 2 MiB (5 per run); 4 KiB pages 0.8 ms per 2 MiB.
+  - `write()` of 10 MB to tmpfs, `perf` on `lc-intel` (kernel 7.0): `shmem_add_to_page_cache`
+    30% of the call, the copy 10%. Nothing to change from user code.
+  - Checks: 53/53 official tests, stress 500 rounds (pipe input), ASan/UBSan on 11 official
+    cases (file and pipe input).
+- Next: the bottom stage (31% of the transform, ~68% of its slot bound) is the largest
+  inefficiency left; its leaf products need 20 multiplies per leaf on 2 pipes. The formatter is
+  at 34 cycles per 16 values whatever the instruction order. `bulk32.hpp`'s static buffers
+  (512 KB) fault in 4 KiB pages: ~110 KB touched per chunk here, ~30 faults (a guess, not
+  measured); in a huge page they might cost less.

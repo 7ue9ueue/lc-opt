@@ -3,6 +3,7 @@
 // pass here (Product); other lengths use ntt::Convolution as is.
 #include <unistd.h>
 
+#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/ntt/ntt.hpp"
 #include "fields.hpp"
@@ -130,8 +131,8 @@ char* text(ntt::Convolution&) {
 template <class Multiplier>
 void convolve(io::Reader& in, std::size_t n, std::size_t m) {
     Multiplier product(n, m);
-    in.read(product.a(), n);
-    in.read(product.b(), m);
+    io::read_bulk(in, product.a(), n);
+    io::read_bulk(in, product.b(), m);
     const std::uint32_t* c = product.multiply();
     io::Writer out;
     fields::write(out, c, n + m - 1, text(product));

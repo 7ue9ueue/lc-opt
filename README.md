@@ -14,7 +14,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [many_aplusb](problems/sample/many_aplusb) | [18 ms](https://judge.yosupo.jp/submission/409103) | 23 ms |
 | [convolution_mod](problems/convolution/convolution_mod) | [12 ms](https://judge.yosupo.jp/submission/409465) | 23 ms |
 | [convolution_mod_large](problems/convolution/convolution_mod_large) | [427 ms](https://judge.yosupo.jp/submission/409616) | 737 ms |
-| [convolution_mod_1000000007](problems/convolution/convolution_mod_1000000007) | [23 ms](https://judge.yosupo.jp/submission/409353) | 29 ms |
+| [convolution_mod_1000000007](problems/convolution/convolution_mod_1000000007) | [22 ms](https://judge.yosupo.jp/submission/409643) | 29 ms |
 | [convolution_mod_2_64](problems/convolution/convolution_mod_2_64) | [41 ms](https://judge.yosupo.jp/submission/409605) | 76 ms |
 | [convolution_F_2_64](problems/convolution/convolution_F_2_64) | [42 ms](https://judge.yosupo.jp/submission/409339) | 409 ms |
 | [bitwise_and_convolution](problems/convolution/bitwise_and_convolution) | [11 ms](https://judge.yosupo.jp/submission/409492) | 26 ms |
@@ -40,7 +40,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [inv_of_formal_power_series_sparse](problems/polynomial/inv_of_formal_power_series_sparse) | [5 ms](https://judge.yosupo.jp/submission/409581) | 24 ms |
 | [inv_of_formal_power_series_2d](problems/polynomial/inv_of_formal_power_series_2d) | [21 ms](https://judge.yosupo.jp/submission/409570) | 197 ms |
 | [exp_of_formal_power_series_sparse](problems/polynomial/exp_of_formal_power_series_sparse) | [7 ms](https://judge.yosupo.jp/submission/409367) | 39 ms |
-| [log_of_formal_power_series_sparse](problems/polynomial/log_of_formal_power_series_sparse) | [14 ms](https://judge.yosupo.jp/submission/409396) | 38 ms |
+| [log_of_formal_power_series_sparse](problems/polynomial/log_of_formal_power_series_sparse) | [9 ms](https://judge.yosupo.jp/submission/409639) | 38 ms |
 | [pow_of_formal_power_series_sparse](problems/polynomial/pow_of_formal_power_series_sparse) | [13 ms](https://judge.yosupo.jp/submission/409426) | 43 ms |
 | [sqrt_of_formal_power_series_sparse](problems/polynomial/sqrt_of_formal_power_series_sparse) | [9 ms](https://judge.yosupo.jp/submission/409443) | 49 ms |
 | [product_of_polynomial_sequence](problems/polynomial/product_of_polynomial_sequence) | [29 ms](https://judge.yosupo.jp/submission/409448) | 82 ms |

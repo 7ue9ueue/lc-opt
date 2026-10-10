@@ -14,8 +14,8 @@ twin, 454 ms): parse 71, NTT 205, output 156 (`write()` ~120), ~12-15 outside `m
 ## Design
 
 `lib/ntt` (transform length 2^25 at the maximum), `lib/io` input, output by
-`../convolution_mod/fields.hpp` (same bytes as `../fixed_width.hpp`), start from `.preinit_array`
-and `_exit` as in `../convolution_mod`.
+`../convolution_mod/fields.hpp` (10-byte fixed-width fields), start from `.preinit_array` and
+`_exit` as in `../convolution_mod`.
 
 ## Log
 - 2026-10-09, claude: refactored the QPoly program onto `lib/ntt`, `lib/io` input and

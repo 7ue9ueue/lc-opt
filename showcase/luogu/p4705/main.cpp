@@ -150,6 +150,7 @@ private:
 #include <vector>
 
 #pragma GCC target("avx2,bmi,bmi2,lzcnt,popcnt")
+#pragma GCC diagnostic ignored "-Wpsabi"  // AVX vector arguments without -mavx: all callers share the pragma
 
 // lib/poly/evaluation.hpp
 // Multipoint evaluation modulo 998244353 by the transposed product tree. x86-64 with AVX2.
@@ -8559,10 +8560,10 @@ public:
     Lease get(int lg, const std::array<std::size_t, K>& sizes, bool zero = true) {
         bool fits = lg <= lg_;
         for (std::size_t k = 0; k < K; ++k) fits &= sizes[k] <= capacity_[k];
-        if (!fits) grow(std::max(lg, lg_), sizes);
+        if (!fits) grow(std::max(lg, lg_), sizes);  // fresh memory is zero
         Lease lease{*transform_, {}};
         for (std::size_t k = 0; k < K; ++k) {
-            if (zero) std::fill_n(data_[k], poly::Arena::footprint(sizes[k]), 0);
+            if (zero && fits) std::fill_n(data_[k], poly::Arena::footprint(sizes[k]), 0);
             lease.spans[k] = {data_[k], sizes[k]};
         }
         return lease;

@@ -1,13 +1,12 @@
 // Tests for lib/easy against O(n^2) references: products (and squares) against schoolbook
 // multiplication; inverse, exp, log and pow against their defining identities and recurrences;
 // evaluation against Horner's rule, interpolation by evaluating its result. io.hpp: compiles.
-#include "lib/easy/poly.hpp"
-
 #include <cstdio>
 #include <random>
 #include <vector>
 
 #include "lib/easy/io.hpp"
+#include "lib/easy/poly.hpp"
 
 namespace {
 

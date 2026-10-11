@@ -1,7 +1,8 @@
 // Power series modulo 998244353 on std::vector: a small API over lib/poly for contest code.
 // x86-64 with AVX2; Linux, macOS, or Windows when bundled by showcase/bundle.py.
 //
-//   #include "lib/easy/poly.hpp"  // enables AVX2 for the code after it
+//   #include <...>                // standard headers first: this one enables AVX2 after it
+//   #include "lib/easy/poly.hpp"
 //   easy::Poly c = easy::multiply(a, b);       // a * b, all n + m - 1 coefficients
 //   easy::Poly g = easy::inverse(f, n);        // 1 / f mod x^n, f[0] != 0
 //   easy::Poly e = easy::exp(f, n);            // f[0] == 0

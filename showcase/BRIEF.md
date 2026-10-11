@@ -1,17 +1,19 @@
 # Showcase round brief
 
-Goal: show that our NTT library makes a *brute-force* NTT solution pass where it normally times
-out. Per problem: a solution that uses the simple, heavier NTT route (an extra log factor, many
+Goal: show that our NTT library makes a natural but worse NTT solution pass where it normally
+times out: with our library it takes 50-90% of the time limit, with an ordinary NTT it gets TLE. Per problem: a solution that uses the simple, heavier NTT route (an extra log factor, many
 convolutions, divide and conquer instead of the clever method), built on `lib/easy`, that passes
 the real limits; and a baseline with the *same algorithm* on a plain textbook NTT, to show the
 gap. Read `AGENTS.md` (rules, writing style) and `lib/easy/poly.hpp` (the API) first.
 
 ## Files: `showcase/<judge>/<problem>/`
 
-- `solution.cpp`: the solution. Standard headers first, then `lib/easy/io.hpp` and
-  `lib/easy/poly.hpp` (the pragma in poly.hpp must come after the standard headers). Use
-  `easy::Reader`/`easy::Writer` for I/O (portable; `lib/io` is Linux-only). A short header
-  comment: problem, limits, the algorithm and its complexity, why it is the brute-force route.
+- `solution.cpp`: the solution. Standard headers first, then `lib/easy/multiply.hpp` (products
+  only, small enough for 64 KB source limits) or `lib/easy/poly.hpp` (series too; about 180 KB
+  bundled, AtCoder only). The pragma in them must come after the standard headers. I/O: plain
+  `std::cin`/`std::cout` with `std::ios::sync_with_stdio(false)` and `std::cin.tie(nullptr)`, in
+  both solution.cpp and baseline.cpp, so that only the NTT differs. A short header comment:
+  problem, limits, the algorithm and its complexity, why it is the natural but worse route.
 - `main.cpp`: `python3 showcase/bundle.py showcase/<judge>/<problem>/solution.cpp`. Never edit by hand.
 - `baseline.cpp`: the same algorithm with a textbook NTT you write yourself (iterative radix-2,
   bit reversal, `% P` or Montgomery scalar code, roughly what a typical contestant writes; not

@@ -21,9 +21,13 @@ namespace sparse = poly::sparse;
 constexpr std::uint32_t kP = sparse::kModulus;
 
 // Coefficients per chunk, a multiple of 16. Its text (up to 256 KB) is longer than the Writer's
-// buffer, so the Writer hands it to write(2) directly.
+// buffer, so the Writer hands it to write(2) directly. Chunks of 6400 take 0.35 ms more (lc-bench).
 constexpr std::size_t kChunk = 25600;
 constexpr std::size_t kGroup = 16;  // values per zero test
+constexpr std::size_t kTextBytes = 10 * kChunk;
+// Words for the ring of coefficients (history() <= kChunk) and the text, after the recurrence's
+// table of reciprocals: one 2 MiB page fault less than in their own page.
+constexpr std::size_t kSpare = 2 * kChunk + kTextBytes / sizeof(std::uint32_t);
 
 // The smaller square root of a in [1, P), if a is a square (Tonelli and Shanks). P - 1 = 119 2^23,
 // and 3 generates the multiplicative group.
@@ -97,15 +101,15 @@ void write_zeros(io::Writer& out, char* text, std::size_t bytes, std::size_t cou
 
 // s[0, n) of the recurrence printed between before and after zeros; n >= 1.
 void print(io::Writer& out, sparse::Holonomic& recurrence, std::size_t before, std::size_t n, std::size_t after) {
-    // Coefficients in a ring of history + kChunk words if the taps reach back at most a chunk,
-    // else in one array after kPadding zeros. The text follows, 16-byte aligned.
+    // Coefficients in a ring of history + kChunk words (in the recurrence's spare words) if the
+    // taps reach back at most a chunk, else in one array after kPadding zeros. The text follows,
+    // 16-byte aligned.
     const auto round_up = [](std::size_t x) { return (x + kGroup - 1) / kGroup * kGroup; };
     const std::size_t history = recurrence.history();
     const bool ring = history <= kChunk;
     const std::size_t padding = ring ? history : sparse::Holonomic::kPadding;
     const std::size_t words = round_up(padding + (ring ? kChunk : round_up(n)));
-    constexpr std::size_t kTextBytes = 10 * kChunk;
-    std::uint32_t* const area = allocate(words + kTextBytes / sizeof(std::uint32_t));
+    std::uint32_t* const area = ring ? recurrence.spare() : allocate(words + kTextBytes / sizeof(std::uint32_t));
     char* const text = reinterpret_cast<char*>(area + words);
     write_zeros(out, text, kTextBytes, before, false);
     std::uint32_t* s = area + padding;
@@ -147,7 +151,7 @@ void solve() {
         const std::uint32_t c = sparse::multiply(terms[i].value, inverse_a);
         taps[used++] = {d, sparse::multiply(sparse::multiply(kThreeHalves, d), c), kP - c};
     }
-    sparse::Holonomic recurrence(std::span<const sparse::Tap>(taps.data(), used), *root, size);
+    sparse::Holonomic recurrence(std::span<const sparse::Tap>(taps.data(), used), *root, size, kSpare);
     print(out, recurrence, k / 2, size, k / 2);
 }
 

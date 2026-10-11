@@ -794,6 +794,9 @@ private:
 //   poly::sparse::Holonomic recurrence(taps, g0, n);  // n: coefficients to produce in all
 //   recurrence.next(out, count);  // n g[n] = (a1 + b1 n) g[n - 1] + a40 g[n - 40], g[0] = g0
 //
+//   poly::sparse::Holonomic recurrence(taps, g0, n, words);  // and words of memory for the caller:
+//   std::uint32_t* buffer = recurrence.spare();               // in the huge page of its table
+//
 //   poly::sparse::inverses(first, count, y);  // y[i] = 2^32 / (first + i) mod P
 //
 // next() works as Recurrence::next: values in [0, P); it writes the next count coefficients
@@ -1165,12 +1168,15 @@ template <std::size_t kTerms = 0>
     return subtract(x);
 }
 
-// a b / 2^32 mod P in [0, P), dword by dword, for a, b < P.
-inline Vec montgomery(Vec a, Vec b) {
+// a b / 2^32 mod P, dword by dword, below a b / 2^32 + P: below 1.47 P for a < 2P and b < P.
+inline Vec lazy_montgomery(Vec a, Vec b) {
     const Vec even = redc(_mm256_mul_epu32(a, b));
     const Vec odd = redc(_mm256_mul_epu32(_mm256_srli_epi64(a, 32), _mm256_srli_epi64(b, 32)));
-    return subtract(_mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA));
+    return _mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA);
 }
+
+// a b / 2^32 mod P in [0, P), dword by dword, for a, b < 2P.
+inline Vec montgomery(Vec a, Vec b) { return subtract(lazy_montgomery(a, b)); }
 
 // y[i] = 2^32 / (first + step i) mod P for i < count rounded up to a multiple of 32 (y holds
 // that many), all these integers in [1, P). Montgomery's batch inversion in 4 interleaved chains
@@ -1201,8 +1207,11 @@ public:
     bool done() const { return phase_ == Phase::kDone; }
 
     // Forward: prefix(i) = prefix(i - 32) x(i) / 2^32. Backward, with q(i) = 2^32 / prefix(i):
-    // y(i) = prefix(i - 32) q(i) / 2^32, q(i - 32) = q(i) x(i) / 2^32.
+    // y(i) = prefix(i - 32) q(i) / 2^32, q(i - 32) = q(i) x(i) / 2^32. prefix and q are lazy,
+    // below 2P; y is in [0, P).
     [[gnu::always_inline]] void step() {
+        Vec* const x = x_ + chain_;
+        Vec* const value = value_ + chain_;
         if (phase_ == Phase::kForward) {
             if (i_ == end_) {
                 invert_totals();
@@ -1210,23 +1219,27 @@ public:
                 i_ = end_ - kLanes;
                 return;
             }
-            for (std::size_t c = chain_; c < chain_ + 2; ++c) {
-                store(y_ + i_ - kLanes + 8 * c, value_[c]);
-                x_[c] = _mm256_add_epi32(x_[c], advance_);
-                value_[c] = montgomery(value_[c], x_[c]);
+            std::uint32_t* const prefix = y_ + i_ - kLanes + 8 * chain_;
+#pragma GCC unroll 2
+            for (std::size_t c = 0; c < 2; ++c) {
+                store(prefix + 8 * c, value[c]);
+                x[c] = _mm256_add_epi32(x[c], advance_);
+                value[c] = lazy_montgomery(value[c], x[c]);
             }
             chain_ ^= 2;
             if (chain_ == 0) i_ += kLanes;
         } else if (phase_ == Phase::kBackward) {
             if (i_ == 0) {
-                for (std::size_t c = 0; c < kChains; ++c) store(y_ + 8 * c, value_[c]);
+                for (std::size_t c = 0; c < kChains; ++c) store(y_ + 8 * c, subtract(value_[c]));
                 phase_ = Phase::kDone;
                 return;
             }
-            for (std::size_t c = chain_; c < chain_ + 2; ++c) {
-                store(y_ + i_ + 8 * c, montgomery(load(y_ + i_ - kLanes + 8 * c), value_[c]));
-                value_[c] = montgomery(value_[c], x_[c]);
-                x_[c] = _mm256_sub_epi32(x_[c], advance_);
+            std::uint32_t* const out = y_ + i_ + 8 * chain_;
+#pragma GCC unroll 2
+            for (std::size_t c = 0; c < 2; ++c) {
+                store(out + 8 * c, montgomery(load(out + 8 * c - kLanes), value[c]));
+                value[c] = lazy_montgomery(value[c], x[c]);
+                x[c] = _mm256_sub_epi32(x[c], advance_);
             }
             chain_ ^= 2;
             if (chain_ == 0) i_ -= kLanes;
@@ -1325,7 +1338,9 @@ inline void inverses(std::uint32_t first, std::size_t count, std::uint32_t* y) {
 // Reciprocals: 1 / (n + t) for odd n + t by batch inversion in windows of kWindow coefficients,
 // for even n + t as 1 / ((n + t) / 2) from a table of the first half, times 1/2. That 1/2 is
 // folded into the even lanes of W. The kernel loop runs the batch inversion of the next window, a
-// half step per block, in the cycles the chain from block to block leaves free.
+// half step per block, in the cycles the chain from block to block leaves free. The table is a
+// ring of about a quarter of the size (1 MB at size 10^6), so the caller's spare words can share
+// its 2 MiB page.
 //
 // Products of a coefficient times 2^32 (Montgomery form) and a value are summed in 64-bit lanes
 // and reduced once per stage: W, the product with y, the product with F.
@@ -1337,9 +1352,13 @@ public:
     static constexpr std::size_t kWindow = 16384;  // coefficients per batch of odd reciprocals
 
     // At most kMaxTaps taps with distinct distances d >= 1; initial = g[0]; size: the number of
-    // coefficients next() will produce in all, or more (size + 64 <= P).
-    Holonomic(std::span<const Tap> taps, std::uint32_t initial, std::size_t size)
-        : size_(round_up(size)), table_end_(round_up(size_ / 2 + 8)), reciprocals_(table_end_) {
+    // coefficients next() will produce in all, or more (size + 64 <= P); spare: words for the
+    // caller after the table of reciprocals, in its huge page while they fit (spare()).
+    Holonomic(std::span<const Tap> taps, std::uint32_t initial, std::size_t size, std::size_t spare = 0)
+        : size_(round_up(size)),
+          table_end_(round_up(size_ / 2 + 8)),
+          ring_(std::min(table_end_, round_up((table_end_ + kWindow) / 2))),
+          reciprocals_(ring_ + spare) {
         using detail::montgomery_form;
         std::array<Tap, kBlock> near{};  // near[d]: the short tap at distance d, or zeros
         for (const Tap& tap : taps) {
@@ -1412,13 +1431,16 @@ public:
             m_step_ = packed(m_slope, kHalf);
         }
         for (std::size_t t = 0; t < kBlock; ++t) first_[t] = multiply(initial, f[t]);
-        for (std::uint32_t m = 1; m < kBlock; ++m) reciprocals_.data()[m] = montgomery_form(inverse(m));
+        for (std::uint32_t m = 1; m < kBlock; ++m) *table(m) = montgomery_form(inverse(m));
         if (size_ > kBlock)
             for (auto& odd : odd_) odd.resize(kWindow / 2 + 32);
     }
 
     // Coefficients next() reads before out: kPadding, or the largest tap distance if larger.
     std::size_t history() const { return far_.empty() ? kPadding : std::max<std::size_t>(kPadding, far_.back().distance); }
+
+    // The constructor's spare words, 64-byte aligned, zero until written.
+    std::uint32_t* spare() const { return reciprocals_.data() + ring_; }
 
     void next(std::uint32_t* out, std::size_t count) {
         const std::size_t end = done_ + round_up(count);
@@ -1434,9 +1456,10 @@ public:
         }
         while (done_ < end) {
             if (done_ >= window_end_) begin_window();
-            const std::uint32_t* const even = reciprocals_.data() + done_ / 2;  // 2 / (n + t) for even t
+            const std::uint32_t* const even = table(done_ / 2);  // 2 / (n + t) for even t
             const std::uint32_t* const odd = odd_[window_ % 2].data() + (done_ + kWindow - window_end_) / 2;  // odd t
-            const std::size_t stop = std::min(end, window_end_);
+            std::size_t stop = std::min(end, window_end_);
+            if (done_ < 2 * ring_) stop = std::min(stop, 2 * ring_);  // even wraps to the table's start there
             if (active_ == 0) {  // up to the first block a long tap reaches
                 const std::size_t free = far_.empty() ? stop : std::min<std::size_t>(stop, far_[0].distance / kBlock * kBlock);
                 if (done_ < free) {
@@ -1530,10 +1553,15 @@ private:
         window_ = window_end_ / kWindow;
         const std::uint32_t* const odd = odd_[window_ % 2].data();
         for (std::size_t n = window_end_, k = 0; n < std::min(window_end_ + kWindow, table_end_); n += kBlock, k += kBlock / 2)
-            reciprocals(reciprocals_.data() + n / 2, odd + k, reciprocals_.data() + n);
+            reciprocals(table(n / 2), odd + k, table(n));
         window_end_ += kWindow;
         if (window_end_ < size_) start_inverter(window_ + 1);
     }
+
+    // The word of table entry m < table_end_. Entries m and m + ring_ share one: m is last read in
+    // window 2m / kWindow, and ring_ >= (table_end_ + kWindow) / 2 puts the write of m + ring_ in a
+    // later window. ring_ is a multiple of 16, so no block's entries wrap.
+    std::uint32_t* table(std::size_t m) const { return reciprocals_.data() + (m < ring_ ? m : m - ring_); }
 
     void start_inverter(std::size_t window) {
         const std::size_t first = window * kWindow;
@@ -1921,8 +1949,9 @@ private:
     Series first_;                                   // g[0, 16) = g[0] F
     std::vector<Tap> far_;                           // long taps by increasing distance, a and b times 2^32
     std::size_t size_;                               // coefficients next() produces in all, or more
-    std::size_t table_end_;                          // reciprocals_ holds [1, table_end_) once next() reaches it
-    detail::HugeWords reciprocals_;                  // 2^32 / m mod P at m
+    std::size_t table_end_;                          // the table holds [1, table_end_) once next() reaches it
+    std::size_t ring_;                               // its words (table())
+    detail::HugeWords reciprocals_;                  // 2^32 / m mod P at table(m), then the spare words
     std::array<std::vector<std::uint32_t>, 2> odd_;  // 2^32 / m for the odd m of window w in odd_[w % 2]
     detail::BatchInverter inverter_;                 // fills odd_ for the window after the current one
     std::size_t window_ = 0;                         // the current window

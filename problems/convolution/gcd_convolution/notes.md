@@ -4,8 +4,9 @@ N <= 10^6, a_i, b_i < 998244353; print c_k = sum over gcd(i, j) = k of a_i b_j f
 Large tests: N = 10^6, 999982..999984, 994008..994010 (997^2 - 1 + {0, 1, 2}), random values;
 19.8 MB of input, 10 MB of output.
 
-Record when opened: 37 ms (407011). Best judged: ours, [409380](https://judge.yosupo.jp/submission/409380),
-14 ms (#176). Earlier: 15 ms, [409214](https://judge.yosupo.jp/submission/409214).
+Record when opened: 37 ms (407011). Best judged: ours, [409724](https://judge.yosupo.jp/submission/409724),
+13 ms (#351). Earlier: 14 ms, [409380](https://judge.yosupo.jp/submission/409380); 15 ms,
+[409214](https://judge.yosupo.jp/submission/409214).
 
 ## Design
 
@@ -201,6 +202,15 @@ Record when opened: 37 ms (407011). Best judged: ours, [409380](https://judge.yo
     whitespace (spaces, tabs, CRLF) and edge sizes (1, 47, 48, 1023, 1024, 25600, 131081, 10^6)
     against main; `stress.py` 300 rounds (judge image); ASan/UBSan (-O1, x86-64-v3, with and
     without the Zen 3 transpose in lib/io) on all 41 inputs, file and pipe input.
+  - PR #351 merged. CI ratios: EPYC 7763 0.9739 and 0.9878, Xeon 8370C 0.9702.
+- 2026-10-10, claude: submitted the #351 `main.cpp` four times (1/5 to 4/5 of this version).
+  Large cases (max_random 00/01, near_prime 00-02, near_prime_squared 00-02), ms:
+  - [409721](https://judge.yosupo.jp/submission/409721): AC 24 ms, spike on max_random_00
+    (`tools/spikes.py`); the other 7 at 13.
+  - [409722](https://judge.yosupo.jp/submission/409722): AC 22 ms, spike on near_prime_00;
+    13 13 . 13 13 14 13 13.
+  - [409723](https://judge.yosupo.jp/submission/409723): AC 14 ms; 12 14 14 14 13 13 14 14.
+  - [409724](https://judge.yosupo.jp/submission/409724): AC 13 ms, all 8 at 13. New best (was 14).
 
 ## Next
 

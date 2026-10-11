@@ -72,7 +72,8 @@ void test_multiply() {
 }
 
 void test_series() {
-    for (std::size_t n : {1, 2, 10, 63, 64, 65, 200, 1000, 4097}) {
+    // the cached memory grows and is then reused, dirty, by smaller calls
+    for (std::size_t n : {1, 2, 10, 63, 64, 65, 200, 1000, 4097, 30, 1000, 3, 2047}) {
         Poly f = random_poly(n);
         if (f[0] == 0) f[0] = 1;
         const Poly g = easy::inverse(f, n);

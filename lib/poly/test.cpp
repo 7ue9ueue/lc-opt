@@ -859,6 +859,24 @@ void check_sqrt(Fixture& fx, const std::vector<u32>& f, u32 c, std::size_t n) {
     for (std::size_t i : at) expect(product_coefficient(g, g, i) == (i < f.size() ? f[i] : 0), "g^2 = f at coefficient", n, i);
 }
 
+// sqrt_steps, the forward in place and sqrt_last_step writing g[m, n) over f[m, n), as the
+// problem uses them, with f shift words into its buffer (any alignment); against poly::sqrt.
+void check_sqrt_parts(Fixture& fx, const std::vector<u32>& f, u32 c, std::size_t shift) {
+    const std::size_t n = f.size(), m = std::size_t(1) << poly::sqrt_log(n);
+    std::vector<u32> expected(n);
+    poly::sqrt(fx.t, f, c, expected, fx.sqrt_scratch);
+    std::vector<u32> buffer(shift + n);
+    std::copy(f.begin(), f.end(), buffer.begin() + std::ptrdiff_t(shift));
+    const std::span<u32> u(buffer.data() + shift, n), a = fx.buffer[0].first(m), b = fx.buffer[1].first(m),
+                         ht = fx.buffer[2].first(m);
+    poly::sqrt_steps(fx.t, u, c, a, b, ht);
+    const bool low = std::equal(a.begin(), a.end(), expected.begin());
+    fx.t.forward(a);
+    poly::sqrt_last_step(fx.t, u, a, ht, b, u.subspan(m));
+    expect(low && std::equal(u.begin() + std::ptrdiff_t(m), u.end(), expected.begin() + std::ptrdiff_t(m)), "sqrt in parts",
+           n, shift);
+}
+
 // f with f[0] = c^2 for a random c != 0, and c or -c.
 std::pair<std::vector<u32>, u32> random_square(std::size_t size, int kind) {
     auto f = random_poly(size, kind);
@@ -889,6 +907,14 @@ void test_sqrt(Fixture& fx) {
             if (m > (std::size_t(1) << kLgMax)) continue;
             const auto [f, c] = random_square(m, int(pick(3)));
             check_sqrt(fx, f, c, m);
+        }
+    }
+    // In parts, in place: one and two products in the last step, both top-level radices, f at
+    // offsets 0 to 3 words.
+    for (std::size_t n : {65, 96, 97, 128, 129, 200, 1000, 3072, 3073, 4096, 4097, 70000, 131073, 200001, 262144}) {
+        for (std::size_t shift = 0; shift < 4; ++shift) {
+            const auto [f, c] = random_square(n, int(pick(3)));
+            check_sqrt_parts(fx, f, c, shift);
         }
     }
 }

@@ -307,8 +307,24 @@ negations: the inverse update and the root step both come out with the right sig
   `inverse.hpp` takes 10 T(2^19) and 4 LP(2^19).
 - Below 64 coefficients: 2 c g_i = f_i - sum_(0<j<i) g_j g_(i-j); h mod x^32 by `inverse_direct`
   of g, negated.
-- Scratch: G, T(h) and work (length m_last each), h (m_last / 2); in the last step h holds
-  r[m/2, rest) (H keeps h's transform). f and g must not overlap: every step reads f[0, 2m).
+- Buffers (round 2, issue #66): a, b, ht of m_last words. During the steps a holds g from 0 and
+  h from m_last / 2 (the last full step writes g[m_last/2, m_last) there once h is no longer
+  needed); b holds G and the work of e and the h update (b[m, 2m)), then g^2 in place of G and
+  the product for g[m, 2m) over all of b; ht holds H, then T_2m(h). The last step needs G, H
+  and one work buffer; r[m/2, rest) and g[m, n) go to the output span, which may be f[m, n).
+  `sqrt()` is `sqrt_steps`, an out-of-place forward of g mod x^m and `sqrt_last_step`
+  (scratch 3 m_last words); the problem calls the parts itself (its notes).
+- Passes between products (`inverse_columns`: the inverse top level by columns, the caller
+  consumes the outputs): e's inverse top level writes the h update's forward top level (as
+  inv's step.hpp); inverse top levels write h[m/2, m), g[m, 2m), d0, d1 to their places (no
+  copies); g^2's inverse top level computes r (and for m radix 2 T_2m(r)'s radix-4 top level);
+  in the last step d0 and r1 + (g d0)[m/2, rest) are written in place as the next product's
+  source (radix-8 top for radix 2, `forward_lower4` for radix 4).
+- Stream counts decide which passes to fuse: a pass touching 8 or more streams 2^k words apart
+  in one array is slower than two passes (see Log, issue #66 round 2). The last step's residual
+  stays a separate linear pass after the inverse top level; T_2m(h) stays a plain forward.
+- g^2 by `leaf_square`: the odd outputs of a leaf square pair a_i a_j (i even) with a_j a_i, so
+  12 products and a doubling instead of 16 products (0.991 of sqrt in process).
 - Alternatives considered, not done:
   - power(f, 1/2, c) (exp of log / 2): 2.25 times slower whole process (see Log).
   - h at full precision m (the update after g[m, 2m)): 17 transforms per step.
@@ -319,7 +335,9 @@ negations: the inverse update and the root step both come out with the right sig
     transforms of length 2^17 and 10 leaf products, against the split's 8 of length 2^18
     (~16 of 2^17) and 4 (8 of 2^17). Newton to 2^17, then blocks of 2^16: 23 transforms of
     2^17 and 33 leaf products against 27 and 13; a leaf product at 2^17 costs ~0.87 of a
-    transform (0.12 vs 0.138 ms, `lc-amd`).
+    transform (0.12 vs 0.138 ms, `lc-amd`). Recounted in round 2 with measured costs (`lc-bench`:
+    forward of 2^17 141 us, leaf products ~78): the last stage in 4 blocks of 2^16 with stored
+    transforms of g's chunks, ~4.1 ms against 3.0 for the split.
   - The inverse square root f^(-1/2) is 1/g = -h already; its own Newton step, u + u (1 -
     f u^2) / 2, needs f u^2 mod x^2m, a longer product than g h.
   - Harvey's 4/3 M(n) square root (Harvey 2011 below; 8 T(n) with M(n) = 6 T(n)): blocked,
@@ -1780,6 +1798,28 @@ product-tree lanes):
 - Merged as #348. CI: pow 0.9839, compositional_inverse 0.9917, _large 0.9942, exp 0.9980, log
   1.0066 (identical code); all 5 0.9948. Judged: pow [409718](https://judge.yosupo.jp/submission/409718)
   AC 23 ms (was 26; three earlier runs had launch spikes, clean 24).
+
+2026-10-10, claude (issue #66, sqrt round 2; owner lane):
+- `sqrt.hpp` only (no other header changed; only the sqrt bundle includes it): new public
+  `sqrt_steps` and `sqrt_last_step` (Sqrt above), `sqrt()` on top of them with the same
+  signature; `sqrt_scratch` 3.5 -> 3 buffers of m_last words. Passes shared between products,
+  direct writes instead of copies, sources in place (radix-8 tops), `leaf_square` and
+  `InverseSquareBottom` for g^2.
+- In-process A/B against main (`lc-bench`, 41 alternating calls, outputs equal): `sqrt` at
+  N = 500000 0.985, 262144 0.971, 200000 0.987; in the problem's layout 0.976.
+- Fusing has a limit (`lc-bench`, in process, per pass): T_2m(h)'s radix-2 top level written by
+  the h update's last pass at m = 2^17 (4 loads of the product, 2 of h, 2 stores of h and 8 of
+  T_2m(h), each group 128 KB apart): 253 us, against 18 for the pass without it plus the
+  forward's own top level (~25, guess); with it the whole sqrt was 1.049 against main. The residual in the last step's inverse top level (8 streams of f 2^k words apart and
+  2 stores into f): radix 4 at 2^17 227 us against ~85 in separate passes; radix 2 at 2^18 98
+  against 97. In a full step at radix 4 (8 streams of f, the product in place, no stores into
+  f) the fused residual is neutral (60 against 62 us), so it stays there.
+- Tests: the two parts in place (g[m, n) over f[m, n)) at offsets 0-3 words, both radices, one
+  and two products in the last step. -O2 and ASan/UBSan, `lc-amd` native and `lc-intel`
+  x86-64-v3. Mutations fail them (8): leaf_square without the doubling, the radix-2 middle pass
+  without the negation, h stored at j only for radix 4, a radix-4 residual quarter at the wrong
+  column, d1's count one short, d1's source without r1, d0 stored at j for both radix-4
+  vectors, the last step's radix-4 source taken as a written top level.
 
 ## Sources
 

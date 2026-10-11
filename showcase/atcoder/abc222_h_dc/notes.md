@@ -15,7 +15,24 @@ The second solution for this problem; the first (pow, O(N log N)) is in `../abc2
 - baseline.cpp: the same code with a textbook NTT (iterative radix-2, bit reversal, `% P`).
   It splits products longer than 2^23 (P - 1 = 119 2^23), needed only at the root for N > 2^23.
 
-## Results
+## Results: middle products (shipped)
+
+2026-10-11, claude. Node products with l > 0 as cyclic products of length L = r - l (only
+indices [L/2, L) are used; the wrap lands below), the prefix f[0, L) transformed once per level
+(`easy::Cyclic`). The baseline got the same two changes on its textbook NTT. lc-bench,
+`showcase/bench.py --rounds 3`, gcc:15.2.0 `-std=gnu++23 -O2 -march=native`, plain bundle (415 KB).
+
+| N | solution.cpp | baseline.cpp |
+|---|---:|---:|
+| 10^7 | 2783 ms (93% of TL) | 32158 ms |
+| 8388609 | 2516 ms | 29755 ms |
+
+- Estimate beforehand: about 1.7 s (transforms only, c = 0.13 ns per element and level). The gap
+  is a guess: the schoolbook leaves (one `% P` per term, about 3.2e8 of them) and the copies in and
+  out of each product. Not profiled.
+- Samples and 150 stress cases: OK.
+
+## Results: plain products (first version)
 
 2026-10-10, claude. lc-bench (EPYC 7B13), gcc:15.2.0 `-std=gnu++23 -O2 -march=native`,
 `showcase/bench.py --rounds 3` (median; main and baseline alternated under the bench lock).

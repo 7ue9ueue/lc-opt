@@ -129,10 +129,9 @@ private:
 //   easy::Poly c = easy::interpolate(points, values);  // distinct points
 //   easy::mul(a, b), easy::power(a, e)          // scalars mod P
 //
-// Coefficients are canonical (< 998244353) in and out. An empty f stands for 0. multiply keeps
-// one workspace of transform buffers for the largest product so far (never shrunk), so repeated
-// products of similar sizes fault in no new memory; the other calls map their own memory and
-// return it.
+// Coefficients are canonical (< 998244353) in and out. An empty f stands for 0. multiply,
+// inverse, exp, log and pow each keep their memory for the largest call so far (never freed), so
+// repeated calls fault in no new pages; evaluate and interpolate map their own and return it.
 
 // Every standard header lib/poly uses comes before the target pragma: GCC 13 and 14 fail to
 // inline std::allocator's members into code compiled under it otherwise.
@@ -8550,43 +8549,50 @@ inline Poly multiply_naive(Span a, Span b) {
     return Poly(sum.begin(), sum.end());
 }
 
-// Tables and two buffers for products of up to 2^lg coefficients.
-class Workspace {
+// Transform tables and K spans kept between calls of one kind, grown to the largest request so
+// far and never shrunk, so repeated calls fault in no new memory. get() zeroes the first
+// sizes[k] words of span k (and its padding), as a fresh arena would give them.
+template <std::size_t K>
+class Cache {
 public:
-    static Workspace& get() {
-        static Workspace w;
-        return w;
+    struct Lease {
+        const poly::Transform& t;
+        std::array<std::span<std::uint32_t>, K> spans;
+    };
+
+    Lease get(int lg, const std::array<std::size_t, K>& sizes, bool zero = true) {
+        bool fits = lg <= lg_;
+        for (std::size_t k = 0; k < K; ++k) fits &= sizes[k] <= capacity_[k];
+        if (!fits) grow(std::max(lg, lg_), sizes);
+        Lease lease{*transform_, {}};
+        for (std::size_t k = 0; k < K; ++k) {
+            if (zero) std::fill_n(data_[k], poly::Arena::footprint(sizes[k]), 0);
+            lease.spans[k] = {data_[k], sizes[k]};
+        }
+        return lease;
     }
 
-    void reserve(int lg) {
-        if (lg <= lg_) return;
+private:
+    void grow(int lg, const std::array<std::size_t, K>& sizes) {
         transform_.reset();
         arena_.reset();
-        const std::size_t len = std::size_t(1) << lg;
-        arena_ = std::make_unique<poly::Arena>(poly::Transform::words(lg) + 2 * poly::Arena::footprint(len));
+        std::size_t words = poly::Transform::words(lg);
+        for (std::size_t k = 0; k < K; ++k) {
+            capacity_[k] = std::max(capacity_[k], sizes[k]);
+            words += poly::Arena::footprint(capacity_[k]);
+        }
+        arena_ = std::make_unique<poly::Arena>(words);
         transform_.emplace(*arena_, lg);
-        a_ = arena_->take(len).data();
-        b_ = arena_->take(len).data();
+        for (std::size_t k = 0; k < K; ++k) data_[k] = arena_->take(capacity_[k]).data();
         lg_ = lg;
     }
 
-    const poly::Transform& transform() const { return *transform_; }
-    std::span<std::uint32_t> a(std::size_t n) const { return {a_, n}; }
-    std::span<std::uint32_t> b(std::size_t n) const { return {b_, n}; }
-
-private:
     int lg_ = 0;
+    std::array<std::size_t, K> capacity_{};
+    std::array<std::uint32_t*, K> data_{};
     std::unique_ptr<poly::Arena> arena_;
     std::optional<poly::Transform> transform_;
-    std::uint32_t *a_ = nullptr, *b_ = nullptr;
 };
-
-// f mod x^n in a fresh span of the arena (zero past f).
-inline std::span<std::uint32_t> copy(poly::Arena& arena, Span f, std::size_t n) {
-    const auto out = arena.take(n);
-    std::copy_n(f.begin(), std::min(n, f.size()), out.begin());
-    return out;
-}
 
 }  // namespace detail
 
@@ -8596,16 +8602,14 @@ inline Poly multiply(Span a, Span b) {
     if (std::min(a.size(), b.size()) <= 32 || n <= 64) return detail::multiply_naive(a, b);
     const int lg = std::max(poly::Transform::kMinLog, int(std::bit_width(n - 1)));
     const std::size_t len = std::size_t(1) << lg;
-    auto& w = detail::Workspace::get();
-    w.reserve(lg);
-    const auto& t = w.transform();
-    const auto x = w.a(len);
+    static detail::Cache<2> cache;
+    const auto [t, spans] = cache.get(lg, {len, len}, false);
+    const auto [x, y] = spans;
     std::fill(std::copy(a.begin(), a.end(), x.begin()), x.end(), 0);
     if (a.data() == b.data() && a.size() == b.size()) {  // square: one forward transform
         t.forward(x);
         t.inverse_product(x, x, x);
     } else {
-        const auto y = w.b(len);
         std::fill(std::copy(b.begin(), b.end(), y.begin()), y.end(), 0);
         t.forward(y);
         t.cyclic_product(x, y);
@@ -8615,29 +8619,31 @@ inline Poly multiply(Span a, Span b) {
 
 inline Poly inverse(Span f, std::size_t n) {
     if (n == 0) return {};
-    poly::Arena arena(poly::Transform::words(poly::inverse_log(n)) + 2 * poly::Arena::footprint(n) +
-                      poly::inverse_scratch(n));
-    const poly::Transform t(arena, poly::inverse_log(n));
-    const auto in = detail::copy(arena, f, n), out = arena.take(n);
-    poly::inverse(t, in, out, arena.take(poly::inverse_scratch(n)));
+    static detail::Cache<3> cache;
+    const auto [t, spans] = cache.get(poly::inverse_log(n), {n, n, poly::inverse_scratch(n)});
+    const auto [in, out, scratch] = spans;
+    std::copy_n(f.begin(), std::min(n, f.size()), in.begin());
+    poly::inverse(t, in, out, scratch);
     return Poly(out.begin(), out.end());
 }
 
 inline Poly exp(Span f, std::size_t n) {
     if (n == 0) return {};
-    poly::Arena arena(poly::Transform::words(poly::exp_log(n)) + poly::Arena::footprint(n) + poly::exp_scratch(n));
-    const poly::Transform t(arena, poly::exp_log(n));
-    const auto g = detail::copy(arena, f, n);
-    poly::exp(t, g, g, arena.take(poly::exp_scratch(n)));
+    static detail::Cache<2> cache;
+    const auto [t, spans] = cache.get(poly::exp_log(n), {n, poly::exp_scratch(n)});
+    const auto [g, scratch] = spans;
+    std::copy_n(f.begin(), std::min(n, f.size()), g.begin());
+    poly::exp(t, g, g, scratch);
     return Poly(g.begin(), g.end());
 }
 
 inline Poly log(Span f, std::size_t n) {
     if (n == 0) return {};
-    poly::Arena arena(poly::Transform::words(poly::log_log(n)) + poly::Arena::footprint(n) + poly::log_scratch(n));
-    const poly::Transform t(arena, poly::log_log(n));
-    const auto g = detail::copy(arena, f, n);
-    poly::log(t, g, g, arena.take(poly::log_scratch(n)));
+    static detail::Cache<2> cache;
+    const auto [t, spans] = cache.get(poly::log_log(n), {n, poly::log_scratch(n)});
+    const auto [g, scratch] = spans;
+    std::copy_n(f.begin(), std::min(n, f.size()), g.begin());
+    poly::log(t, g, g, scratch);
     return Poly(g.begin(), g.end());
 }
 
@@ -8648,12 +8654,13 @@ inline Poly pow(Span f, std::uint64_t k, std::size_t n) {
     const std::size_t z = std::size_t(std::find_if(f.begin(), f.end(), [](std::uint32_t c) { return c != 0; }) - f.begin());
     if (z == f.size() || (z > 0 && k > (n - 1) / z)) return g;  // f^k = 0 mod x^n
     const std::size_t shift = z * std::size_t(k), size = n - shift;
-    poly::Arena arena(poly::Transform::words(poly::power_log(size)) + poly::Arena::footprint(size) +
-                      poly::power_scratch(size));
-    const poly::Transform t(arena, poly::power_log(size));
-    const auto u = detail::copy(arena, f.subspan(z), size);
+    static detail::Cache<2> cache;
+    const auto [t, spans] = cache.get(poly::power_log(size), {size, poly::power_scratch(size)});
+    const auto [u, scratch] = spans;
+    const Span tail = f.subspan(z);
+    std::copy_n(tail.begin(), std::min(size, tail.size()), u.begin());
     const std::uint32_t c = power(u[0], k % (kMod - 1));
-    poly::power(t, u, std::uint32_t(k % kMod), c, u, arena.take(poly::power_scratch(size)));
+    poly::power(t, u, std::uint32_t(k % kMod), c, u, scratch);
     std::copy(u.begin(), u.end(), g.begin() + std::ptrdiff_t(shift));
     return g;
 }

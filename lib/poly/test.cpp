@@ -1197,7 +1197,8 @@ std::vector<u32> holonomic_reference(const Taps& taps, u32 initial, std::size_t 
     return g;
 }
 
-// As check_recurrence: next() calls of random lengths into one array, and into a ring.
+// As check_recurrence: next() calls of random lengths into one array, and into a ring held in the
+// recurrence's spare words, with a canary after it.
 void check_holonomic(const Taps& taps, u32 initial, std::size_t n) {
     const auto want = holonomic_reference(taps, initial, n);
     const std::size_t padded = (n + Holonomic::kBlock - 1) / Holonomic::kBlock * Holonomic::kBlock;
@@ -1212,17 +1213,24 @@ void check_holonomic(const Taps& taps, u32 initial, std::size_t n) {
         expect(std::equal(want.begin(), want.end(), g.begin() + Holonomic::kPadding), "holonomic, array", n, taps.size());
     }
     const std::size_t chunk = Holonomic::kBlock * (1 + pick(64));
-    Holonomic recurrence(taps, initial, n);
-    const std::size_t history = recurrence.history();
+    std::size_t history = Holonomic::kPadding;
+    for (const auto& tap : taps) history = std::max<std::size_t>(history, tap.distance);
+    constexpr std::size_t kCanary = 64;
+    Holonomic recurrence(taps, initial, n, history + chunk + kCanary);
+    expect(recurrence.history() == history, "holonomic, history", n, history);
     if (history > chunk) return;
-    std::vector<u32> ring(history + chunk, 0), got;
+    u32* const ring = recurrence.spare();
+    expect(std::all_of(ring, ring + history + chunk + kCanary, [](u32 x) { return x == 0; }), "holonomic, spare zeros", n, 0);
+    for (std::size_t i = 0; i < kCanary; ++i) ring[history + chunk + i] = u32(i * 2654435761u);
+    std::vector<u32> got;
     for (std::size_t i = 0; i < n; i += chunk) {
         const std::size_t m = std::min(chunk, n - i);
-        recurrence.next(ring.data() + history, m);
-        got.insert(got.end(), ring.begin() + history, ring.begin() + history + m);
-        std::copy(ring.begin() + chunk, ring.end(), ring.begin());
+        recurrence.next(ring + history, m);
+        got.insert(got.end(), ring + history, ring + history + m);
+        std::copy(ring + chunk, ring + chunk + history, ring);
     }
     expect(got == want, "holonomic, ring", n, taps.size());
+    for (std::size_t i = 0; i < kCanary; ++i) expect(ring[history + chunk + i] == u32(i * 2654435761u), "holonomic, canary", n, i);
 }
 
 // count distinct distances from pool; constants and slopes random or P - 1, slopes zero if !slope.
@@ -1282,6 +1290,16 @@ void test_holonomic() {
         check_holonomic({{3, u32(pick(P)), u32(pick(P))}, {window - 16, u32(pick(P)), u32(pick(P))},
                          {2 * window + 5, u32(pick(P)), 0}}, 1, n);
     }
+    // The table of reciprocals is a ring from n = 2 kWindow on: n across the point where its reads
+    // wrap (2 ring), with short and mixed taps. The random state is restored after them, so the
+    // later tests keep their inputs.
+    const std::mt19937_64 saved = rng;
+    for (int round = 0; round < 6; ++round) {
+        const std::size_t n = 2 * window + 1 + pick(6 * window);
+        check_holonomic(random_holonomic_taps(range(1, 9), 1 + pick(8), round % 2, true), u32(pick(P)), n);
+        check_holonomic(random_holonomic_taps(range(1, 3 * window), 1 + pick(10), false, round % 3 != 0), u32(pick(P)), n);
+    }
+    rng = saved;
 }
 
 // a[k] = [x^(n-1)] g^k from the powers of g.

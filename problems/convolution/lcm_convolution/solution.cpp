@@ -1,10 +1,10 @@
 // c_k = sum over lcm(i, j) = k of a_i b_j mod 998244353, 1 <= k <= N <= 10^6.
 // Sums over divisors (zeta) of a and b, pointwise product, then the inverse (Moebius). Both are
 // products of commuting per-prime passes (zeta: x_ip += x_i, i ascending; Moebius: x_ip -= x_i,
-// i descending). Zeta: p = 3 in the interleave, p = 2 in the product sweep, all others in one
-// sweep, target segment by target segment, in L2, in three stages of multipliers m: made of
-// 5..13, of 17..97, and of primes above 100. Moebius: one pass per prime up to 13, then the
-// sweep with the last two stages.
+// i descending). Zeta: 3, 5 and 7 with the interleave, 2 in the product sweep, all others in one
+// sweep, target segment by target segment, in L2, in four stages of multipliers m: made of 11
+// and 13, of 17..47, of 53..293, and of primes above 300. Moebius: 2 in the product sweep, 3 and
+// 5 by passes, 7, 11 and 13 in one pass, then the sweep with the last three stages.
 // a and b are interleaved as pairs, so one load fetches both. Design and measurements: notes.md.
 #include <immintrin.h>
 
@@ -15,12 +15,12 @@
 #include <cstring>
 #include <iterator>
 
-#include "lib/io/bulk32.hpp"
 #include "lib/io/io.hpp"
 #include "lib/io/sequential.hpp"
 #include "lib/mem/huge.hpp"
 #include "lib/run/early.hpp"
 #include "../convolution_mod/fields.hpp"
+#include "chunk_read.hpp"
 
 namespace {
 
@@ -105,7 +105,7 @@ Half held(std::uint32_t x) {
     return v;
 }
 
-// One update of the sweeps: pairs (zeta, x += y) or dwords (Moebius, x -= y).
+// One update x op= y: on pairs (zeta) or dwords (Moebius), values below P.
 struct PairAdd {
     using T = std::uint64_t;
     Half neg_p = held(0 - kP);
@@ -115,6 +115,15 @@ struct PairAdd {
         store_pair(t, _mm_min_epu32(s, _mm_add_epi32(s, neg_p)));
     }
 };
+struct PairSub {
+    using T = std::uint64_t;
+    Half p = held(kP);
+    static Half load(const T* q) { return load_pair(q); }
+    void apply(T* t, Half v) const {
+        const Half d = _mm_sub_epi32(load_pair(t), v);
+        store_pair(t, _mm_min_epu32(d, _mm_add_epi32(d, p)));
+    }
+};
 struct WordSub {
     using T = std::uint32_t;
     Half p = held(kP);
@@ -122,6 +131,15 @@ struct WordSub {
     void apply(T* t, Half v) const {
         const Half d = _mm_sub_epi32(load(t), v);
         _mm_storeu_si32(t, _mm_min_epu32(d, _mm_add_epi32(d, p)));
+    }
+};
+struct WordAdd {
+    using T = std::uint32_t;
+    Half neg_p = held(0 - kP);
+    static Half load(const T* q) { return _mm_loadu_si32(q); }
+    void apply(T* t, Half v) const {
+        const Half s = _mm_add_epi32(load(t), v);
+        _mm_storeu_si32(t, _mm_min_epu32(s, _mm_add_epi32(s, neg_p)));
     }
 };
 
@@ -171,13 +189,32 @@ constexpr Wheel kRough;
 constexpr std::uint64_t reciprocal(std::uint32_t d) { return (std::uint64_t(1) << 42) / d + 1; }
 inline std::uint32_t divide(std::uint32_t x, std::uint64_t r) { return std::uint32_t(x * r >> 42); }
 
+// Primes in [lo, hi).
+template <std::uint32_t kLo, std::uint32_t kHi>
+struct PrimesIn {
+    std::uint32_t p[64];
+    std::size_t count;
+
+    constexpr PrimesIn() : p(), count() {
+        for (std::uint32_t x = std::max(kLo, 2u); x < kHi; ++x) {
+            bool prime = true;
+            for (std::uint32_t d = 2; d * d <= x; ++d) prime &= x % d != 0;
+            if (prime) p[count++] = x;
+        }
+    }
+    constexpr const std::uint32_t* begin() const { return p; }
+    constexpr const std::uint32_t* end() const { return p + count; }
+};
+
 // The sweep's stages; composing them yields every multiplier once. Stage 0 (zeta only): m > 1
-// with all prime factors in {5, 7, 11, 13}. Stage 1: m > 1 with all prime factors in [17, 100);
-// stage 2: m > 1 with all prime factors above 100. Rough m with prime factors on both sides of
-// 100 come from composing stages 1 and 2: 1.77 N contributions instead of 2.14 N.
-constexpr std::uint32_t kSmoothPrimes[] = {5, 7, 11, 13};
-constexpr std::uint32_t kStagePrimes[] = {17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97};
-constexpr std::uint32_t kStage1Min = 17, kStage2Min = 101;  // smallest multipliers
+// made of 11 and 13. Stage 1: m > 1 with all prime factors in [17, 50); stage 2: in [50, 300);
+// stage 3: above 300. Rough m with prime factors in several ranges come from composing stages:
+// 1.67 N contributions instead of 2.14 N (1.77 N with two stages, cut at 100).
+constexpr std::uint32_t kSmoothPrimes[] = {11, 13};
+constexpr std::uint32_t kCut1 = 50, kCut2 = 300;
+constexpr PrimesIn<17, kCut1> kStage1Primes;
+constexpr PrimesIn<kCut1, kCut2> kStage2Primes;
+constexpr std::uint32_t kStageMin[] = {11, 17, kStage2Primes.p[0], PrimesIn<kCut2, kCut2 + 100>().p[0]};  // smallest m
 
 // In a segment of targets, multipliers m <= kSplit go by m over a run of sources i; larger ones
 // by source i <= n / (kSplit + 1), over a run of m.
@@ -186,47 +223,55 @@ constexpr std::uint32_t kMaxN = 1000000;
 constexpr std::uint32_t kMaxSources = kMaxN / (kSplit + 1) + 1;
 constexpr std::uint32_t kEnd = 1 << 20;  // above kMaxN; kEnd i < 2^32 for i < 2^12
 
-// The stage of each rough m <= kMaxN, by wheel index: 1 (only primes below 100), 2 (none below
-// 100), 0 otherwise. Used only at compile time.
+// The stage of each rough m <= kMaxN, by wheel index: 1, 2 or 3, or 0 for m with prime factors
+// in several stages. Used only at compile time.
 struct Stages {
     static constexpr std::uint32_t kTotal = kRough.index(kMaxN + 1);
     std::uint8_t of[kTotal];
-    std::uint32_t small[3], large[3];  // counts per stage, m <= kSplit and m > kSplit
+    std::uint32_t small[4], large[4];  // counts per stage, m <= kSplit and m > kSplit
 
     constexpr Stages() : of(), small(), large() {
-        for (std::uint32_t t = 1; t < kTotal; ++t) of[t] = 2;
-        for (const std::uint32_t p : kStagePrimes)
+        for (std::uint32_t t = 1; t < kTotal; ++t) of[t] = 3;
+        for (const std::uint32_t p : PrimesIn<17, kCut2>())
             for (std::uint32_t t = 0; kRough.value(t) <= kMaxN / p; ++t) of[kRough.index(p * kRough.value(t))] = 0;
-        mark_smooth(1, 0);
+        mark_smooth(kStage1Primes, 1, 1, 0);
+        mark_smooth(kStage2Primes, 2, 1, 0);
         for (std::uint32_t t = 1; t < kTotal; ++t) ++(kRough.value(t) <= kSplit ? small : large)[of[t]];
     }
 
-    // of[m w] = 1 for each m w <= kMaxN with w > 1 made of kStagePrimes[k..].
-    constexpr void mark_smooth(std::uint32_t m, std::size_t k) {
-        for (; k < std::size(kStagePrimes) && kStagePrimes[k] <= kMaxN / m; ++k)
-            for (std::uint32_t w = m * kStagePrimes[k];; w *= kStagePrimes[k]) {
-                of[kRough.index(w)] = 1;
-                mark_smooth(w, k + 1);
-                if (w > kMaxN / kStagePrimes[k]) break;
+    // of[m w] = stage for each m w <= kMaxN with w > 1 made of primes[k..].
+    template <class Primes>
+    constexpr void mark_smooth(const Primes& primes, std::uint8_t stage, std::uint32_t m, std::size_t k) {
+        for (; k < primes.count && primes.p[k] <= kMaxN / m; ++k)
+            for (std::uint32_t w = m * primes.p[k];; w *= primes.p[k]) {
+                of[kRough.index(w)] = stage;
+                mark_smooth(primes, stage, w, k + 1);
+                if (w > kMaxN / primes.p[k]) break;
             }
     }
 };
 
 constexpr Stages kStages;
 
-// Stage 0's multipliers, ascending: 222 up to kMaxN.
+// Stage 0's multipliers, ascending: 20 up to kMaxN.
 struct Smooth {
-    std::uint32_t value[256];
+    std::uint32_t value[64];
     std::uint32_t count, small;  // all, and m <= kSplit
 
     constexpr Smooth() : value(), count(), small() {
-        for (std::uint32_t a = 1; a <= kMaxN; a *= kSmoothPrimes[0])
-            for (std::uint32_t b = a; b <= kMaxN; b *= kSmoothPrimes[1])
-                for (std::uint32_t c = b; c <= kMaxN; c *= kSmoothPrimes[2])
-                    for (std::uint32_t d = c; d <= kMaxN; d *= kSmoothPrimes[3])
-                        if (d > 1) value[count++] = d;
+        add(1, 0);
         std::sort(value, value + count);
         while (value[small] <= kSplit) ++small;
+    }
+
+    // Each m w <= kMaxN with w > 1 made of kSmoothPrimes[k..].
+    constexpr void add(std::uint32_t m, std::size_t k) {
+        for (; k < std::size(kSmoothPrimes) && kSmoothPrimes[k] <= kMaxN / m; ++k)
+            for (std::uint32_t w = m * kSmoothPrimes[k];; w *= kSmoothPrimes[k]) {
+                value[count++] = w;
+                add(w, k + 1);
+                if (w > kMaxN / kSmoothPrimes[k]) break;
+            }
     }
 };
 
@@ -267,7 +312,9 @@ constexpr Multipliers<kStage> kMultipliers;
 constexpr const Multipliers<0>& kStage0 = kMultipliers<0>;
 constexpr const Multipliers<1>& kStage1 = kMultipliers<1>;
 constexpr const Multipliers<2>& kStage2 = kMultipliers<2>;
-static_assert(kStage1.small[0] == kStage1Min && kStage2.small[0] == kStage2Min);
+constexpr const Multipliers<3>& kStage3 = kMultipliers<3>;
+static_assert(kStage0.small[0] == kStageMin[0] && kStage1.small[0] == kStageMin[1] && kStage2.small[0] == kStageMin[2] &&
+              kStage3.small[0] == kStageMin[3]);
 
 // Tiny multipliers m <= kTinyBound go over a segment in L1-sized pieces (32 KiB), the tiny ones of
 // all stages together, so one fetch of a target line from L2 serves all of them.
@@ -290,15 +337,17 @@ struct Sweep {
     }
 };
 
-// pairs[k] = (a_k, b_k R mod P) for first <= k < end, with the zeta pass of p = 3 (pairs[k] +=
-// pairs[k / 3] for k = 0 mod 3, ascending); b[k - first] = b_k. Called for consecutive ranges
-// from first = 1, each ending at a multiple of 24 but the last. a lies in the second half of
-// pairs, at word offset a - pairs: pair k overwrites only a values below k, which are read already.
-void interleave_zeta3(const AliasWord* a, const std::uint32_t* b, std::uint64_t* pairs, std::uint32_t first, std::uint32_t end) {
+static_assert(Sweep<3>::kTiny == 0);  // the sweeps' tiny loops take stages 0..2
+
+// pairs[k] = (a_k, b_k R mod P) + pairs[k / 3] (the term k / 3 for k = 0 mod 3) for first <= k <
+// end; b[k - base] = b_k. pairs[k / 3] must be final. a lies in the second half of pairs, at word
+// offset a - pairs: pair k overwrites only a values below k, which are read already.
+void interleave_zeta3(const AliasWord* a, const std::uint32_t* b, std::uint32_t base, std::uint64_t* pairs, std::uint32_t first,
+                      std::uint32_t end) {
     const Vec r2 = broadcast(kR2);
     // b_k R as Montgomery products of b_k and R^2: dwords [b R] in the high halves.
     auto scaled_pairs = [&](std::uint32_t k, Vec& low, Vec& high) {
-        const Vec va = load(a + k), vb = load(b + (k - first));
+        const Vec va = load(a + k), vb = load(b + (k - base));
         const Vec even = redc(_mm256_mul_epu32(vb, r2));
         const Vec odd = redc(_mm256_mul_epu32(_mm256_srli_epi64(vb, 32), r2));
         // even/odd: [_ bR] per qword (below 1.25 P). Reduce, then place above a.
@@ -309,13 +358,13 @@ void interleave_zeta3(const AliasWord* a, const std::uint32_t* b, std::uint64_t*
         high = _mm256_permute2x128_si256(lo, hi, 0x31);
     };
     auto one = [&](std::uint32_t k) {
-        const std::uint32_t br = std::uint32_t((std::uint64_t(b[k - first]) << 32) % kP);
+        const std::uint32_t br = std::uint32_t((std::uint64_t(b[k - base]) << 32) % kP);
         const std::uint64_t pair = a[k] | std::uint64_t(br) << 32;
         std::memcpy(pairs + k, &pair, sizeof pair);
         if (k % 3 == 0) add_pair(pairs + k, pairs + k / 3);
     };
     std::uint32_t k = first;
-    for (; k < 24 && k < end; ++k) one(k);
+    for (; (k < 24 || k % 24) && k < end; ++k) one(k);
     // 24 targets from 8 sources below them: multiples of 3 at offsets 0, 3 | 6 | 9 of each 12.
     for (; k + 24 <= end; k += 24) {
         Vec v[6];
@@ -330,6 +379,63 @@ void interleave_zeta3(const AliasWord* a, const std::uint32_t* b, std::uint64_t*
         }
     }
     for (; k < end; ++k) one(k);
+}
+
+// The squarefree d > 1 made of the primes given, but skip; odd marks those with an odd number of
+// prime factors (Moebius function -1). For a set S of primes, zeta_S x = y is y_k = x_k - sum of
+// mu(d) y_k/d (final sources), and Moebius_S y = y_k + sum of mu(d) y_k/d (old sources).
+template <std::size_t kPrimes>
+struct Squarefree {
+    static constexpr std::size_t kMax = (std::size_t(1) << kPrimes) - 1;
+    std::uint32_t d[kMax];
+    std::uint64_t reciprocal[kMax];
+    bool odd[kMax];
+    std::size_t count;
+
+    constexpr Squarefree(const std::uint32_t (&primes)[kPrimes], std::uint32_t skip) : d(), reciprocal(), odd(), count() {
+        for (std::size_t mask = 1; mask <= kMax; ++mask) {
+            std::uint32_t product = 1;
+            bool parity = false;
+            for (std::size_t j = 0; j < kPrimes; ++j)
+                if (mask >> j & 1) product *= primes[j], parity = !parity;
+            if (product == skip) continue;
+            d[count] = product;
+            reciprocal[count] = ::reciprocal(product);
+            odd[count++] = parity;
+        }
+    }
+};
+
+// x[k] op= x[k / d] for the terms d and the targets k in [first, end): Odd for odd d, else Even.
+// The sources must lie below first.
+template <class Odd, class Even, std::size_t kPrimes>
+void apply_terms(typename Odd::T* x, const Squarefree<kPrimes>& terms, std::uint32_t first, std::uint32_t end) {
+    const Odd odd;
+    const Even even;
+    for (std::size_t t = 0; t < terms.count; ++t) {
+        const std::uint32_t d = terms.d[t], lo = divide(first - 1, terms.reciprocal[t]) + 1, hi = divide(end - 1, terms.reciprocal[t]);
+        if (lo > hi) continue;
+        if (terms.odd[t]) strided(odd, x + std::size_t(lo) * d, d, x + lo, hi + 1 - lo);
+        else strided(even, x + std::size_t(lo) * d, d, x + lo, hi + 1 - lo);
+    }
+}
+
+// Zeta of 3, 5 and 7 with final sources: 3 by vectors in interleave_zeta3, the other terms after
+// it, per range of targets. 0.83 N updates against 0.68 N in passes, but the targets are in L1.
+constexpr std::uint32_t kInterleavePrimes[] = {3, 5, 7};
+constexpr Squarefree kInterleaveTerms(kInterleavePrimes, 3);
+
+// pairs[k] for first <= k < end as interleave_zeta3, with the zeta passes of 3, 5 and 7, in ranges
+// of targets [s, e) with e <= 3 s: their sources lie below them, final. Called for consecutive
+// ranges from first = 1.
+void interleave_zeta(const AliasWord* a, const std::uint32_t* b, std::uint32_t base, std::uint64_t* pairs, std::uint32_t first,
+                     std::uint32_t end) {
+    constexpr std::uint32_t kRange = 2016;  // pairs: 15.75 KiB, a multiple of 24
+    for (std::uint32_t s = first, e; s < end; s = e) {
+        e = std::min(end, s < kRange ? std::min(3 * s, kRange) : (s / kRange + 1) * kRange);
+        interleave_zeta3(a, b, base, pairs, s, e);
+        apply_terms<PairAdd, PairSub>(pairs, kInterleaveTerms, s, e);
+    }
 }
 
 // Zeta pass of p >= 5: pairs[i p] += pairs[i], i ascending.
@@ -381,24 +487,30 @@ void zeta_by_source(std::uint64_t* x, const std::uint64_t* source, const Multipl
     }
 }
 
-// The zeta passes of all primes but 2 and 3: stage 0, then 1, then 2. Stage 1 reads its sources
-// (up to n / 17) from prefix1, a copy with stage 0 applied; stage 2 (up to n / 101) from prefix2,
-// with stages 0 and 1. Target segments descend, so stage 0 sources (below the segment) are
-// unchanged when read. Segment 0: stage 0 in place, then stages 1 and 2. prefix: room for
-// n / 17 + n / 101 + 16 pairs.
+// Pairs for the prefix copies of the sweeps: stage s > 0 reads its sources, up to n / kStageMin[s],
+// from a copy.
+std::size_t prefix_pairs(std::uint32_t n) { return n / kStageMin[1] + n / kStageMin[2] + n / kStageMin[3] + 24; }
+
+// The zeta passes of all primes above 7, stage by stage. Stage s > 0 reads its sources from
+// prefix s, a copy with stages 0..s-1 applied. Target segments descend, so stage 0 sources (below
+// the segment) are unchanged when read. Segment 0: stage 0 in place, then stages 1..3.
 void zeta_sweep(std::uint64_t* pairs, std::uint32_t n, std::uint64_t* prefix) {
-    const std::uint32_t last1 = n / kStage1Min, last2 = n / kStage2Min;
+    const std::uint32_t last1 = n / kStageMin[1], last2 = n / kStageMin[2], last3 = n / kStageMin[3];
     std::uint64_t* const prefix1 = prefix;
-    std::uint64_t* const prefix2 = prefix + (last1 + 8) / 8 * 8;
+    std::uint64_t* const prefix2 = prefix1 + (last1 + 8) / 8 * 8;
+    std::uint64_t* const prefix3 = prefix2 + (last2 + 8) / 8 * 8;
     std::memcpy(prefix1, pairs, (last1 + 1) * sizeof(std::uint64_t));
     for (const std::uint32_t p : kSmoothPrimes) zeta_pass(prefix1, last1, p);
     std::memcpy(prefix2, prefix1, (last2 + 1) * sizeof(std::uint64_t));
     zeta_by_source(prefix2, prefix2, kStage1, last2);
+    std::memcpy(prefix3, prefix2, (last3 + 1) * sizeof(std::uint64_t));
+    zeta_by_source(prefix3, prefix3, kStage2, last3);
     constexpr std::uint32_t kSegment = 1 << 15;  // 256 KiB of pairs
     if (n >= kSegment) {
         static Sweep<0> zero{kStage0};
         static Sweep<1> one{kStage1};
         static Sweep<2> two{kStage2};
+        static Sweep<3> three{kStage3};
         auto init = [&](auto& s) {
             for (std::uint32_t k = 0; k < std::size(s.run); ++k) s.run[k] = n / s.m.small[k];
             for (std::uint32_t i = 1; i * (kSplit + 1) <= n; ++i) s.edge[i] = s.large_end(i, n);
@@ -406,6 +518,7 @@ void zeta_sweep(std::uint64_t* pairs, std::uint32_t n, std::uint64_t* prefix) {
         init(zero);
         init(one);
         init(two);
+        init(three);
         for (std::uint32_t start = n / kSegment * kSegment; start >= kSegment; start -= kSegment) {
             const std::uint32_t last = std::min(n, start + kSegment - 1);
             for (std::uint32_t bottom = start; bottom <= last; bottom += kZetaPiece) {  // ascending: faster
@@ -417,12 +530,14 @@ void zeta_sweep(std::uint64_t* pairs, std::uint32_t n, std::uint64_t* prefix) {
             zeta_segment(pairs, pairs, zero, start, last);
             zeta_segment(pairs, prefix1, one, start, last);
             zeta_segment(pairs, prefix2, two, start, last);
+            zeta_segment(pairs, prefix3, three, start, last);
         }
     }
     const std::uint32_t last0 = std::min(n, kSegment - 1);
     zeta_by_source(pairs, pairs, kStage0, last0);
     zeta_by_source(pairs, prefix1, kStage1, last0);
     zeta_by_source(pairs, prefix2, kStage2, last0);
+    zeta_by_source(pairs, prefix3, kStage3, last0);
 }
 
 // Zeta pass of p = 2 fused with the product and the Moebius pass of 2, ascending:
@@ -478,6 +593,21 @@ void moebius_pass(std::uint32_t* c, std::uint32_t n, std::uint32_t p) {
     if (count) op.apply(target, op.load(source));
 }
 
+// Moebius of 7, 11 and 13 in one pass with old sources: 0.34 N updates against 0.31 N in three
+// passes, but one walk over c instead of three.
+constexpr std::uint32_t kJointPrimes[] = {7, 11, 13};
+constexpr Squarefree kJointTerms(kJointPrimes, 0);
+
+// c_k += sum of mu(d) c_k/d over kJointTerms, in ranges of targets [s, e) descending with
+// e - 1 < 7 s: their sources lie below them, still old.
+void moebius_joint(std::uint32_t* c, std::uint32_t n) {
+    constexpr std::uint32_t kRange = 4096;  // dwords: 16 KiB
+    for (std::uint32_t e = n + 1, s; e > 1; e = s) {
+        s = std::max(e > kRange ? e - kRange : 1u, (e - 1) / kJointPrimes[0] + 1);
+        apply_terms<WordSub, WordAdd>(c, kJointTerms, s, e);
+    }
+}
+
 // Small multipliers k in [k0, k1) on the targets from their carried bound up to last.
 template <std::uint32_t kStage>
 void moebius_small(std::uint32_t* c, const std::uint32_t* source, Sweep<kStage>& s, std::uint32_t k0, std::uint32_t k1, std::uint32_t last) {
@@ -513,36 +643,46 @@ void moebius_by_source(std::uint32_t* x, const std::uint32_t* source, const Mult
     }
 }
 
-// The Moebius passes of all primes >= 17 (inverting stages 1 and 2 of zeta_sweep): stage 2, then
-// stage 1, each as c[i m] -= final c[i]. Stage 2's final values up to n / kStage2Min go to
-// `prefix` first. Segment 0: stage 2, then stage 1 in place; then target segments ascend, so
-// stage 1 sources (below the segment) are final when read.
+// The Moebius passes of all primes above 13 (inverting stages 1..3 of zeta_sweep): stage 3, then 2,
+// then 1, each as c[i m] -= final c[i]. Stage 3's final values up to n / kStageMin[3] go to
+// prefix 3 first, those of stages 3 and 2 up to n / kStageMin[2] to prefix 2. Segment 0: stages
+// 3 and 2, then stage 1 in place; then target segments ascend, so stage 1 sources (below the
+// segment) are final when read.
 void moebius_sweep(std::uint32_t* c, std::uint32_t n, std::uint32_t* prefix) {
-    const std::uint32_t prefix_last = n / kStage2Min;
-    std::memcpy(prefix, c, (prefix_last + 1) * sizeof(std::uint32_t));
-    moebius_by_source(prefix, prefix, kStage2, prefix_last);
+    const std::uint32_t last2 = n / kStageMin[2], last3 = n / kStageMin[3];
+    std::uint32_t* const prefix2 = prefix;
+    std::uint32_t* const prefix3 = prefix2 + (last2 + 16) / 16 * 16;
+    std::memcpy(prefix3, c, (last3 + 1) * sizeof(std::uint32_t));
+    moebius_by_source(prefix3, prefix3, kStage3, last3);
+    std::memcpy(prefix2, c, (last2 + 1) * sizeof(std::uint32_t));
+    moebius_by_source(prefix2, prefix3, kStage3, last2);
+    moebius_by_source(prefix2, prefix2, kStage2, last2);
     constexpr std::uint32_t kSegment = 1 << 15;  // 128 KiB: with its sources, within L2
     const std::uint32_t last0 = std::min(n, kSegment - 1);
-    moebius_by_source(c, prefix, kStage2, last0);
+    moebius_by_source(c, prefix3, kStage3, last0);
+    moebius_by_source(c, prefix2, kStage2, last0);
     moebius_by_source(c, c, kStage1, last0);
     if (n < kSegment) return;
     static Sweep<1> one{kStage1};
     static Sweep<2> two{kStage2};
+    static Sweep<3> three{kStage3};
     auto init = [&](auto& s) {
         for (std::uint32_t k = 0; k < std::size(s.run); ++k) s.run[k] = last0 / s.m.small[k] + 1;
         for (std::uint32_t i = 1; i * (kSplit + 1) <= n; ++i) s.edge[i] = s.large_end(i, last0);
     };
     init(one);
     init(two);
+    init(three);
     for (std::uint32_t start = kSegment; start <= n; start += kSegment) {
         const std::uint32_t last = std::min(n, start + kSegment - 1);
         for (std::uint32_t bottom = start; bottom <= last; bottom += kMoebiusPiece) {
             const std::uint32_t top = std::min(last, bottom + kMoebiusPiece - 1);
             moebius_small(c, c, one, 0, Sweep<1>::kTiny, top);
-            moebius_small(c, prefix, two, 0, Sweep<2>::kTiny, top);
+            moebius_small(c, prefix2, two, 0, Sweep<2>::kTiny, top);
         }
         moebius_segment(c, c, one, start, last);
-        moebius_segment(c, prefix, two, start, last);
+        moebius_segment(c, prefix2, two, start, last);
+        moebius_segment(c, prefix3, three, start, last);
     }
 }
 
@@ -551,31 +691,35 @@ void solve() {
     const auto n = in.read<std::uint32_t>();
     io::advise_sequential(in);
     // One region: the pairs (2 words each), with a parsed into their second half, later c; then
-    // scratch: chunks of b, later the sweeps' prefix copies, later the output text. b goes by
-    // chunks so that its pages need not be faulted in: 5 huge pages instead of 7.
-    constexpr std::uint32_t kChunk = 262080;  // b values, a multiple of 24
+    // scratch: chunks of b, later the sweeps' prefix copies, later the output text; then the
+    // parser's workspace. 5 huge pages.
     constexpr std::size_t kPad = 64;
     const std::size_t words = n + kPad;
     const std::size_t scratch_offset = (2 * words * sizeof(std::uint32_t) + 63) / 64 * 64;
-    const std::size_t prefix_bytes = (n / kStage1Min + n / kStage2Min + 16) * sizeof(std::uint64_t);
-    const std::size_t scratch_bytes = std::max({kChunk * sizeof(std::uint32_t), prefix_bytes, fields::kTextBytes});
-    char* const base = mem::huge<char>(scratch_offset + scratch_bytes);
+    const std::size_t scratch_bytes = std::max(
+        {chunks::Parser::kMaxChunkTokens * sizeof(std::uint32_t), prefix_pairs(n) * sizeof(std::uint64_t), fields::kTextBytes});
+    const std::size_t workspace_offset = (scratch_offset + scratch_bytes + 63) / 64 * 64;
+    char* const base = mem::huge<char>(workspace_offset + chunks::Parser::kWorkspaceBytes);
     auto* const region = reinterpret_cast<std::uint32_t*>(base);
     auto* const pairs = reinterpret_cast<std::uint64_t*>(region);
     std::uint32_t* const a = region + words;
     char* const scratch = base + scratch_offset;
-    io::read_bulk(in, a + 1, n);
-    auto* const b = reinterpret_cast<std::uint32_t*>(scratch);
-    for (std::uint32_t first = 1, end; first <= n; first = end) {
-        end = std::min(n + 1, (first / kChunk + 1) * kChunk);
-        io::read_bulk(in, b, end - first);
-        interleave_zeta3(a, b, pairs, first, end);
-    }
+    chunks::Parser parser(base + workspace_offset);
+    parser.read(in, a + 1, n, [](std::uint32_t* values, std::size_t count) { return values + count; });
+    // b chunk by chunk into the scratch, each interleaved while in L2.
+    std::uint32_t next = 1;
+    parser.read(in, reinterpret_cast<std::uint32_t*>(scratch), n, [&](std::uint32_t* b, std::size_t count) {
+        interleave_zeta(a, b, next, pairs, next, next + std::uint32_t(count));
+        next += std::uint32_t(count);
+        return b;
+    });
 
     zeta_sweep(pairs, n, reinterpret_cast<std::uint64_t*>(scratch));
     std::uint32_t* const c = region;
     zeta2_product_moebius2(pairs, c, n);
-    for (const std::uint32_t p : {3, 5, 7, 11, 13}) moebius_pass(c, n, p);
+    moebius_pass(c, n, 3);
+    moebius_pass(c, n, 5);
+    moebius_joint(c, n);
     moebius_sweep(c, n, reinterpret_cast<std::uint32_t*>(scratch));
 
     io::Writer out;

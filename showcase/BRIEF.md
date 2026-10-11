@@ -36,14 +36,15 @@ Work in your own copy of the worktree on `lc-amd` (other agents share the VM):
 
 ```
 W=/Users/aiyiyi/Documents/cpp_hpc/lc-opt/.claude/worktrees/ntt-library-problems-633247
-tar czf - --exclude=.git -C $W . | gcloud compute ssh lc-amd --zone=europe-west2-b --command 'rm -rf ~/ws/<problem> && mkdir -p ~/ws/<problem> && tar xzf - -C ~/ws/<problem>'
+COPYFILE_DISABLE=1 tar czf - --exclude=.git --exclude='._*' -C $W . | gcloud compute ssh lc-amd --zone=europe-west2-b --command 'rm -rf ~/ws/<problem> && mkdir -p ~/ws/<problem> && tar xzf - -C ~/ws/<problem>'
 gcloud compute ssh lc-amd --zone=europe-west2-b --command 'cd ~/ws/<problem> && python3 showcase/check.py showcase/<judge>/<problem>'
 ```
 
 `check.py` builds with the judge's compiler and flags, runs samples, stress-tests against
 brute.cpp, runs the Windows build under Wine for Codeforces, and times the max cases (under
-`flock /tmp/bench.lock`). Time `baseline.cpp` the same way (build it with the same docker image
-and flags, run under flock on the same max inputs). Also run solution.cpp once under
+`/tmp/bench.lock`, held for all runs). Time `baseline.cpp` the same way (build it with the same
+docker image and flags; take the lock once around all runs, e.g. `flock /tmp/bench.lock sh -c '...'`,
+so waiting for the lock is not timed). Also run solution.cpp once under
 `-fsanitize=address,undefined` on small cases.
 
 Judges: AtCoder GCC 15.2 Linux with -march=native; Codeforces GCC 14.2 on Windows, -O2, no

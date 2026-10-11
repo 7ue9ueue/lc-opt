@@ -100,7 +100,7 @@ def main() -> int:
     print(f'built main.cpp with {image} {flags}')
 
     if 'samples' in steps:
-        for inp in sorted((problem / 'samples').glob('*.in')):
+        for inp in sorted((problem / 'samples').glob('[!.]*.in')):
             out, _ = execute([str(main_bin)], inp)
             ok = same(problem, inp, out, inp.with_suffix('.out').read_text())
             print(f'sample {inp.name}: {"OK" if ok else "WRONG"}')
@@ -113,7 +113,7 @@ def main() -> int:
                  '-o', str(exe)], capture_output=True, text=True)
         if r.returncode:
             sys.exit(f'mingw build failed\n{r.stderr[-4000:]}')
-        for inp in sorted((problem / 'samples').glob('*.in')):
+        for inp in sorted((problem / 'samples').glob('[!.]*.in')):
             out, _ = execute([WINE, str(exe)], inp)
             ok = same(problem, inp, out, inp.with_suffix('.out').read_text())
             print(f'windows sample {inp.name}: {"OK" if ok else "WRONG"}')

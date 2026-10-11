@@ -1,7 +1,7 @@
 // Power series modulo 998244353 on std::vector: a small API over lib/poly for contest code.
 // x86-64 with AVX2; Linux, macOS, or Windows when bundled by showcase/bundle.py.
 //
-//   #include "lib/easy/poly.hpp"  // first, before other headers (it enables AVX2)
+//   #include "lib/easy/poly.hpp"  // enables AVX2 for the code after it
 //   easy::Poly c = easy::multiply(a, b);       // a * b, all n + m - 1 coefficients
 //   easy::Poly g = easy::inverse(f, n);        // 1 / f mod x^n, f[0] != 0
 //   easy::Poly e = easy::exp(f, n);            // f[0] == 0
@@ -15,16 +15,28 @@
 // products of similar sizes fault in no new memory; the other calls map their own memory and
 // return it.
 #pragma once
-#pragma GCC target("avx2,bmi,bmi2,lzcnt,popcnt")
 
+// Every standard header lib/poly uses comes before the target pragma: GCC 13 and 14 fail to
+// inline std::allocator's members into code compiled under it otherwise.
 #include <algorithm>
+#include <array>
 #include <bit>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
+#include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
+
+#pragma GCC target("avx2,bmi,bmi2,lzcnt,popcnt")
 
 #include "lib/poly/evaluation.hpp"
 #include "lib/poly/exp.hpp"

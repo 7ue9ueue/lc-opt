@@ -56,6 +56,6 @@ O(r log^2 r), size 2^20. Then the row recurrence, two rows kept, queries answere
 ## Judge caveats
 
 - 2026-10-11: the user submitted main.cpp (with __asm__: Luogu compiles with -fno-asm) and got
-  about 750 ms of 800 ms (user report; submission ID not recorded). Luogu is about 1.4x slower
+  about 750 ms of 800 ms (user report). Luogu is about 1.4x slower
   than lc-bench on this code. Needs C++20. No -march on Luogu: the target pragma in lib/easy gives AVX2.
 - 66% of the TL on lc-bench; the judge's CPU may be slower (the brief asks for 2x margin).

@@ -155,7 +155,7 @@ inline constexpr std::uint32_t kP = 998244353, k2P = 2 * kP, kNI = 998244351;  /
 inline void forward(Vec* a, std::size_t h, const std::uint32_t* x, const std::uint32_t* y) {
     alignas(32) Vec w[3];  // twiddle values x, y, z; their quotients stay in ymm11-13
     Vec* const end = a + h;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vbroadcastss (%[x]), %%ymm0\n\t"
@@ -295,7 +295,7 @@ inline void forward(Vec* a, std::size_t h, const std::uint32_t* x, const std::ui
 inline void forward_pair(Vec* a, Vec* b, std::size_t h, const std::uint32_t* x, const std::uint32_t* y) {
     alignas(32) Vec w[3];  // twiddle values x, y, z; their quotients stay in ymm11-13
     Vec* const end = a + h;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vbroadcastss (%[x]), %%ymm0\n\t"
@@ -436,7 +436,7 @@ inline void forward_pair(Vec* a, Vec* b, std::size_t h, const std::uint32_t* x, 
 inline void inverse(Vec* a, std::size_t h, const std::uint32_t* x, const std::uint32_t* y) {
     alignas(32) Vec w[3];  // twiddle values x, y, z; their quotients stay in ymm11-13
     Vec* const end = a + h;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vbroadcastss (%[x]), %%ymm0\n\t"
@@ -577,7 +577,7 @@ inline void inverse(Vec* a, std::size_t h, const std::uint32_t* x, const std::ui
 // forward() for group 0 (x = y = 1); z = y[1]: pass the table start. h even.
 inline void forward_identity(Vec* a, std::size_t h, const std::uint32_t* y) {
     Vec* const end = a + h;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vbroadcastss 4(%[y]), %%ymm12\n\t"
@@ -677,7 +677,7 @@ inline void forward_identity(Vec* a, std::size_t h, const std::uint32_t* y) {
 // inverse() for group 0; z = y[1]: pass the inverse table start. h even.
 inline void inverse_identity(Vec* a, std::size_t h, const std::uint32_t* y) {
     Vec* const end = a + h;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vbroadcastss 4(%[y]), %%ymm12\n\t"
@@ -770,7 +770,7 @@ inline void inverse_identity(Vec* a, std::size_t h, const std::uint32_t* y) {
 // and s (a[j] - a[j + h]); s = y[1], its quotient y[9]. h even.
 inline void scale_radix2(Vec* a, std::size_t h, const std::uint32_t* y) {
     Vec* const end = a + h;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vbroadcastss 4(%[y]), %%ymm12\n\t"
@@ -843,7 +843,7 @@ inline void scale_radix2(Vec* a, std::size_t h, const std::uint32_t* y) {
 
 // Forward half of the bottom stage for the batch at a, b; fills buf.
 inline void bottom_first(const void* a, const void* b, void* buf, const void* x, const void* y, const void* w) {
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vpbroadcastd %[NI], %%ymm13\n\t"
@@ -1077,7 +1077,7 @@ inline void bottom_first(const void* a, const void* b, void* buf, const void* x,
 
 // Leaf products from cur and the inverse butterfly; writes the batch at out.
 inline void bottom_last(void* out, const void* cur, const void* ix, const void* iy) {
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vpbroadcastd %[NI], %%ymm13\n\t"
@@ -1417,7 +1417,7 @@ inline void bottom_last(void* out, const void* cur, const void* ix, const void* 
 
 // last() for the current batch interleaved with first() for the next.
 inline void bottom_both(const void* a, const void* b, void* buf, const void* x, const void* y, const void* w, void* out, const void* cur, const void* ix, const void* iy) {
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vpbroadcastd %[NI], %%ymm13\n\t"
@@ -2434,7 +2434,7 @@ inline constexpr std::uint32_t kP = 998244353, k2P = 2 * kP;
 [[gnu::noinline]] inline void forward_h4(Vec* a, std::size_t count, const std::uint32_t* table, std::size_t k) {
     Vec* const end = a + 16 * count;
     const std::uint32_t *tx, *ty;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         ".p2align 5\n\t"
@@ -2687,7 +2687,7 @@ inline constexpr std::uint32_t kP = 998244353, k2P = 2 * kP;
 [[gnu::noinline]] inline void inverse_h4(Vec* a, std::size_t count, const std::uint32_t* table, std::size_t k) {
     Vec* const end = a + 16 * count;
     const std::uint32_t *tx, *ty;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         ".p2align 5\n\t"
@@ -2951,7 +2951,7 @@ inline constexpr std::uint32_t kP = 998244353, k2P = 2 * kP;
 // canonical outputs: the leaves. count and k multiples of 8; x, y: slots k and 2k of the table.
 [[gnu::noinline]] inline void forward_bottom(Vec* a, std::size_t count, const std::uint32_t* x, const std::uint32_t* y) {
     Vec* const end = a + 4 * count;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         ".p2align 5\n\t"
@@ -3586,7 +3586,7 @@ inline constexpr std::uint32_t kP = 998244353, k2P = 2 * kP;
 // count and k multiples of 8; x, y: slots k and 2k of the inverse table. from may be a.
 [[gnu::noinline]] inline void inverse_bottom(Vec* a, std::size_t count, const std::uint32_t* x, const std::uint32_t* y, const Vec* from) {
     Vec* const end = a + 4 * count;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         ".p2align 5\n\t"
@@ -4121,7 +4121,7 @@ inline constexpr std::uint32_t kP = 998244353, k2P = 2 * kP;
     alignas(32) Vec w[3];  // twiddle values x, y, z; their quotients stay in ymm11-13
     Vec* const end = a + h;
     Vec* stop;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vbroadcastss (%[x]), %%ymm0\n\t"
@@ -4268,7 +4268,7 @@ inline constexpr std::uint32_t kP = 998244353, k2P = 2 * kP;
 [[gnu::noinline]] inline void forward_even_columns(Vec* a, std::size_t h, const std::uint32_t* x, const std::uint32_t* y) {
     alignas(32) Vec w[3];  // twiddle values x, y, z; their quotients stay in ymm11-13
     Vec* const end = a + h;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vbroadcastss (%[x]), %%ymm0\n\t"
@@ -4412,7 +4412,7 @@ inline constexpr std::uint32_t kP = 998244353, k2P = 2 * kP;
     alignas(32) Vec w[3];  // twiddle values x, y, z; their quotients stay in ymm11-13
     Vec* const end = a + h;
     Vec* stop;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vbroadcastss (%[x]), %%ymm0\n\t"
@@ -4561,7 +4561,7 @@ inline constexpr std::uint32_t kP = 998244353, k2P = 2 * kP;
 [[gnu::noinline]] inline void inverse_even_columns(Vec* a, std::size_t h, const std::uint32_t* x, const std::uint32_t* y) {
     alignas(32) Vec w[3];  // twiddle values x, y, z; their quotients stay in ymm11-13
     Vec* const end = a + h;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vbroadcastss (%[x]), %%ymm0\n\t"
@@ -4708,7 +4708,7 @@ inline constexpr std::uint32_t kP = 998244353, k2P = 2 * kP;
     alignas(32) Vec w[3];  // twiddle values of entries 1, 2, 3; their quotients stay in ymm11-13
     Vec* b = a + 4 * q;
     Vec* const end = a + q;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vbroadcastss 4(%[t]), %%ymm0\n\t"
@@ -4900,7 +4900,7 @@ inline constexpr std::uint32_t kP = 998244353, k2P = 2 * kP;
     alignas(32) Vec w[3];  // twiddle values of entries 1, 2, 3; their quotients stay in ymm11-13
     Vec* b = a + 4 * q;
     Vec* const end = a + q;
-    asm volatile(
+    __asm__ volatile(
         "vpbroadcastd %[P], %%ymm15\n\t"
         "vpbroadcastd %[P2], %%ymm14\n\t"
         "vbroadcastss 4(%[t]), %%ymm0\n\t"
@@ -5271,7 +5271,7 @@ inline void fill_window(Window& window, Vec a, const Factor& w) {
 [[gnu::always_inline]] inline Vec leaf_product(const Window& window, const std::uint32_t* b) {
     const Vec ni = broadcast(ntt::kernels::kNI), p = broadcast(kP), p2 = broadcast(2 * kP);
     Vec even, odd, bi, t0, t1, t2, t3;
-    asm("vpbroadcastd (%[b]), %[bi]\n\t"
+    __asm__("vpbroadcastd (%[b]), %[bi]\n\t"
         "vpmuludq 36(%[w]), %[bi], %[odd]\n\t"
         "vpmuludq 32(%[w]), %[bi], %[even]\n\t"
         "vpbroadcastd 4(%[b]), %[bi]\n\t"

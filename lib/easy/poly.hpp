@@ -10,6 +10,7 @@
 //   easy::Poly p = easy::pow(f, k, n);         // f^k mod x^n, any f, k < 2^64
 //   std::vector<std::uint32_t> v = easy::evaluate(f, points);
 //   easy::Poly c = easy::interpolate(points, values);  // distinct points
+//   easy::mul(a, b), easy::power(a, e)          // scalars mod P
 //
 // Coefficients are canonical (< 998244353) in and out. An empty f stands for 0. multiply keeps
 // one workspace of transform buffers for the largest product so far (never shrunk), so repeated
@@ -54,8 +55,7 @@ inline constexpr std::uint32_t kMod = poly::kModulus;
 using Poly = std::vector<std::uint32_t>;
 using Span = std::span<const std::uint32_t>;
 
-namespace detail {
-
+// a b mod P and a^e mod P, for canonical a, b.
 constexpr std::uint32_t mul(std::uint32_t a, std::uint32_t b) { return std::uint32_t(std::uint64_t(a) * b % kMod); }
 
 constexpr std::uint32_t power(std::uint32_t a, std::uint64_t e) {
@@ -64,6 +64,8 @@ constexpr std::uint32_t power(std::uint32_t a, std::uint64_t e) {
         if (e & 1) r = mul(r, a);
     return r;
 }
+
+namespace detail {
 
 // Schoolbook product, for a short factor. Sums of 16 products < 16 P^2 < 2^64.
 inline Poly multiply_naive(Span a, Span b) {
@@ -180,7 +182,7 @@ inline Poly pow(Span f, std::uint64_t k, std::size_t n) {
                       poly::power_scratch(size));
     const poly::Transform t(arena, poly::power_log(size));
     const auto u = detail::copy(arena, f.subspan(z), size);
-    const std::uint32_t c = detail::power(u[0], k % (kMod - 1));
+    const std::uint32_t c = power(u[0], k % (kMod - 1));
     poly::power(t, u, std::uint32_t(k % kMod), c, u, arena.take(poly::power_scratch(size)));
     std::copy(u.begin(), u.end(), g.begin() + std::ptrdiff_t(shift));
     return g;

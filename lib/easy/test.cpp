@@ -1,6 +1,6 @@
 // Tests for lib/easy against O(n^2) references: products (and squares) against schoolbook
 // multiplication; inverse, exp, log and pow against their defining identities and recurrences;
-// evaluation against Horner's rule, interpolation by evaluating its result. io.hpp: compiles.
+// cyclic products against reduced schoolbook products; evaluation against Horner's rule, interpolation by evaluating its result. io.hpp: compiles.
 #include <cstdio>
 #include <random>
 #include <vector>
@@ -106,6 +106,19 @@ void test_series() {
     }
 }
 
+void test_cyclic() {
+    for (std::size_t len : {64, 128, 1024, 4096, 64}) {
+        const Poly b = random_poly(len - len / 3);
+        const easy::Cyclic t(b, len);
+        for (std::size_t n : {std::size_t(1), len / 2, len}) {
+            const Poly a = random_poly(n), full = naive(a, b);
+            Poly expected(len);
+            for (std::size_t i = 0; i < full.size(); ++i) expected[i % len] = add(expected[i % len], full[i]);
+            check(t.multiply(a) == expected, "cyclic", len * 10000 + n);
+        }
+    }
+}
+
 void test_points() {
     for (std::size_t n : {1, 7, 100, 3000}) {
         for (std::size_t m : {1, 9, 100, 2500}) {
@@ -127,6 +140,7 @@ void test_points() {
 int main() {
     test_multiply();
     test_series();
+    test_cyclic();
     test_points();
     std::printf(failures ? "%d failures\n" : "lib/easy: all tests passed\n", failures);
     return failures != 0;

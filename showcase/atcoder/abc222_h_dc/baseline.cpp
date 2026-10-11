@@ -1,6 +1,6 @@
 // Baseline for ABC222 H: the same divide and conquer as solution.cpp (two online squares, one
-// product per node and series, O(N log^2 N)), with a textbook NTT (iterative radix-2, bit
-// reversal, % P) for the products.
+// product per node and series, O(N log^2 N), middle products with the prefix transformed once per
+// level), with a textbook NTT (iterative radix-2, bit reversal, % P) for the products.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -73,7 +73,18 @@ Poly multiply(std::span<const std::uint32_t> x, std::span<const std::uint32_t> y
 
 std::vector<std::uint32_t> f[2];  // f[0] = A, f[1] = D
 std::vector<std::uint32_t> g[2];  // g[0] = S = A^2, g[1] = T = D^2 (partial sums until final)
+Poly prefix[2][64];  // [s][log2 L]: the transform of f[s][0, L), length L
 std::size_t n_max;
+
+// a b mod (x^len - 1) for bt the transform of b of length len = bt.size().
+Poly cyclic(std::span<const std::uint32_t> a, const Poly& bt) {
+    Poly x(a.begin(), a.end());
+    x.resize(bt.size());
+    ntt(x, false);
+    for (std::size_t i = 0; i < x.size(); ++i) x[i] = std::uint32_t(std::uint64_t(x[i]) * bt[i] % kP);
+    ntt(x, true);
+    return x;
+}
 
 // sum over i in [lo, n] of h_i h_(n-i), mod P.
 std::uint32_t own_terms(const std::vector<std::uint32_t>& h, std::size_t lo, std::size_t n) {
@@ -102,9 +113,16 @@ void solve(std::size_t l, std::size_t r) {
     const std::size_t end = std::min(r, n_max);
     for (int s = 0; s < 2; ++s) {
         const std::span<const std::uint32_t> left(f[s].data() + l, m - l);
-        // l = 0: pairs inside [0, m). l > 0: pairs (i, n - i) with i in [l, m), n - i < r - l, twice.
-        const Poly p = l == 0 ? multiply(left, left)
-                              : multiply(left, std::span<const std::uint32_t>(f[s].data(), r - l));
+        // l = 0: pairs inside [0, m). l > 0: pairs (i, n - i) with i in [l, m), n - i < r - l, twice,
+        // from a cyclic product of length r - l (the wrap lands below the outputs used).
+        Poly p;
+        if (l == 0) {
+            p = multiply(left, left);
+        } else {
+            Poly& t = prefix[s][__builtin_ctzll(r - l)];
+            if (t.empty()) t.assign(f[s].begin(), f[s].begin() + std::ptrdiff_t(r - l)), ntt(t, false);
+            p = cyclic(left, t);
+        }
         for (std::size_t n = m; n < end; ++n) {
             const std::uint64_t term = l == 0 ? (n < p.size() ? p[n] : 0) : 2 * std::uint64_t(p[n - l]);
             g[s][n] = std::uint32_t((g[s][n] + term) % kP);

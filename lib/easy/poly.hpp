@@ -10,12 +10,14 @@
 //   easy::Poly p = easy::pow(f, k, n);         // f^k mod x^n, any f, k < 2^64
 //   std::vector<std::uint32_t> v = easy::evaluate(f, points);
 //   easy::Poly c = easy::interpolate(points, values);  // distinct points
+//   const easy::Cyclic t(b, len);              // b transformed once, len a power of two >= 64
+//   easy::Poly p = t.multiply(a);              // a b mod (x^len - 1): len coefficients
 //   easy::mul(a, b), easy::power(a, e)          // scalars mod P
 //
 // Coefficients are canonical (< 998244353) in and out. An empty f stands for 0. multiply comes
-// from lib/easy/multiply.hpp. inverse, exp, log and pow each keep their memory for the largest
-// call so far (never freed), so repeated calls fault in no new pages; evaluate and interpolate
-// map their own and return it.
+// from lib/easy/multiply.hpp. inverse, exp, log, pow and Cyclic::multiply each keep their memory
+// for the largest call so far (never freed), so repeated calls fault in no new pages; evaluate
+// and interpolate map their own and return it.
 #pragma once
 
 #include "lib/easy/multiply.hpp"
@@ -76,7 +78,44 @@ private:
     std::optional<poly::Transform> transform_;
 };
 
+// Tables and a work span for cyclic products of length len, a power of two >= 64.
+inline Cache<1>::Lease cyclic_lease(std::size_t len) {
+    static Cache<1> cache;
+    if (!std::has_single_bit(len) || len < 64) std::abort();
+    return cache.get(std::countr_zero(len), {len}, false);
+}
+
 }  // namespace detail
+
+// A factor b transformed once, for many cyclic products a b mod (x^len - 1): middle products and
+// online (divide and conquer) convolutions. Each product is one pass over a: its forward
+// transform, the pointwise product and the inverse.
+class Cyclic {
+public:
+    // b.size() <= len; len a power of two >= 64.
+    Cyclic(Span b, std::size_t len)
+        : arena_(std::make_unique<poly::Arena>(poly::Arena::footprint(len))), b_(arena_->take(len)) {
+        if (b.size() > len) std::abort();
+        std::copy(b.begin(), b.end(), b_.begin());
+        detail::cyclic_lease(len).t.forward(b_);
+    }
+
+    std::size_t size() const { return b_.size(); }
+
+    // a b mod (x^len - 1), len coefficients; a.size() <= len.
+    Poly multiply(Span a) const {
+        if (a.size() > b_.size()) std::abort();
+        const auto [t, spans] = detail::cyclic_lease(b_.size());
+        const auto x = spans[0];
+        std::fill(std::copy(a.begin(), a.end(), x.begin()), x.end(), 0);
+        t.cyclic_product(x, b_);
+        return Poly(x.begin(), x.end());
+    }
+
+private:
+    std::unique_ptr<poly::Arena> arena_;
+    std::span<std::uint32_t> b_;  // the transform of b
+};
 
 inline Poly inverse(Span f, std::size_t n) {
     if (n == 0) return {};

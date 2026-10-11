@@ -3,6 +3,10 @@
 // coefficients come online, so S and T are two online self-convolutions, done by the usual
 // divide and conquer (CDQ) with one product per node and series: O(N log^2 N). The editorial's
 // solution is O(N); it says even the O(N log N) power series route misses the time limit.
+// Two standard tricks for the products of a node [l, r) with l > 0, L = r - l: only indices
+// [L/2, L) of f[l, m) f[0, L) are needed, and the wrap of a cyclic product of length L lands
+// below L/2 (middle product); and f[0, L) is the same factor for every node of length L, so it is
+// transformed once per level (easy::Cyclic).
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -10,7 +14,9 @@
 #include <span>
 #include <vector>
 
-#include "lib/easy/multiply.hpp"
+#include <optional>
+
+#include "lib/easy/poly.hpp"
 
 namespace {
 
@@ -19,6 +25,7 @@ constexpr std::size_t kLeaf = 32;
 
 std::vector<std::uint32_t> f[2];  // f[0] = A, f[1] = D
 std::vector<std::uint32_t> g[2];  // g[0] = S = A^2, g[1] = T = D^2 (partial sums until final)
+std::optional<easy::Cyclic> prefix[2][64];  // [s][log2 L]: f[s][0, L) transformed for length L
 std::size_t n_max;
 
 // sum over i in [lo, n] of h_i h_(n-i), mod P.
@@ -48,9 +55,16 @@ void solve(std::size_t l, std::size_t r) {
     const std::size_t end = std::min(r, n_max);
     for (int s = 0; s < 2; ++s) {
         const std::span<const std::uint32_t> left(f[s].data() + l, m - l);
-        // l = 0: pairs inside [0, m). l > 0: pairs (i, n - i) with i in [l, m), n - i < r - l, twice.
-        const easy::Poly p = l == 0 ? easy::multiply(left, left)
-                                    : easy::multiply(left, std::span<const std::uint32_t>(f[s].data(), r - l));
+        // l = 0: pairs inside [0, m). l > 0: pairs (i, n - i) with i in [l, m), n - i < r - l, twice;
+        // f[s][0, r - l) is final since r - l <= l.
+        easy::Poly p;
+        if (l == 0) {
+            p = easy::multiply(left, left);
+        } else {
+            std::optional<easy::Cyclic>& t = prefix[s][std::countr_zero(r - l)];
+            if (!t) t.emplace(std::span<const std::uint32_t>(f[s].data(), r - l), r - l);
+            p = t->multiply(left);
+        }
         for (std::size_t n = m; n < end; ++n) {
             const std::uint64_t term = l == 0 ? (n < p.size() ? p[n] : 0) : 2 * std::uint64_t(p[n - l]);
             g[s][n] = std::uint32_t((g[s][n] + term) % kP);

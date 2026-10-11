@@ -114,6 +114,14 @@ loading libstdc++, exit).
     and ASan/UBSan, with new cases: the coefficient ring in the spare words with a canary after
     it, and n across the ring table's wrap; ASan/UBSan on all 45 official cases, file and pipe
     input.
+  - Merged as #361. CI: sqrt 0.9832 (EPYC 9V45 0.9944, 9V74 0.9838, 7763 0.9716), pow 0.9868,
+    exp 0.9887, log 1.0034 (identical executable); all 4 0.9905. Submitted:
+    [409738](https://judge.yosupo.jp/submission/409738) AC 10 ms, 12.0 MiB (was 14.0): random_06
+    10 and max_random_07 9 (spikes; peers 0), small_dense_08 8, 00, 05, 06 7; `tools/spikes.py`
+    clean 8. Resubmitted [409739](https://judge.yosupo.jp/submission/409739) AC 10 ms: four
+    spikes (example_01, small_N_01, small_N_05, min_K_00 at 9-10, peers 0-1), small_dense_00, 08
+    6 ms, 05, 06 7; clean 7. Over the six runs so far each small_dense case reads 6-8 ms for every
+    version: the 0.2-0.3 ms gained per case is below the judge's whole-millisecond noise.
 - Next: 1.84 ms above the floor on `lc-bench`, nearly all the solve. In the block kernel
   (w = 3, 4, 5) the triangle G = F H costs 0.61-0.69 ms: the two 8 x 8 triangles could share
   vectors (broadcasts H[s] | H[8 + s]) with the middle 8 x 8 block apart, 38 `vpmuludq` instead

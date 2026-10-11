@@ -77,6 +77,7 @@ Checked on the judge with `tools/isa_probe.cpp` (aplusb, [409083](https://judge.
 | GCP `lc-amd` (c2d-standard-4, europe-west2-b, EPYC 7B13, the judge's CPU) | Builds and tests. Same CPU and setup as `lc-bench`. No hardware counters. |
 | GCP `lc-bench` (c2d-standard-4, europe-west2-b, EPYC 7B13, the judge's CPU) | Timing only, so builds and tests elsewhere do not disturb it. No hardware counters. |
 | GCP `lc-k68` (c2d-standard-4, europe-west2-b, EPYC 7B13, Linux 6.8) | Judge-like kernel: timing of programs heavy in page faults, huge pages or tmpfs output. On convolution_mod_large it is within 2 ms of judged times for 409343 and 4-6 ms below them for 409657, where `lc-amd` (Linux 7.0) is 4-14% below. |
+| GCP `lc-intel2` (c4-standard-4, europe-west2-c, Xeon 8581C) | Created for fps (`../hpc_library`): its AVX-512 builds and tests, so they stay off `lc-intel`. No PMU. |
 | GitHub Actions (EPYC 7763 Zen 3, plus other CPUs) | Timing. Confirm wins on the judge's core without losses elsewhere. |
 
 - VMs are in project `project-c73e6eb1-e167-4d7a-a31`, region `europe-west2` (London). Reach them with

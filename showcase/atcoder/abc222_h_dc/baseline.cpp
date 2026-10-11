@@ -86,12 +86,18 @@ Poly cyclic(std::span<const std::uint32_t> a, const Poly& bt) {
     return x;
 }
 
-// sum over i in [lo, n] of h_i h_(n-i), mod P.
+// sum over i in [lo, n] of h_i h_(n-i), mod P. 16 products < 16 P^2 < 2^64 between reductions.
 std::uint32_t own_terms(const std::vector<std::uint32_t>& h, std::size_t lo, std::size_t n) {
     std::uint64_t sum = 0;
-    for (std::size_t i = lo; i <= n; ++i) sum = (sum + std::uint64_t(h[i]) * h[n - i]) % kP;
-    return std::uint32_t(sum);
+    for (std::size_t i = lo; i <= n; ++i) {
+        sum += std::uint64_t(h[i]) * h[n - i];
+        if ((i - lo) % 16 == 15) sum %= kP;
+    }
+    return std::uint32_t(sum % kP);
 }
+
+// a + b mod P for a, b < P.
+std::uint32_t add(std::uint32_t a, std::uint32_t b) { return a + b >= kP ? a + b - kP : a + b; }
 
 // On entry g[s][n] for n in [l, r) holds every pair (i, n - i) with both i, n - i < l. A range with
 // l > 0 is aligned, so r - l <= l: its pairs with i >= l have n - i < r - l, already known.
@@ -123,9 +129,10 @@ void solve(std::size_t l, std::size_t r) {
             if (t.empty()) t.assign(f[s].begin(), f[s].begin() + std::ptrdiff_t(r - l)), ntt(t, false);
             p = cyclic(left, t);
         }
-        for (std::size_t n = m; n < end; ++n) {
-            const std::uint64_t term = l == 0 ? (n < p.size() ? p[n] : 0) : 2 * std::uint64_t(p[n - l]);
-            g[s][n] = std::uint32_t((g[s][n] + term) % kP);
+        if (l == 0) {
+            for (std::size_t n = m; n < std::min(end, p.size()); ++n) g[s][n] = add(g[s][n], p[n]);
+        } else {
+            for (std::size_t n = m; n < end; ++n) g[s][n] = add(g[s][n], add(p[n - l], p[n - l]));
         }
     }
     solve(m, r);

@@ -13,10 +13,11 @@ DIR is showcase/<judge>/<problem> with
 
 Steps: build main.cpp with the judge's compiler and flags (JUDGES below), and on Codeforces also
 with mingw-w64 run under Wine; samples; N small random cases against brute.cpp; then the max cases,
-each run R times, median and max wall time (under flock /tmp/bench.lock). Binaries and generated
+each run R times, median and max wall time (all runs under one hold of /tmp/bench.lock). Binaries and generated
 inputs go to /tmp/showcase/<problem>.
 """
 import argparse
+import fcntl
 import shutil
 import statistics
 import subprocess
@@ -134,12 +135,11 @@ def main() -> int:
     if 'time' in steps:
         cases = int(run([sys.executable, str(problem / 'gen.py'), '--max-cases'], capture_output=True,
                         text=True, check=True).stdout)
-        for seed in range(cases):
-            inp = generate(problem, seed, 'max', work / f'max{seed}.in')
-            times = []
-            for _ in range(args.rounds):
-                _, t = execute(['flock', '/tmp/bench.lock', str(main_bin)], inp)
-                times.append(t * 1000)
+        inputs = [generate(problem, seed, 'max', work / f'max{seed}.in') for seed in range(cases)]
+        with open('/tmp/bench.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)  # held for all runs: no waiting inside a measurement
+            results = [[execute([str(main_bin)], inp)[1] * 1000 for _ in range(args.rounds)] for inp in inputs]
+        for seed, (inp, times) in enumerate(zip(inputs, results)):
             print(f'max case {seed}: median {statistics.median(times):.0f} ms, max {max(times):.0f} ms '
                   f'({args.rounds} runs, {inp.stat().st_size} bytes in)')
     return 0

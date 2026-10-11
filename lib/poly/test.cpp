@@ -859,6 +859,24 @@ void check_sqrt(Fixture& fx, const std::vector<u32>& f, u32 c, std::size_t n) {
     for (std::size_t i : at) expect(product_coefficient(g, g, i) == (i < f.size() ? f[i] : 0), "g^2 = f at coefficient", n, i);
 }
 
+// sqrt_steps, the forward in place and sqrt_last_step writing g[m, n) over f[m, n), as the
+// problem uses them, with f shift words into its buffer (any alignment); against poly::sqrt.
+void check_sqrt_parts(Fixture& fx, const std::vector<u32>& f, u32 c, std::size_t shift) {
+    const std::size_t n = f.size(), m = std::size_t(1) << poly::sqrt_log(n);
+    std::vector<u32> expected(n);
+    poly::sqrt(fx.t, f, c, expected, fx.sqrt_scratch);
+    std::vector<u32> buffer(shift + n);
+    std::copy(f.begin(), f.end(), buffer.begin() + std::ptrdiff_t(shift));
+    const std::span<u32> u(buffer.data() + shift, n), a = fx.buffer[0].first(m), b = fx.buffer[1].first(m),
+                         ht = fx.buffer[2].first(m);
+    poly::sqrt_steps(fx.t, u, c, a, b, ht);
+    const bool low = std::equal(a.begin(), a.end(), expected.begin());
+    fx.t.forward(a);
+    poly::sqrt_last_step(fx.t, u, a, ht, b, u.subspan(m));
+    expect(low && std::equal(u.begin() + std::ptrdiff_t(m), u.end(), expected.begin() + std::ptrdiff_t(m)), "sqrt in parts",
+           n, shift);
+}
+
 // f with f[0] = c^2 for a random c != 0, and c or -c.
 std::pair<std::vector<u32>, u32> random_square(std::size_t size, int kind) {
     auto f = random_poly(size, kind);
@@ -889,6 +907,14 @@ void test_sqrt(Fixture& fx) {
             if (m > (std::size_t(1) << kLgMax)) continue;
             const auto [f, c] = random_square(m, int(pick(3)));
             check_sqrt(fx, f, c, m);
+        }
+    }
+    // In parts, in place: one and two products in the last step, both top-level radices, f at
+    // offsets 0 to 3 words.
+    for (std::size_t n : {65, 96, 97, 128, 129, 200, 1000, 3072, 3073, 4096, 4097, 70000, 131073, 200001, 262144}) {
+        for (std::size_t shift = 0; shift < 4; ++shift) {
+            const auto [f, c] = random_square(n, int(pick(3)));
+            check_sqrt_parts(fx, f, c, shift);
         }
     }
 }
@@ -1171,7 +1197,8 @@ std::vector<u32> holonomic_reference(const Taps& taps, u32 initial, std::size_t 
     return g;
 }
 
-// As check_recurrence: next() calls of random lengths into one array, and into a ring.
+// As check_recurrence: next() calls of random lengths into one array, and into a ring held in the
+// recurrence's spare words, with a canary after it.
 void check_holonomic(const Taps& taps, u32 initial, std::size_t n) {
     const auto want = holonomic_reference(taps, initial, n);
     const std::size_t padded = (n + Holonomic::kBlock - 1) / Holonomic::kBlock * Holonomic::kBlock;
@@ -1186,17 +1213,24 @@ void check_holonomic(const Taps& taps, u32 initial, std::size_t n) {
         expect(std::equal(want.begin(), want.end(), g.begin() + Holonomic::kPadding), "holonomic, array", n, taps.size());
     }
     const std::size_t chunk = Holonomic::kBlock * (1 + pick(64));
-    Holonomic recurrence(taps, initial, n);
-    const std::size_t history = recurrence.history();
+    std::size_t history = Holonomic::kPadding;
+    for (const auto& tap : taps) history = std::max<std::size_t>(history, tap.distance);
+    constexpr std::size_t kCanary = 64;
+    Holonomic recurrence(taps, initial, n, history + chunk + kCanary);
+    expect(recurrence.history() == history, "holonomic, history", n, history);
     if (history > chunk) return;
-    std::vector<u32> ring(history + chunk, 0), got;
+    u32* const ring = recurrence.spare();
+    expect(std::all_of(ring, ring + history + chunk + kCanary, [](u32 x) { return x == 0; }), "holonomic, spare zeros", n, 0);
+    for (std::size_t i = 0; i < kCanary; ++i) ring[history + chunk + i] = u32(i * 2654435761u);
+    std::vector<u32> got;
     for (std::size_t i = 0; i < n; i += chunk) {
         const std::size_t m = std::min(chunk, n - i);
-        recurrence.next(ring.data() + history, m);
-        got.insert(got.end(), ring.begin() + history, ring.begin() + history + m);
-        std::copy(ring.begin() + chunk, ring.end(), ring.begin());
+        recurrence.next(ring + history, m);
+        got.insert(got.end(), ring + history, ring + history + m);
+        std::copy(ring + chunk, ring + chunk + history, ring);
     }
     expect(got == want, "holonomic, ring", n, taps.size());
+    for (std::size_t i = 0; i < kCanary; ++i) expect(ring[history + chunk + i] == u32(i * 2654435761u), "holonomic, canary", n, i);
 }
 
 // count distinct distances from pool; constants and slopes random or P - 1, slopes zero if !slope.
@@ -1256,6 +1290,16 @@ void test_holonomic() {
         check_holonomic({{3, u32(pick(P)), u32(pick(P))}, {window - 16, u32(pick(P)), u32(pick(P))},
                          {2 * window + 5, u32(pick(P)), 0}}, 1, n);
     }
+    // The table of reciprocals is a ring from n = 2 kWindow on: n across the point where its reads
+    // wrap (2 ring), with short and mixed taps. The random state is restored after them, so the
+    // later tests keep their inputs.
+    const std::mt19937_64 saved = rng;
+    for (int round = 0; round < 6; ++round) {
+        const std::size_t n = 2 * window + 1 + pick(6 * window);
+        check_holonomic(random_holonomic_taps(range(1, 9), 1 + pick(8), round % 2, true), u32(pick(P)), n);
+        check_holonomic(random_holonomic_taps(range(1, 3 * window), 1 + pick(10), false, round % 3 != 0), u32(pick(P)), n);
+    }
+    rng = saved;
 }
 
 // a[k] = [x^(n-1)] g^k from the powers of g.

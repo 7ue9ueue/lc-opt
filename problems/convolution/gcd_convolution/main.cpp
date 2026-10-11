@@ -5,7 +5,8 @@
 // descending; Moebius: x_i -= x_ip, i ascending). Primes >= 17 together: one sweep over the
 // multipliers m coprime to 30030 ("rough"), in two stages (prime factors below and above 100),
 // segment by segment so the sources stay in L2 (in L1 for m < 256).
-// a and b are interleaved as pairs, so one load fetches both.
+// a and b are interleaved as pairs, so one load fetches both. b is parsed chunk by chunk; each chunk
+// is interleaved, and the rough zeta sweep takes its segments, while they are in the cache.
 #include <immintrin.h>
 
 #include <algorithm>
@@ -14,17 +15,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
-
-// lib/io/bulk32.hpp
-// Bulk read of uint32 arrays with AVX2, on top of io::Reader:
-//
-//   io::Reader in;
-//   io::read_bulk(in, a.data(), n);  // same values as in.read(a.data(), n); faster on Zen 3
-//
-// On Zen 3 (the judge's CPU) it uses BulkParser32 below; elsewhere it is Reader::read, which is
-// faster there. -DIO_BULK32_TRANSPOSE=0 or 1 forces either. Kept apart from io.hpp so that the
-// code of the programs that do not need it stays unchanged. Design and measurements:
-// lib/io/notes.md.
 
 // lib/io/io.hpp
 // Fast integer and text I/O on file descriptors (stdin and stdout by default).
@@ -782,220 +772,6 @@ private:
 };
 
 }  // namespace io
-
-#ifndef IO_BULK32_TRANSPOSE
-#ifdef __znver3__
-#define IO_BULK32_TRANSPOSE 1
-#else
-#define IO_BULK32_TRANSPOSE 0
-#endif
-#endif
-
-namespace io {
-namespace detail {
-
-// Parses uint32 tokens of at most 16 characters from the token at p into dst: at most count,
-// which must be the tokens that follow. Stops when fewer than kMinTokens tokens remain. Returns
-// where it stopped and the tokens parsed. As BulkParser in io.hpp, each chunk of input is cut into
-// four streams at token boundaries that advance in lockstep, two tokens per step. A step stores
-// its eight values as one vector, [a0 a1 a2 a3 b0 b1 b2 b3] for tokens a_k, b_k of stream k, and
-// a transpose then puts each stream's values in order. On Zen 3 this is 17% faster than four
-// 8-byte stores per step; on Intel (Emerald Rapids) 5% slower.
-class BulkParser32 {
-public:
-    static constexpr std::size_t kMinTokens = 1024;
-
-    struct Result {
-        const char* end;
-        std::size_t parsed;
-    };
-
-    static Result parse(const char* p, std::uint32_t* dst, std::size_t count) {
-        std::uint32_t* const first = dst;
-        while (count >= kMinTokens) {
-            // The count tokens span at least 2 * count - 1 bytes. A chunk spans at most chunk + 17
-            // bytes, so it holds at most chunk / 2 + 9 < count tokens, and loads stay below
-            // p + chunk + 33: all within those bytes.
-            const std::size_t chunk = std::min(kChunk, 2 * (count - 32)) & ~std::size_t(3);
-            const std::size_t stream = chunk / 4;
-            const char* s[4] = {p, after_separator(p + stream), after_separator(p + 2 * stream),
-                                after_separator(p + 3 * stream)};
-            const char* const end[4] = {s[1], s[2], s[3], after_separator(p + chunk)};
-            __m256i invalid = _mm256_setzero_si256();
-            const std::size_t steps = lockstep(s, end, invalid);
-            std::size_t tail[4];
-            bool overrun = false;
-            for (int k = 0; k < 4; ++k) {
-                tail[k] = 0;
-                while (s[k] < end[k] && tail[k] < kTail) tails_[k][tail[k]++] = one_token(s[k], invalid);
-                overrun |= s[k] != end[k];
-            }
-            if (overrun || (std::uint32_t(_mm256_movemask_epi8(invalid)) & 0x80008000)) [[unlikely]] {
-                // Irregular whitespace or tokens: this chunk one token at a time.
-                const std::size_t tokens = std::min(count_tokens(p, end[3]), count);
-                p = parse_slowly(p, dst, tokens);
-                dst += tokens;
-                count -= tokens;
-                continue;
-            }
-            std::uint32_t* out[4] = {dst};
-            for (int k = 0; k < 3; ++k) out[k + 1] = out[k] + 2 * steps + tail[k];
-            transpose(steps, out);
-            for (int k = 0; k < 4; ++k) std::memcpy(out[k] + 2 * steps, tails_[k], tail[k] * sizeof(std::uint32_t));
-            const auto parsed = std::size_t(out[3] + 2 * steps + tail[3] - dst);
-            dst += parsed;
-            count -= parsed;
-            p = skip_whitespace(end[3]);
-        }
-        return {p, std::size_t(dst - first)};
-    }
-
-    static const char* skip_whitespace(const char* p) {
-        while (static_cast<unsigned char>(*p) <= ' ') ++p;
-        return p;
-    }
-
-private:
-    static constexpr std::size_t kChunk = std::size_t(1) << 17;
-    // A step of valid tokens advances a stream by at least 4 bytes; lockstep stops at kSteps.
-    static constexpr std::size_t kSteps = kChunk / 16 + 16;
-    // A token takes at least 2 bytes of a stream.
-    static constexpr std::size_t kTail = kChunk / 8 + 32;
-    alignas(64) static inline std::uint32_t steps_[8 * kSteps];
-    alignas(64) static inline std::uint32_t tails_[4][kTail];
-
-    // Steps all streams while each has 33 bytes left; returns the steps. Step j stores its values
-    // at steps_ + 8j. Works on local copies of the stream state, which stay in registers.
-    static std::size_t lockstep(const char* (&streams)[4], const char* const (&end)[4], __m256i& flags) {
-        const char* s[4] = {streams[0], streams[1], streams[2], streams[3]};
-        __m256i invalid = flags;
-        std::size_t done = 0;
-        for (;;) {
-            std::ptrdiff_t left = end[0] - s[0];
-            for (int k = 1; k < 4; ++k) left = std::min(left, end[k] - s[k]);
-            const std::ptrdiff_t steps = std::min(left / 33, std::ptrdiff_t(kSteps - done));
-            if (steps <= 0) break;
-            for (std::uint32_t* v = steps_ + 8 * done; v != steps_ + 8 * (done + std::size_t(steps)); v += 8) {
-                const __m256i g0 = two_tokens(s[0], invalid), g1 = two_tokens(s[1], invalid);
-                const __m256i g2 = two_tokens(s[2], invalid), g3 = two_tokens(s[3], invalid);
-                const __m256i k = _mm256_set1_epi32(0x00012710);
-                // 8-digit halves: [s0 high, s0 low, s1 high, s1 low | second tokens likewise].
-                const __m256 h01 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g0, g1), k));
-                const __m256 h23 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g2, g3), k));
-                const __m256i high = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0x88));
-                const __m256i low = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0xDD));
-                _mm256_store_si256(reinterpret_cast<__m256i*>(v),
-                                   _mm256_add_epi32(_mm256_mullo_epi32(high, _mm256_set1_epi32(100000000)), low));
-            }
-            done += std::size_t(steps);
-        }
-        for (int k = 0; k < 4; ++k) streams[k] = s[k];
-        flags = invalid;
-        return done;
-    }
-
-    // The 2 * steps values of stream k from steps_ to out[k]: a 4x4 transpose of value pairs.
-    static void transpose(std::size_t steps, std::uint32_t* const (&out)[4]) {
-        const auto pairs = [](std::size_t j) {  // step j as [a0 b0 a1 b1 | a2 b2 a3 b3]
-            const __m256i v = _mm256_load_si256(reinterpret_cast<const __m256i*>(steps_ + 8 * j));
-            return _mm256_permutevar8x32_epi32(v, _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7));
-        };
-        std::size_t j = 0;
-        for (; j + 4 <= steps; j += 4) {
-            const __m256i p0 = pairs(j), p1 = pairs(j + 1), p2 = pairs(j + 2), p3 = pairs(j + 3);
-            const __m256i t0 = _mm256_unpacklo_epi64(p0, p1), t1 = _mm256_unpackhi_epi64(p0, p1);
-            const __m256i t2 = _mm256_unpacklo_epi64(p2, p3), t3 = _mm256_unpackhi_epi64(p2, p3);
-            const auto put = [j](std::uint32_t* to, __m256i v) {
-                _mm256_storeu_si256(reinterpret_cast<__m256i*>(to + 2 * j), v);
-            };
-            put(out[0], _mm256_permute2x128_si256(t0, t2, 0x20));
-            put(out[1], _mm256_permute2x128_si256(t1, t3, 0x20));
-            put(out[2], _mm256_permute2x128_si256(t0, t2, 0x31));
-            put(out[3], _mm256_permute2x128_si256(t1, t3, 0x31));
-        }
-        for (; j < steps; ++j)
-            for (int k = 0; k < 4; ++k) {
-                out[k][2 * j] = steps_[8 * j + k];
-                out[k][2 * j + 1] = steps_[8 * j + 4 + k];
-            }
-    }
-
-    // Two tokens at s, as 4-digit groups [first | second]. Lengths outside 1..16 (repeated
-    // whitespace, long tokens) set the sign bit of byte 15 or 31 of invalid.
-    [[gnu::always_inline]] static __m256i two_tokens(const char*& s, __m256i& invalid) {
-        const __m256i bytes = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(s));
-        const std::uint32_t sep = separators(bytes);
-        const auto first = std::size_t(std::countr_zero(sep));              // length of the first token
-        const auto second = std::size_t(std::countr_zero(sep & (sep - 1)));  // 32 if none
-        const __m256i windows =
-            _mm256_inserti128_si256(bytes, _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + first + 1)), 1);
-        const __m256i rows = _mm256_set_m128i(align_row(second - first), align_row(first + 1));
-        invalid = _mm256_or_si256(invalid, rows);
-        s += second + 1;
-        return digit_groups(_mm256_shuffle_epi8(_mm256_subs_epu8(windows, _mm256_set1_epi8('0')), rows));
-    }
-
-    static std::uint32_t one_token(const char*& s, __m256i& invalid) {
-        const __m128i window = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s));
-        const unsigned n = unsigned(std::countr_zero(separators(window) | 0x10000));
-        invalid = _mm256_or_si256(invalid, _mm256_castsi128_si256(align_row(n + 1)));
-        s += n + 1;
-        return std::uint32_t(parse16(window, n));
-    }
-
-    // The byte after the first separator at or after q.
-    static const char* after_separator(const char* q) {
-        for (;; q += 32)
-            if (const std::uint32_t sep = separators(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(q))))
-                return q + std::countr_zero(sep) + 1;
-    }
-
-    // Tokens in [p, end), where p starts a token.
-    static std::size_t count_tokens(const char* p, const char* end) {
-        std::size_t tokens = 1;
-        for (const char* q = p + 1; q < end; ++q)
-            tokens += static_cast<unsigned char>(*q) > ' ' && static_cast<unsigned char>(q[-1]) <= ' ';
-        return tokens;
-    }
-
-    static const char* parse_slowly(const char* p, std::uint32_t* dst, std::size_t count) {
-        for (std::size_t i = 0; i < count; ++i) {
-            p = skip_whitespace(p);
-            const __m128i window = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
-            const unsigned n = unsigned(std::countr_zero(separators(window) | 0x10000));
-            dst[i] = std::uint32_t(parse16(window, n));
-            p += n + 1;
-        }
-        return p;
-    }
-};
-
-// count uint32 tokens into dst with BulkParser32, the rest one at a time.
-inline void read_transposed(Reader& in, std::uint32_t* dst, std::size_t count) {
-    std::size_t parsed = 0;
-    if (count >= BulkParser32::kMinTokens) {
-        const char* const start = BulkParser32::skip_whitespace(in.scan().cur);
-        const auto [stop, done] = BulkParser32::parse(start, dst, count);
-        // Continue the Reader at stop: its separator mask from there on.
-        const auto* block = reinterpret_cast<const char*>(reinterpret_cast<std::uintptr_t>(stop) & ~std::uintptr_t(63));
-        in.resume({stop, block, block_separators(block) & ~std::uint64_t(0) << (stop - block)});
-        parsed = done;
-    }
-    for (std::size_t i = parsed; i < count; ++i) dst[i] = in.read<std::uint32_t>();
-}
-
-}  // namespace detail
-
-// count uint32 tokens into dst: the same values as in.read(dst, count).
-inline void read_bulk(Reader& in, std::uint32_t* dst, std::size_t count) {
-#if IO_BULK32_TRANSPOSE
-    detail::read_transposed(in, dst, count);
-#else
-    in.read(dst, count);
-#endif
-}
-
-}  // namespace io
 // lib/io/sequential.hpp
 // Marks a mapped input as read once (MADV_SEQUENTIAL): when the Reader unmaps it, the kernel then
 // skips marking each page accessed, 0.03-0.04 ms per 20 MB (lib/io/notes.md).
@@ -1110,6 +886,249 @@ private:
 #define RUN_EARLY(solve) \
     int main() { solve(); }
 #endif
+// problems/convolution/gcd_convolution/chunk_read.hpp
+// Bulk read of uint32 tokens, whole or chunk by chunk (for a caller that consumes each chunk's
+// values while they are in the cache):
+//
+//   chunked::read(in, dst, count);  // dst[0, count)
+//   chunked::read(in, buffer, count, [&](const std::uint32_t* values, std::size_t first,
+//                                        std::size_t k) { ... tokens [first, first + k) ... });
+//
+// buffer holds chunked::kChunkTokens values; every chunk's values go there. The values are those
+// of io::read_bulk. A copy of BulkParser32 (lib/io/bulk32.hpp) with chunks of 256 KiB of text
+// (128 KiB in lib/io), as ../bitwise_xor_convolution/progress_read.hpp. It runs on every CPU.
+
+
+#include <algorithm>
+#include <bit>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+
+namespace chunked {
+
+namespace detail {
+
+using io::detail::align_row;
+using io::detail::digit_groups;
+using io::detail::parse16;
+using io::detail::separators;
+
+// BulkParser32 of lib/io/bulk32.hpp with chunks of 2^18 bytes. Each chunk's values go to out,
+// then out = next(out, first, k) for the tokens [first, first + k).
+class Parser {
+public:
+    static constexpr std::size_t kMinTokens = 1024;
+    static constexpr std::size_t kChunk = std::size_t(1) << 18;
+    // Tokens in one chunk (at most kChunk + 17 bytes, 2 bytes per token).
+    static constexpr std::size_t kChunkTokens = kChunk / 2 + 9;
+
+    struct Result {
+        const char* end;
+        std::size_t parsed;
+    };
+
+    template <class Next>
+    static Result parse(const char* p, std::uint32_t*& out, std::size_t count, Next& next) {
+        std::size_t total = 0;
+        while (count >= kMinTokens) {
+            // The count tokens span at least 2 * count - 1 bytes. A chunk spans at most chunk + 17
+            // bytes, so it holds at most chunk / 2 + 9 < count tokens, and loads stay below
+            // p + chunk + 33: all within those bytes.
+            const std::size_t chunk = std::min(kChunk, 2 * (count - 32)) & ~std::size_t(3);
+            const std::size_t stream = chunk / 4;
+            const char* s[4] = {p, after_separator(p + stream), after_separator(p + 2 * stream),
+                                after_separator(p + 3 * stream)};
+            const char* const end[4] = {s[1], s[2], s[3], after_separator(p + chunk)};
+            __m256i invalid = _mm256_setzero_si256();
+            const std::size_t steps = lockstep(s, end, invalid);
+            std::size_t tail[4];
+            bool overrun = false;
+            for (int k = 0; k < 4; ++k) {
+                tail[k] = 0;
+                while (s[k] < end[k] && tail[k] < kTail) tails_[k][tail[k]++] = one_token(s[k], invalid);
+                overrun |= s[k] != end[k];
+            }
+            if (overrun || (std::uint32_t(_mm256_movemask_epi8(invalid)) & 0x80008000)) [[unlikely]] {
+                // Irregular whitespace or tokens: this chunk one token at a time.
+                const std::size_t tokens = std::min(count_tokens(p, end[3]), count);
+                p = parse_slowly(p, out, tokens);
+                out = next(out, total, tokens);
+                total += tokens;
+                count -= tokens;
+                continue;
+            }
+            std::uint32_t* dst[4] = {out};
+            for (int k = 0; k < 3; ++k) dst[k + 1] = dst[k] + 2 * steps + tail[k];
+            transpose(steps, dst);
+            for (int k = 0; k < 4; ++k) std::memcpy(dst[k] + 2 * steps, tails_[k], tail[k] * sizeof(std::uint32_t));
+            const auto parsed = std::size_t(dst[3] + 2 * steps + tail[3] - out);
+            out = next(out, total, parsed);
+            total += parsed;
+            count -= parsed;
+            p = skip_whitespace(end[3]);
+        }
+        return {p, total};
+    }
+
+    static const char* skip_whitespace(const char* p) {
+        while (static_cast<unsigned char>(*p) <= ' ') ++p;
+        return p;
+    }
+
+private:
+    // A step of valid tokens advances a stream by at least 4 bytes; lockstep stops at kSteps.
+    static constexpr std::size_t kSteps = kChunk / 16 + 16;
+    // A token takes at least 2 bytes of a stream.
+    static constexpr std::size_t kTail = kChunk / 8 + 32;
+    alignas(64) static inline std::uint32_t steps_[8 * kSteps];
+    alignas(64) static inline std::uint32_t tails_[4][kTail];
+
+    // Steps all streams while each has 33 bytes left; returns the steps. Step j stores its values
+    // at steps_ + 8j. Works on local copies of the stream state, which stay in registers.
+    static std::size_t lockstep(const char* (&streams)[4], const char* const (&end)[4], __m256i& flags) {
+        const char* s[4] = {streams[0], streams[1], streams[2], streams[3]};
+        __m256i invalid = flags;
+        std::size_t done = 0;
+        for (;;) {
+            std::ptrdiff_t left = end[0] - s[0];
+            for (int k = 1; k < 4; ++k) left = std::min(left, end[k] - s[k]);
+            const std::ptrdiff_t steps = std::min(left / 33, std::ptrdiff_t(kSteps - done));
+            if (steps <= 0) break;
+            for (std::uint32_t* v = steps_ + 8 * done; v != steps_ + 8 * (done + std::size_t(steps)); v += 8) {
+                const __m256i g0 = two_tokens(s[0], invalid), g1 = two_tokens(s[1], invalid);
+                const __m256i g2 = two_tokens(s[2], invalid), g3 = two_tokens(s[3], invalid);
+                const __m256i k = _mm256_set1_epi32(0x00012710);
+                // 8-digit halves: [s0 high, s0 low, s1 high, s1 low | second tokens likewise].
+                const __m256 h01 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g0, g1), k));
+                const __m256 h23 = _mm256_castsi256_ps(_mm256_madd_epi16(_mm256_packus_epi32(g2, g3), k));
+                const __m256i high = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0x88));
+                const __m256i low = _mm256_castps_si256(_mm256_shuffle_ps(h01, h23, 0xDD));
+                _mm256_store_si256(reinterpret_cast<__m256i*>(v),
+                                   _mm256_add_epi32(_mm256_mullo_epi32(high, _mm256_set1_epi32(100000000)), low));
+            }
+            done += std::size_t(steps);
+        }
+        for (int k = 0; k < 4; ++k) streams[k] = s[k];
+        flags = invalid;
+        return done;
+    }
+
+    // The 2 * steps values of stream k from steps_ to out[k]: a 4x4 transpose of value pairs.
+    static void transpose(std::size_t steps, std::uint32_t* const (&out)[4]) {
+        const auto pairs = [](std::size_t j) {  // step j as [a0 b0 a1 b1 | a2 b2 a3 b3]
+            const __m256i v = _mm256_load_si256(reinterpret_cast<const __m256i*>(steps_ + 8 * j));
+            return _mm256_permutevar8x32_epi32(v, _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7));
+        };
+        std::size_t j = 0;
+        for (; j + 4 <= steps; j += 4) {
+            const __m256i p0 = pairs(j), p1 = pairs(j + 1), p2 = pairs(j + 2), p3 = pairs(j + 3);
+            const __m256i t0 = _mm256_unpacklo_epi64(p0, p1), t1 = _mm256_unpackhi_epi64(p0, p1);
+            const __m256i t2 = _mm256_unpacklo_epi64(p2, p3), t3 = _mm256_unpackhi_epi64(p2, p3);
+            const auto put = [j](std::uint32_t* to, __m256i v) {
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(to + 2 * j), v);
+            };
+            put(out[0], _mm256_permute2x128_si256(t0, t2, 0x20));
+            put(out[1], _mm256_permute2x128_si256(t1, t3, 0x20));
+            put(out[2], _mm256_permute2x128_si256(t0, t2, 0x31));
+            put(out[3], _mm256_permute2x128_si256(t1, t3, 0x31));
+        }
+        for (; j < steps; ++j)
+            for (int k = 0; k < 4; ++k) {
+                out[k][2 * j] = steps_[8 * j + k];
+                out[k][2 * j + 1] = steps_[8 * j + 4 + k];
+            }
+    }
+
+    // Two tokens at s, as 4-digit groups [first | second]. Lengths outside 1..16 (repeated
+    // whitespace, long tokens) set the sign bit of byte 15 or 31 of invalid.
+    [[gnu::always_inline]] static __m256i two_tokens(const char*& s, __m256i& invalid) {
+        const __m256i bytes = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(s));
+        const std::uint32_t sep = separators(bytes);
+        const auto first = std::size_t(std::countr_zero(sep));              // length of the first token
+        const auto second = std::size_t(std::countr_zero(sep & (sep - 1)));  // 32 if none
+        const __m256i windows =
+            _mm256_inserti128_si256(bytes, _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + first + 1)), 1);
+        const __m256i rows = _mm256_set_m128i(align_row(second - first), align_row(first + 1));
+        invalid = _mm256_or_si256(invalid, rows);
+        s += second + 1;
+        return digit_groups(_mm256_shuffle_epi8(_mm256_subs_epu8(windows, _mm256_set1_epi8('0')), rows));
+    }
+
+    static std::uint32_t one_token(const char*& s, __m256i& invalid) {
+        const __m128i window = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s));
+        const unsigned n = unsigned(std::countr_zero(separators(window) | 0x10000));
+        invalid = _mm256_or_si256(invalid, _mm256_castsi128_si256(align_row(n + 1)));
+        s += n + 1;
+        return std::uint32_t(parse16(window, n));
+    }
+
+    // The byte after the first separator at or after q.
+    static const char* after_separator(const char* q) {
+        for (;; q += 32)
+            if (const std::uint32_t sep = separators(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(q))))
+                return q + std::countr_zero(sep) + 1;
+    }
+
+    // Tokens in [p, end), where p starts a token.
+    static std::size_t count_tokens(const char* p, const char* end) {
+        std::size_t tokens = 1;
+        for (const char* q = p + 1; q < end; ++q)
+            tokens += static_cast<unsigned char>(*q) > ' ' && static_cast<unsigned char>(q[-1]) <= ' ';
+        return tokens;
+    }
+
+    static const char* parse_slowly(const char* p, std::uint32_t* dst, std::size_t count) {
+        for (std::size_t i = 0; i < count; ++i) {
+            p = skip_whitespace(p);
+            const __m128i window = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+            const unsigned n = unsigned(std::countr_zero(separators(window) | 0x10000));
+            dst[i] = std::uint32_t(parse16(window, n));
+            p += n + 1;
+        }
+        return p;
+    }
+};
+
+// count tokens: each chunk's values at out, then out = next(out, first, k) for the tokens
+// [first, first + k).
+template <class Next>
+void read_chunks(io::Reader& in, std::uint32_t* out, std::size_t count, Next&& next) {
+    std::size_t parsed = 0;
+    if (count >= Parser::kMinTokens) {
+        const char* const start = Parser::skip_whitespace(in.scan().cur);
+        const auto [stop, bulk] = Parser::parse(start, out, count, next);
+        // Continue the Reader at stop: its separator mask from there on.
+        const auto* block = reinterpret_cast<const char*>(reinterpret_cast<std::uintptr_t>(stop) & ~std::uintptr_t(63));
+        in.resume({stop, block, io::detail::block_separators(block) & ~std::uint64_t(0) << (stop - block)});
+        parsed = bulk;
+    }
+    if (parsed < count) {
+        for (std::size_t i = parsed; i < count; ++i) out[i - parsed] = in.read<std::uint32_t>();
+        next(out, parsed, count - parsed);
+    }
+}
+
+}  // namespace detail
+
+inline constexpr std::size_t kChunkTokens = detail::Parser::kChunkTokens;
+
+// count tokens into dst.
+inline void read(io::Reader& in, std::uint32_t* dst, std::size_t count) {
+    detail::read_chunks(in, dst, count, [](std::uint32_t* values, std::size_t, std::size_t k) { return values + k; });
+}
+
+// count tokens chunk by chunk into buffer (kChunkTokens values): done(buffer, first, k) with
+// buffer[0, k) the tokens [first, first + k), first increasing.
+template <class Done>
+void read(io::Reader& in, std::uint32_t* buffer, std::size_t count, Done&& done) {
+    detail::read_chunks(in, buffer, count, [&](std::uint32_t* values, std::size_t first, std::size_t k) {
+        done(static_cast<const std::uint32_t*>(values), first, k);
+        return values;
+    });
+}
+
+}  // namespace chunked
 // problems/convolution/convolution_mod/fields.hpp
 // Fixed-width output of residues < 10^9, byte for byte as ../fixed_width.hpp: each value
 // right-aligned in 9 characters, then a space; the last separator is a newline. Judge-specific:
@@ -1518,12 +1537,13 @@ template <std::uint32_t kStage, class T, class Term>
     return sum_large<kStage>(i, k, last, sum + other, term);
 }
 
-// pairs[i] = (a_i, b_i R mod P) for 1 <= i <= n, then the zeta pass of p = 3. a may be the first
-// half of pairs: i descends, so pairs[i] only overwrites a_2i and a_2i+1, which are read already.
-void interleave_zeta3(const AliasWord* a, const std::uint32_t* b, std::uint64_t* pairs, std::uint32_t n) {
+// pairs[i] = (a[i], b[i] R mod P) for 0 <= i < count. a may lie in the same memory, count + 8
+// dwords or more ahead of pairs: i ascends, so pairs[i] only overwrites values of a read already.
+void interleave(const AliasWord* a, const std::uint32_t* b, std::uint64_t* pairs, std::uint32_t count) {
     const Vec r2 = broadcast(kR2);
-    // b_i R as Montgomery products of b_i and R^2: dwords [b R] in the high halves.
-    auto scaled_pairs = [&](std::uint32_t i, Vec& low, Vec& high) {
+    std::uint32_t i = 0;
+    for (; i + 8 <= count; i += 8) {
+        // b_i R as Montgomery products of b_i and R^2: dwords [b R] in the high halves.
         const Vec va = load(a + i), vb = load(b + i);
         const Vec even = redc(_mm256_mul_epu32(vb, r2));
         const Vec odd = redc(_mm256_mul_epu32(_mm256_srli_epi64(vb, 32), r2));
@@ -1531,34 +1551,14 @@ void interleave_zeta3(const AliasWord* a, const std::uint32_t* b, std::uint64_t*
         const Vec bs = _mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA);
         const Vec br = _mm256_min_epu32(bs, _mm256_sub_epi32(bs, broadcast(kP)));
         const Vec lo = _mm256_unpacklo_epi32(va, br), hi = _mm256_unpackhi_epi32(va, br);
-        low = _mm256_permute2x128_si256(lo, hi, 0x20);
-        high = _mm256_permute2x128_si256(lo, hi, 0x31);
-    };
-    const std::uint32_t third = n / 3;
-    std::uint32_t i = n + 1;
-    // Targets i > n / 3 only take their own values. Eight at a time, from the top.
-    while (i >= third + 9) {
-        i -= 8;
-        Vec low, high;
-        scaled_pairs(i, low, high);
-        store(pairs + i, low);
-        store(pairs + i + 4, high);
+        store(pairs + i, _mm256_permute2x128_si256(lo, hi, 0x20));
+        store(pairs + i + 4, _mm256_permute2x128_si256(lo, hi, 0x31));
     }
-    auto one = [&](std::uint32_t k) {
-        const std::uint32_t br = std::uint32_t((std::uint64_t(b[k]) << 32) % kP);
-        const std::uint64_t pair = a[k] | std::uint64_t(br) << 32;
-        std::memcpy(pairs + k, &pair, sizeof pair);
-        if (k <= third) add_pair(pairs + k, pairs + 3 * k);
-    };
-    while (i > third + 1) one(--i);
-    while (i >= 8 + 4) {  // sources 3i > i + 7
-        i -= 8;
-        Vec low, high;
-        scaled_pairs(i, low, high);
-        store(pairs + i, add(low, gather_pairs(pairs + 3 * i, 3)));
-        store(pairs + i + 4, add(high, gather_pairs(pairs + 3 * (i + 4), 3)));
+    for (; i < count; ++i) {
+        const std::uint32_t br = std::uint32_t((std::uint64_t(b[i]) << 32) % kP);
+        const std::uint64_t pair = a[i] | std::uint64_t(br) << 32;
+        std::memcpy(pairs + i, &pair, sizeof pair);
     }
-    while (i > 1) one(--i);
 }
 
 // Zeta pass of p >= 5 on the pairs: four targets at a time from the top, then one at a time.
@@ -1618,62 +1618,82 @@ struct ZetaSweep {
 };
 
 // pairs[i] += sum of pairs[i m] over rough m > 1, i m <= n: the zeta passes of all primes >= 17,
-// as stage 1 after stage 2. Stage 2 changes only i <= n / 101, all in segment 0; its sums go to t2
-// (n / 101 + 1 pairs). Segment 0 goes first, by target ascending, so its sources are unchanged
-// when read; then source segments ascend (their targets lie in earlier segments). Last, stage 1
-// on t2, which is then added to the pairs.
-void zeta_rough(std::uint64_t* pairs, std::uint32_t n, std::uint64_t* t2) {
-    constexpr std::uint32_t kSegment = 1 << 15, kPiece = 1 << 12;  // pairs: 256 KiB, 32 KiB
-    const std::uint32_t last2 = n / kStage2Min;
-    std::memset(t2, 0, (last2 + 1) * sizeof(std::uint64_t));
-    auto widened = [&](std::uint32_t j) { return widen_pair(pairs + j); };
-    const std::uint32_t last0 = std::min(n, kSegment - 1);
-    for (std::uint32_t i = 1; kStagePrimes[0] * i <= last0; ++i) {
-        add_sums(pairs + i, sum_multiples<1, Half>(i, last0, widened));
-        if (kStage2Min * i <= last0) add_sums(t2 + i, sum_multiples<2, Half>(i, last0, widened));
+// as stage 1 after stage 2, fed segment by segment as the pairs are written. Stage 2 changes only
+// i <= n / 101, all in segment 0; its sums go to t2 (n / 101 + 1 pairs). Segment 0 goes first, by
+// target ascending, so its sources are unchanged when read; then source segments ascend (their
+// targets lie in earlier segments). Last, stage 1 on t2, which is then added to the pairs.
+class ZetaRough {
+public:
+    ZetaRough(std::uint64_t* pairs, std::uint32_t n, std::uint64_t* t2) : pairs_(pairs), t2_(t2), n_(n) {
+        std::memset(t2, 0, (n / kStage2Min + 1) * sizeof(std::uint64_t));
+        one_.init(kSegment, n);
+        two_.init(kSegment, n);
     }
-    if (n >= kSegment) {
-        static ZetaSweep<1> one;
-        static ZetaSweep<2> two;
-        one.init(kSegment, n);
-        two.init(kSegment, n);
-        for (std::uint32_t start = kSegment; start <= n; start += kSegment) {
-            const std::uint32_t last_source = std::min(n, start + kSegment - 1);
-            for (std::uint32_t piece = start + kPiece; piece <= last_source; piece += kPiece) {
-                two.by_target(pairs, piece - 1, kPieceTargets);
-                one.by_multiplier(pairs, pairs, one.s.tiny, piece - 1);
-                two.by_multiplier(t2, pairs, two.s.tiny, piece - 1);
-            }
-            one.by_multiplier(pairs, pairs, ZetaSweep<1>::M::kSmall, last_source);
-            two.by_multiplier(t2, pairs, ZetaSweep<2>::M::kSmall, last_source);
-            one.by_target(pairs, last_source, kMaxTargets);
-            two.by_target(pairs, last_source, kMaxTargets);
-        }
-        one.finish(pairs, n);
-        two.finish(t2, n);
-    }
-    auto from_t2 = [&](std::uint32_t j) { return widen_pair(t2 + j); };
-    for (std::uint32_t i = 1; kStagePrimes[0] * i <= last2; ++i) add_sums(t2 + i, sum_multiples<1, Half>(i, last2, from_t2));
-    for (std::uint32_t i = 1; i <= last2; ++i) add_pair(pairs + i, t2 + i);
-}
 
-// Zeta pass of p = 2 fused with the product and the Moebius pass of 2:
-// c_i = A_i B_i - A_2i B_2i (the second term for i <= n / 2).
-void zeta2_product_moebius2(std::uint64_t* pairs, std::uint32_t* c, std::uint32_t n) {
-    const std::uint32_t half = n / 2;
-    std::uint32_t i = n + 1;
-    while (i >= half + 9) {
-        i -= 8;
-        store(c + i, high_dwords(product4(load(pairs + i)), product4(load(pairs + i + 4))));
+    // Takes the segments whose sources all lie in [1, ready].
+    void advance(std::uint32_t ready) {
+        for (; start_ <= n_ && std::min(n_, start_ + kSegment - 1) <= ready; start_ += kSegment) {
+            if (start_ == 0) first_segment();
+            else segment(start_);
+        }
     }
+
+    // After advance(n).
+    void finish() {
+        one_.finish(pairs_, n_);
+        two_.finish(t2_, n_);
+        const std::uint32_t last2 = n_ / kStage2Min;
+        auto from_t2 = [&](std::uint32_t j) { return widen_pair(t2_ + j); };
+        for (std::uint32_t i = 1; kStagePrimes[0] * i <= last2; ++i) add_sums(t2_ + i, sum_multiples<1, Half>(i, last2, from_t2));
+        for (std::uint32_t i = 1; i <= last2; ++i) add_pair(pairs_ + i, t2_ + i);
+    }
+
+private:
+    static constexpr std::uint32_t kSegment = 1 << 15, kPiece = 1 << 12;  // pairs: 256 KiB, 32 KiB
+    static inline ZetaSweep<1> one_;
+    static inline ZetaSweep<2> two_;
+    std::uint64_t* pairs_;
+    std::uint64_t* t2_;
+    std::uint32_t n_, start_ = 0;
+
+    void first_segment() {
+        const std::uint32_t last0 = std::min(n_, kSegment - 1);
+        auto widened = [&](std::uint32_t j) { return widen_pair(pairs_ + j); };
+        for (std::uint32_t i = 1; kStagePrimes[0] * i <= last0; ++i) {
+            add_sums(pairs_ + i, sum_multiples<1, Half>(i, last0, widened));
+            if (kStage2Min * i <= last0) add_sums(t2_ + i, sum_multiples<2, Half>(i, last0, widened));
+        }
+    }
+
+    void segment(std::uint32_t start) {
+        const std::uint32_t last_source = std::min(n_, start + kSegment - 1);
+        for (std::uint32_t piece = start + kPiece; piece <= last_source; piece += kPiece) {
+            two_.by_target(pairs_, piece - 1, kPieceTargets);
+            one_.by_multiplier(pairs_, pairs_, one_.s.tiny, piece - 1);
+            two_.by_multiplier(t2_, pairs_, two_.s.tiny, piece - 1);
+        }
+        one_.by_multiplier(pairs_, pairs_, ZetaSweep<1>::M::kSmall, last_source);
+        two_.by_multiplier(t2_, pairs_, ZetaSweep<2>::M::kSmall, last_source);
+        one_.by_target(pairs_, last_source, kMaxTargets);
+        two_.by_target(pairs_, last_source, kMaxTargets);
+    }
+};
+
+// Zeta passes of 3 and 2 fused with the product and the Moebius pass of 2, targets descending:
+// c_i = A_i B_i - A_2i B_2i (the second term for i <= n / 2). The pass of 3 runs a factor 3
+// ahead: its targets [8q, 8q + 8) go just before the targets [24q, 24q + 24) of the pass of 2,
+// which are its sources. So it reads them before the pass of 2 changes them, and the pass of 2
+// finds them in L1.
+void zeta32_product_moebius2(std::uint64_t* pairs, std::uint32_t* c, std::uint32_t n) {
+    const std::uint32_t half = n / 2, third = n / 3;
+    auto product = [](std::uint32_t x, std::uint32_t yr) {
+        const std::uint64_t t = std::uint64_t(x) * yr;
+        const std::uint32_t m = std::uint32_t(t) * kNegInverse;
+        const std::uint32_t r = std::uint32_t((t + std::uint64_t(m) * kP) >> 32);
+        return std::min(r, r - kP);
+    };
     auto one = [&](std::uint32_t k) {
         std::uint32_t ai = std::uint32_t(pairs[k]), bi = std::uint32_t(pairs[k] >> 32);
-        auto product = [](std::uint32_t x, std::uint32_t yr) {
-            const std::uint64_t t = std::uint64_t(x) * yr;
-            const std::uint32_t m = std::uint32_t(t) * kNegInverse;
-            const std::uint32_t r = std::uint32_t((t + std::uint64_t(m) * kP) >> 32);
-            return std::min(r, r - kP);
-        };
         if (k <= half) {
             const std::uint64_t s = pairs[2 * k];
             ai = add(ai, std::uint32_t(s));
@@ -1684,16 +1704,46 @@ void zeta2_product_moebius2(std::uint64_t* pairs, std::uint32_t* c, std::uint32_
             c[k] = product(ai, bi);
         }
     };
-    while (i > half + 1) one(--i);
-    while (i >= 8 + 8) {  // sources 2i > i + 7
-        i -= 8;
-        const Vec s0 = even_pairs(pairs + 2 * i), s1 = even_pairs(pairs + 2 * i + 8);
-        const Vec t0 = add(load(pairs + i), s0), t1 = add(load(pairs + i + 4), s1);
-        store(pairs + i, t0);
-        store(pairs + i + 4, t1);
-        store(c + i, sub(high_dwords(product4(t0), product4(t1)), high_dwords(product4(s0), product4(s1))));
+    // Targets [i, i + 8) of the pass of 2 and the product.
+    auto eight = [&](std::uint32_t i) {
+        if (i > half) {
+            store(c + i, high_dwords(product4(load(pairs + i)), product4(load(pairs + i + 4))));
+        } else if (i + 7 <= half && i >= 8) {  // sources 2i > i + 7
+            const Vec s0 = even_pairs(pairs + 2 * i), s1 = even_pairs(pairs + 2 * i + 8);
+            const Vec t0 = add(load(pairs + i), s0), t1 = add(load(pairs + i + 4), s1);
+            store(pairs + i, t0);
+            store(pairs + i + 4, t1);
+            store(c + i, sub(high_dwords(product4(t0), product4(t1)), high_dwords(product4(s0), product4(s1))));
+        } else {
+            for (std::uint32_t k = i + 8; k-- > i;) one(k);
+        }
+    };
+    // Targets [t, t + 8) of the pass of 3 up to n / 3; t >= 4, so the sources 3t > t + 7.
+    auto zeta3_eight = [&](std::uint32_t t) {
+        if (t + 7 <= third) {
+            store(pairs + t, add(load(pairs + t), gather_pairs(pairs + 3 * t, 3)));
+            store(pairs + t + 4, add(load(pairs + t + 4), gather_pairs(pairs + 3 * t + 12, 3)));
+        } else {
+            for (std::uint32_t k = std::min(t + 7, third); k >= t; --k) add_pair(pairs + k, pairs + 3 * k);
+        }
+    };
+    const std::uint32_t blocks = n / 24;
+    if (blocks < 2) {  // small n: the pass of 3 first
+        for (std::uint32_t t = third; t >= 1; --t) add_pair(pairs + t, pairs + 3 * t);
+        for (std::uint32_t k = n; k >= 1; --k) one(k);
+        return;
     }
-    while (i > 1) one(--i);
+    // Top: targets [24 blocks, n] (all above n / 2) and their pass-3 targets [8 blocks, n / 3].
+    for (std::uint32_t t = third; t >= 8 * blocks; --t) add_pair(pairs + t, pairs + 3 * t);
+    for (std::uint32_t k = n; k >= 24 * blocks; --k) one(k);
+    for (std::uint32_t q = blocks - 1; q >= 1; --q) {
+        zeta3_eight(8 * q);
+        eight(24 * q + 16);
+        eight(24 * q + 8);
+        eight(24 * q);
+    }
+    for (std::uint32_t t = std::min(7u, third); t >= 1; --t) add_pair(pairs + t, pairs + 3 * t);
+    for (std::uint32_t k = 23; k >= 1; --k) one(k);
 }
 
 // Moebius pass of p on c: eight targets at a time from i = 4 up (sources ip > i + 7 are unchanged).
@@ -1801,25 +1851,34 @@ void solve() {
     io::Reader in;
     const auto n = in.read<std::uint32_t>();
     io::advise_sequential(in);
-    // One region: the pairs, with a parsed into their first half; then b, later c; then the stage-2
-    // sums of the rough sweeps (t2: pairs, b2: words). The pairs' first huge page later holds the
-    // output text.
+    // One region, in dwords (W = words >= n + 64): the pairs [0, 2W), with a parsed into [W, 2W);
+    // b's chunks at [2W, 2W + B), then the stage-2 zeta sums t2; c at [K, K + n] with
+    // K >= 2W - n / 2, over the pairs' last quarter, the chunk buffer and t2 (the product pass
+    // descends, so c_i lands on pairs above 2i + 16, dead); then the stage-2 Moebius sums b2. The
+    // output text goes to the start (dead pairs). 5 huge pages for n = 10^6.
     constexpr std::size_t kPad = 64;
     const std::size_t words = (n + kPad + 1) / 2 * 2, sums = n / kStage2Min + 1;
+    const std::size_t t2_start = (2 * words + std::min<std::size_t>(n, chunked::kChunkTokens) + 31) / 16 * 16;
+    const std::size_t c_start = (2 * words - n / 2 + 15) / 16 * 16;
+    const std::size_t b2_start = (std::max(t2_start + 2 * sums, c_start + n + 1) + 15) / 16 * 16;
     static_assert(fields::kTextBytes <= std::size_t(1) << 21);
-    auto* region = mem::huge<std::uint32_t>(std::max(3 * (words + sums), fields::kTextBytes / sizeof(std::uint32_t)));
+    auto* region = mem::huge<std::uint32_t>(std::max(b2_start + sums, fields::kTextBytes / sizeof(std::uint32_t)));
     auto* pairs = reinterpret_cast<std::uint64_t*>(region);
-    std::uint32_t* const b = region + 2 * words;
-    auto* const t2 = reinterpret_cast<std::uint64_t*>(region + 3 * words);
-    std::uint32_t* const b2 = region + 3 * words + 2 * sums;
-    io::read_bulk(in, region + 1, n);
-    io::read_bulk(in, b + 1, n);
-
-    interleave_zeta3(region, b, pairs, n);
+    std::uint32_t* const a = region + words;
+    auto* const t2 = reinterpret_cast<std::uint64_t*>(region + t2_start);
+    std::uint32_t* const c = region + c_start;
+    std::uint32_t* const b2 = region + b2_start;
+    chunked::read(in, a + 1, n);
+    // b chunk by chunk: each is interleaved with a, and the rough zeta sweep takes every segment of
+    // pairs as soon as it is complete.
+    ZetaRough rough(pairs, n, t2);
+    chunked::read(in, region + 2 * words, n, [&](const std::uint32_t* values, std::size_t first, std::size_t count) {
+        interleave(a + first + 1, values, pairs + first + 1, std::uint32_t(count));
+        rough.advance(std::uint32_t(first + count));
+    });
+    rough.finish();
     for (const std::uint32_t p : {5, 7, 11, 13}) zeta_pass(pairs, n, p);
-    zeta_rough(pairs, n, t2);
-    std::uint32_t* const c = b;
-    zeta2_product_moebius2(pairs, c, n);
+    zeta32_product_moebius2(pairs, c, n);
     for (const std::uint32_t p : {3, 5, 7, 11, 13}) moebius_pass(c, n, p);
     moebius_rough(c, n, b2);
 

@@ -4,8 +4,9 @@ N <= 10^6, a_i, b_i < 998244353; print c_k = sum over gcd(i, j) = k of a_i b_j f
 Large tests: N = 10^6, 999982..999984, 994008..994010 (997^2 - 1 + {0, 1, 2}), random values;
 19.8 MB of input, 10 MB of output.
 
-Record when opened: 37 ms (407011). Best judged: ours, [409380](https://judge.yosupo.jp/submission/409380),
-14 ms (#176). Earlier: 15 ms, [409214](https://judge.yosupo.jp/submission/409214).
+Record when opened: 37 ms (407011). Best judged: ours, [409724](https://judge.yosupo.jp/submission/409724),
+13 ms (#351). Earlier: 14 ms, [409380](https://judge.yosupo.jp/submission/409380); 15 ms,
+[409214](https://judge.yosupo.jp/submission/409214).
 
 ## Design
 
@@ -13,11 +14,18 @@ Record when opened: 37 ms (407011). Best judged: ours, [409380](https://judge.yo
   per-prime passes, so the passes can go in any order and be grouped.
 - a and b interleaved as 64-bit pairs [a, b R mod P]: one load fetches both. b is pre-scaled by
   R = 2^32 so one Montgomery reduction gives a b mod P.
-- Memory: one mapping in 2 MiB pages (12 MB): the pairs, with a parsed into their first half
-  (the interleave runs downwards, so it only overwrites a values already read), then b, later c,
-  then the stage-2 sums of the rough sweeps (in the last huge page, already touched by b).
-- Primes 2..13: one AVX2 pass each. Zeta 3 is fused with the interleave; zeta 2 with the product
-  and Moebius 2 (c_i = A_i B_i - A_2i B_2i, the second product recomputed).
+- Input: `chunk_read.hpp`, lib/io's `BulkParser32` copied with 256 KiB chunks. a is parsed whole;
+  b chunk by chunk into one buffer, and each chunk is interleaved with a at once; the rough zeta
+  sweep takes each segment of pairs as soon as it is complete (rough zeta before the small primes).
+- Memory: one mapping in 2 MiB pages, 2.5 N words (5 huge pages): the pairs [0, 2W), with a parsed
+  into their second half (the interleave runs upwards, so each pair overwrites a values already
+  read); b's chunk buffer and the stage-2 zeta sums after them; c from 1.5 N + 128 on, over the
+  pairs' last quarter (the product pass runs downwards, so c_i lands on pairs above 2i + 16, dead)
+  and the dead buffer; then the stage-2 Moebius sums. Every huge page is written before it is read.
+- Primes 5..13: one AVX2 pass each. Zeta 3 and zeta 2 are fused with the product and Moebius 2
+  (c_i = A_i B_i - A_2i B_2i, the second product recomputed): the pass of 3 runs a factor 3 ahead,
+  its targets [8q, 8q + 8) just before the targets [24q, 24q + 24), which are its sources, so the
+  product pass's loads serve both.
 - Primes >= 17 together ("rough": coprime to 30030), in two stages (as `../lcm_convolution`):
   stage 1 takes m > 1 made of primes 17..97, stage 2 m > 1 made of primes above 100. Composing
   them covers every rough m: 1.77 N terms per transform instead of 2.14 N. Both lists are built
@@ -34,7 +42,8 @@ Record when opened: 37 ms (407011). Best judged: ours, [409380](https://judge.yo
     source line from L2 serves all of them. Stage-2 targets i <= 8 walk each piece first: their
     walks bring the piece into L1, and the tiny m then find it there.
 - Output: `../convolution_mod/fields.hpp` (10-byte fields, 16 values per step); the text buffer
-  is the first 250 KB of the pair array, dead by then.
+  is the first 250 KB of the pair array, dead by then (c starts above 1.5 N + 128 words, so the
+  text never overtakes the values it formats).
 - The input mapping is advised `MADV_SEQUENTIAL` (`io::advise_sequential`): its `munmap`
   skips marking pages accessed.
 - Runs from `.preinit_array` and ends with `_exit` (as `convolution_mod`).
@@ -152,19 +161,75 @@ Record when opened: 37 ms (407011). Best judged: ours, [409380](https://judge.yo
 - 2026-10-10, claude (lib, issue #156 round 3): `advise_sequential` comes from
   `lib/io/sequential.hpp` (`io::advise_sequential`) instead of a local copy. Same stripped
   executable as before (judge flags, `lc-amd`).
+- 2026-10-10, claude, round 4 (`agent/gcd_convolution-r4`). Judge image and flags; timing on
+  `lc-k68` (EPYC 7B13, Linux 6.8 as the judge), a fresh copy of the input before every run
+  (`timef.sh`), max_random_01, wall = fork to exit; ratios are medians of paired runs against
+  main. Phases: in-process stamps. Sources, scripts, raw numbers: `lc-opt-explore/gcd_convolution/r4/`.
+  - Main's phases (ms): parse a 1.81, parse b 1.90, interleave + zeta 3 0.57, zeta 5..13 0.61,
+    rough zeta 1.17, zeta 2 + product 0.48, Moebius 3..13 0.40, rough Moebius 0.97, output 4.30;
+    wall 14.27.
+  - c1: b parsed with a callback per 256 KiB chunk (a copy of `../bitwise_xor_convolution`'s
+    `progress_read.hpp`), each chunk interleaved upwards with a (now in the pairs' second half),
+    the rough zeta sweep per complete segment, zeta 3 a separate pass: 1.018 (b's parse with
+    interleave and rough zeta 3.58 against 3.65; zeta 3 alone 0.18; a's parse +0.12, its array
+    now spans 3 huge pages instead of 2). c2: b's values in one reused chunk buffer instead of a
+    4 MB array: 1.011.
+  - c3: 5 huge pages instead of 6: c over the pairs' last quarter and the dead chunk buffer
+    (c_i at 1.5 N + 128 + i or above lands on pairs above 2i + 16, dead in the downward product
+    pass): 0.993.
+  - c4: zeta 3 fused into the product pass a factor 3 ahead (its targets [8q, 8q + 8) just before
+    the product's targets [24q, 24q + 24), its sources): 0.983. Product pass 0.55 against 0.50 +
+    0.19 for zeta 3 alone. Chunks of 2^17 or 2^19 bytes: +0.35%, +0.7%; rough zeta segments 2^14
+    or 2^16: +0.5%, -0.1% (noise). Kept 2^18, 2^15.
+  - a parsed by the same parser (whole, 256 KiB chunks) instead of `io::read_bulk` (128 KiB):
+    0.992 against a control at 0.998. Kept; `lib/io/bulk32.hpp` is no longer used.
+  - Final, 31 runs: 0.980 (14.41 -> 14.10 ms). `judge.py bench`, 31 rounds, slowest 3 cases:
+    `lc-k68` 14.22 -> 14.06 (0.9906), `lc-bench` 14.26 -> 14.15 (0.9831).
+  - No gain: the Moebius pass of 3 fused with the output in blocks of 25600 values (rough Moebius
+    first, so that the pass of 3 is last): 1.012, rough Moebius first alone 1.011; software
+    prefetch 16, 64 or 256 targets ahead in the small-prime passes: same phases; rough zeta before
+    zeta 5..13: same.
+  - Found: the small-prime passes run 1.5x slower in the program than in a warm micro (zeta
+    5..13 0.60 against 0.39 ms; a second run in the same process 0.50, a third 0.42). Not the
+    clock (3.47 GHz throughout, from a chain of adds), not dirty lines (a micro that rewrites the
+    data first: same as warm), not b's dead lines (`clflushopt` on b first: same), not latency
+    (prefetch: same). Cause not found. Reading 20 MB of fresh other data between touching the
+    pairs and a pass costs nothing in a micro; 16 MB of other data in `l3_micro` costs 0.05 ms per
+    pass (an effective L3 near 16-20 MB, a guess).
+  - Reading the region before writing it (a probe) slows parse a and b to 3.6 ms each and the
+    interleave to 2.8: the huge zero page split on Linux 6.8. Every huge page here is written first.
+  - Checks: 29/29 official tests (`judge.py test`, `lc-amd`); 12 more inputs with irregular
+    whitespace (spaces, tabs, CRLF) and edge sizes (1, 47, 48, 1023, 1024, 25600, 131081, 10^6)
+    against main; `stress.py` 300 rounds (judge image); ASan/UBSan (-O1, x86-64-v3, with and
+    without the Zen 3 transpose in lib/io) on all 41 inputs, file and pipe input.
+  - PR #351 merged. CI ratios: EPYC 7763 0.9739 and 0.9878, Xeon 8370C 0.9702.
+- 2026-10-10, claude: submitted the #351 `main.cpp` four times (1/5 to 4/5 of this version).
+  Large cases (max_random 00/01, near_prime 00-02, near_prime_squared 00-02), ms:
+  - [409721](https://judge.yosupo.jp/submission/409721): AC 24 ms, spike on max_random_00
+    (`tools/spikes.py`); the other 7 at 13.
+  - [409722](https://judge.yosupo.jp/submission/409722): AC 22 ms, spike on near_prime_00;
+    13 13 . 13 13 14 13 13.
+  - [409723](https://judge.yosupo.jp/submission/409723): AC 14 ms; 12 14 14 14 13 13 14 14.
+  - [409724](https://judge.yosupo.jp/submission/409724): AC 13 ms, all 8 at 13. New best (was 14).
 
 ## Next
 
-- The rest is I/O: parse 3.3 ms (`lib/io`), output 3.9 ms (`write()` ~3.3), input unmap 0.62,
-  start + exit 1.2. Compute ~3.9 ms: rough sweeps 2.1, small primes and product 1.8 (L3-bound
-  passes over 8 MB).
+- Where 14.1 ms go (`lc-k68`, final): start + exit + input `munmap` ~2.0, parse a ~1.95 (with 3
+  huge-page faults and the input's faults), b's parse with interleave and rough zeta 3.3, zeta
+  5..13 0.63, zeta 3 + 2 + product 0.55, Moebius 3..13 0.37, rough Moebius 0.98, output 4.2
+  (`write()` ~3.3).
+- The small-prime passes run 1.5x slower than warm (above); finding why could be worth 0.2 ms.
+- The rough Moebius could take its sources from segments >= 1 inside the product pass, while they
+  are in L2 (targets into separate sums, as b2): saves reading c once from L3 (4 MB), ~0.05 ms
+  (a guess).
 - Rough sweeps run at ~2 cycles per term where each term is its own L2 line; more stages cut
   terms (three: -0.1 N) but each stage adds by-m calls per segment, which cost more here.
-- `MADV_SEQUENTIAL` on the input is now in three problems (bitwise_and, bitwise_xor, gcd): a
-  candidate for `lib/io`.
 
 ## Sources
 
 - Two stages and their compile-time lists: `../lcm_convolution` (its round 2; the `Stages` and
   `Multipliers` construction is taken from there, the gcd direction worked out here).
 - `MADV_SEQUENTIAL` on the input: `../bitwise_and_convolution/solution.cpp`.
+- `chunk_read.hpp` (round 4): `BulkParser32` of `lib/io/bulk32.hpp` (ours), by way of
+  `../bitwise_xor_convolution/progress_read.hpp` (its callback per chunk); here each chunk's
+  values go to one reused buffer.

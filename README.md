@@ -31,7 +31,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [inv_of_formal_power_series](problems/polynomial/inv_of_formal_power_series) | [11 ms](https://judge.yosupo.jp/submission/409370) | 25 ms |
 | [exp_of_formal_power_series](problems/polynomial/exp_of_formal_power_series) | [16 ms](https://judge.yosupo.jp/submission/409402) | 38 ms |
 | [log_of_formal_power_series](problems/polynomial/log_of_formal_power_series) | [13 ms](https://judge.yosupo.jp/submission/409452) | 32 ms |
-| [pow_of_formal_power_series](problems/polynomial/pow_of_formal_power_series) | [26 ms](https://judge.yosupo.jp/submission/409358) | 52 ms |
+| [pow_of_formal_power_series](problems/polynomial/pow_of_formal_power_series) | [23 ms](https://judge.yosupo.jp/submission/409718) | 52 ms |
 | [sqrt_of_formal_power_series](problems/polynomial/sqrt_of_formal_power_series) | [16 ms](https://judge.yosupo.jp/submission/409316) | 25 ms |
 | [composition_of_formal_power_series](problems/polynomial/composition_of_formal_power_series) | [3 ms](https://judge.yosupo.jp/submission/409336) | 9 ms |
 | [composition_of_formal_power_series_large](problems/polynomial/composition_of_formal_power_series_large) | [35 ms](https://judge.yosupo.jp/submission/409535) | 72 ms |
@@ -46,7 +46,7 @@ Every problem we have finished beats the fastest time on the judge before us.
 | [product_of_polynomial_sequence](problems/polynomial/product_of_polynomial_sequence) | [29 ms](https://judge.yosupo.jp/submission/409448) | 82 ms |
 | [multipoint_evaluation](problems/polynomial/multipoint_evaluation) | [15 ms](https://judge.yosupo.jp/submission/409516) | 39 ms |
 | [multipoint_evaluation_on_geometric_sequence](problems/polynomial/multipoint_evaluation_on_geometric_sequence) | [10 ms](https://judge.yosupo.jp/submission/409475) | 34 ms |
-| [polynomial_interpolation_on_geometric_sequence](problems/polynomial/polynomial_interpolation_on_geometric_sequence) | [15 ms](https://judge.yosupo.jp/submission/409510) | 90 ms |
+| [polynomial_interpolation_on_geometric_sequence](problems/polynomial/polynomial_interpolation_on_geometric_sequence) | [14 ms](https://judge.yosupo.jp/submission/409719) | 90 ms |
 | [polynomial_interpolation](problems/polynomial/polynomial_interpolation) | [20 ms](https://judge.yosupo.jp/submission/409545) | 55 ms |
 | [polynomial_taylor_shift](problems/polynomial/polynomial_taylor_shift) | [10 ms](https://judge.yosupo.jp/submission/409534) | 33 ms |
 | [shift_of_sampling_points_of_polynomial](problems/polynomial/shift_of_sampling_points_of_polynomial) | [11 ms](https://judge.yosupo.jp/submission/409556) | 41 ms |

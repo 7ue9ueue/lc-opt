@@ -3,9 +3,9 @@
 //   b_k = (1 / k!) sum_(i >= k) A_i E_(i-k).
 // In one cyclic convolution of length L = 2^lg >= 2N, A sits at [0, N) and E reversed, E_j at
 // L/2 - j, so b_k k! is coefficient L/2 + k: the upper half in natural order. The transform is
-// ntt::Product's layout (lib/ntt/product.hpp) with the last radix-2 level folded into the output
-// pass. Factorials and c^j / j! come from product chains in 32 lanes whose multipliers are
-// arithmetic progressions. Output in fixed-width fields
+// ntt::Product's layout (lib/ntt/product.hpp); its top inverse levels run for the upper half only.
+// Factorials and c^j / j! come from product chains in 8 lanes whose multipliers are arithmetic
+// progressions, started from lib/poly/factorials.hpp. Output in fixed-width fields
 // (problems/convolution/convolution_mod/fields.hpp).
 #include <algorithm>
 #include <array>
@@ -16,118 +16,111 @@
 #include "lib/io/io.hpp"
 #include "lib/mem/huge.hpp"
 #include "lib/ntt/product.hpp"
-#include "lib/poly/calculus.hpp"
+#include "lib/poly/factorials.hpp"
 #include "lib/run/early.hpp"
 #include "problems/convolution/convolution_mod/fields.hpp"
-#include "problems/polynomial/polynomial_taylor_shift/factorials.hpp"
 
 namespace {
 
 using ntt::detail::add;
 using ntt::detail::broadcast;
 using ntt::detail::diff;
+using ntt::detail::Factor;
 using ntt::detail::kP;
 using ntt::detail::kR;
+using ntt::detail::multiply;
 using ntt::detail::multiply_mod;
 using ntt::detail::power;
 using ntt::detail::reduce;
-using ntt::detail::slot;
 using ntt::detail::Subtrees;
 using ntt::detail::Vec;
 using poly::detail::load;
+using poly::detail::load_unaligned;
 using poly::detail::low;
+using poly::detail::low_difference;
+using poly::detail::montgomery;
+using poly::detail::odd_lanes;
 using poly::detail::store;
+using poly::detail::transpose_steps;
 
 std::uint32_t inverse(std::uint32_t x) { return power(x, kP - 2); }
 
 std::uint32_t mont(std::uint32_t x) { return multiply_mod(x, kR); }  // x 2^32 mod P
 
-// Lanes 1, 3, 5, 7 of x in lanes 0, 2, 4, 6: the operands of _mm256_mul_epu32.
-Vec odd_lanes(Vec x) { return _mm256_srli_epi64(x, 32); }
+constexpr int kLanes = 8;
 
-// a b / 2^32 mod P in [0, 2P) for a b < 2^32 P (for example a, b < 2P), with the odd lanes of a
-// and b in the even lanes of a_odd and b_odd.
-[[gnu::always_inline]] inline Vec montgomery(Vec a, Vec a_odd, Vec b, Vec b_odd) {
-    const Vec ni = broadcast(ntt::kernels::kNI), p = broadcast(kP);
-    Vec even = _mm256_mul_epu32(a, b), odd = _mm256_mul_epu32(a_odd, b_odd);
-    even = _mm256_add_epi64(even, _mm256_mul_epu32(_mm256_mul_epu32(even, ni), p));
-    odd = _mm256_add_epi64(odd, _mm256_mul_epu32(_mm256_mul_epu32(odd, ni), p));
-    return _mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xAA);
-}
+// One value per lane of a scan.
+using Lanes = std::array<std::uint32_t, kLanes>;
 
-// Rows become columns: lane l of r[t] moves to lane t of r[l], t, l < 8.
-[[gnu::always_inline]] inline void transpose(Vec (&r)[8]) {
-    Vec t[8], u[8];
-#pragma GCC unroll 4
-    for (int i = 0; i < 8; i += 2) {
-        t[i] = _mm256_unpacklo_epi32(r[i], r[i + 1]);
-        t[i + 1] = _mm256_unpackhi_epi32(r[i], r[i + 1]);
-    }
-#pragma GCC unroll 2
-    for (int i = 0; i < 8; i += 4) {
-        u[i] = _mm256_unpacklo_epi64(t[i], t[i + 2]);
-        u[i + 1] = _mm256_unpackhi_epi64(t[i], t[i + 2]);
-        u[i + 2] = _mm256_unpacklo_epi64(t[i + 1], t[i + 3]);
-        u[i + 3] = _mm256_unpackhi_epi64(t[i + 1], t[i + 3]);
-    }
-#pragma GCC unroll 4
-    for (int i = 0; i < 4; ++i) {
-        r[i] = _mm256_permute2x128_si256(u[i], u[i + 4], 0x20);
-        r[i + 4] = _mm256_permute2x128_si256(u[i], u[i + 4], 0x31);
-    }
-}
+// 8 steps of the lanes: block[t] holds step t of lane l in lane l.
+using Block = Vec[8];
 
-constexpr int kVectors = 4, kLanes = 8 * kVectors;
+// A product chain in 8 lanes: at its step j, lane s multiplies x by m = base_s + j step mod P,
+// x <- x m / 2^32 in [0, 2P), after recording x. x starts below 2P; base and step below P.
+class Chain {
+public:
+    Chain(const Lanes& x, const Lanes& base, std::uint32_t step)
+        : x_(load_unaligned(x.data())), m_(load_unaligned(base.data())), step_(broadcast(step)) {}
 
-// x[v] = f(8 v + l) in lane l.
-template <class F>
-void fill(Vec (&x)[kVectors], F f) {
-    alignas(32) std::uint32_t values[kLanes];
-    for (int s = 0; s < kLanes; ++s) values[s] = f(s);
-    for (int v = 0; v < kVectors; ++v) x[v] = load(values + 8 * v);
-}
-
-// 8 steps of the lanes: block[v][t] holds step t of lanes 8 v .. 8 v + 7.
-using Block = Vec[kVectors][8];
-
-// A product chain in kLanes lanes: x <- x (base + u) / 2^32, then u <- u + step mod P, so lane s
-// multiplies by base_s + j step at its step j. x in [0, 2P); base and u in [0, P), so their sum
-// is a valid montgomery() operand without a reduction.
-struct Chain {
-    Vec x[kVectors], base[kVectors], base_odd[kVectors], u, step;
-
-    template <class X, class Base>
-    Chain(X initial, Base base_of, std::uint32_t step_value) : u(_mm256_setzero_si256()), step(broadcast(step_value)) {
-        fill(x, initial);
-        fill(base, base_of);
-        for (int v = 0; v < kVectors; ++v) base_odd[v] = odd_lanes(base[v]);
-    }
-
-    // Records the terms in block[v][t], then advances.
+    // Records the terms as step t of block, then advances.
     [[gnu::always_inline]] void advance(Block& block, int t) {
-#pragma GCC unroll 4
-        for (int v = 0; v < kVectors; ++v) {
-            block[v][t] = x[v];
-            x[v] = montgomery(x[v], odd_lanes(x[v]), add(base[v], u), add(base_odd[v], u));
-        }
-        u = reduce(add(u, step), kP);
+        block[t] = x_;
+        x_ = montgomery(x_, odd_lanes(x_), m_, odd_lanes(m_));
+        m_ = reduce(add(m_, step_), kP);
     }
+
+private:
+    Vec x_, m_, step_;
+};
+
+// A chain as Chain with two steps per product on its critical path: from x_j, x_(j+1) = x_j m_j and
+// x_(j+2) = x_j M_j with M_j = m_j m_(j+1) / 2^32. M_(j+2) = M_j + D_j, D_j = (4 step m_j +
+// 6 step^2) / 2^32 and D_(j+2) = D_j + 8 step^2 / 2^32, all mod P in [0, P).
+class PairChain {
+public:
+    PairChain(const Lanes& x, const Lanes& base, std::uint32_t step) {
+        const std::uint32_t unit = inverse(kR);  // 2^-32
+        const std::uint32_t square = multiply_mod(multiply_mod(step, step), unit);
+        Lanes pair, difference;
+        for (int s = 0; s < kLanes; ++s) {
+            pair[s] = multiply_mod(multiply_mod(base[s], (base[s] + step) % kP), unit);
+            difference[s] = (multiply_mod(multiply_mod(std::uint32_t(4 * std::uint64_t(step) % kP), base[s]), unit) + 6 * std::uint64_t(square)) % kP;
+        }
+        x_ = load_unaligned(x.data()), m_ = load_unaligned(base.data());
+        pair_ = load_unaligned(pair.data()), difference_ = load_unaligned(difference.data());
+        step_ = broadcast(std::uint32_t(2 * std::uint64_t(step) % kP));
+        increment_ = broadcast(std::uint32_t(8 * std::uint64_t(square) % kP));
+    }
+
+    // Records steps t and t + 1 as steps 7 - t and 6 - t of block, then advances two steps.
+    [[gnu::always_inline]] void advance_reversed(Block& block, int t) {
+        const Vec x_odd = odd_lanes(x_);
+        block[7 - t] = x_;
+        block[6 - t] = montgomery(x_, x_odd, m_, odd_lanes(m_));
+        x_ = montgomery(x_, x_odd, pair_, odd_lanes(pair_));
+        m_ = reduce(add(m_, step_), kP);
+        pair_ = reduce(add(pair_, difference_), kP);
+        difference_ = reduce(add(difference_, increment_), kP);
+    }
+
+private:
+    Vec x_, m_, pair_, difference_, step_, increment_;
 };
 
 // f(x + c) for n > 64 coefficients and c != 0. L = 2^lg >= 2n with lg even and >= 10 (L / 8 =
-// 2 * 4^j vectors, subtrees of at least 16). Scans run over 32 lanes of C positions each, C a
-// multiple of 16 with C / 16 odd, so the 32 streams of a pass fall into different cache sets;
-// n <= 32 C <= n + 1023. Lanes run in lockstep, 8 steps per block; while the chains compute
+// 2 * 4^j vectors, subtrees of at least 16). Scans run over 8 lanes of C positions each, C a
+// multiple of 64 with C / 64 odd, so the 8 streams of a pass fall into different cache sets;
+// n <= 8 C <= n + 1023. Lanes run in lockstep, 8 steps per block; while the chains compute
 // block j + 1, the lanes of block j are transposed into position order and stored.
 // Buffers of L words: A, then the product, in a; E, then the output, in b. One mapping in huge
 // pages, never freed; single use.
 class TaylorShift {
 public:
-    explicit TaylorShift(std::size_t n) : n_(n) {
+    explicit TaylorShift(std::size_t n) {
         lg_ = std::max(10, int(std::bit_width(2 * n - 1)));
         lg_ += lg_ % 2;
-        chunk_ = ((n + kLanes - 1) / kLanes + 15) / 16 * 16;
-        if (chunk_ / 16 % 2 == 0) chunk_ += 16;
+        chunk_ = ((n + kLanes - 1) / kLanes + 63) / 64 * 64;
+        if (chunk_ / 64 % 2 == 0) chunk_ += 64;
         const std::size_t len = length(), tables = ntt::detail::table_words(lg_);
         mem::Arena arena((2 * len + 3 * kPadding + 2 * tables) * sizeof(std::uint32_t) + fields::kTextBytes);
         arena.take<std::uint32_t>(kPadding);
@@ -161,129 +154,119 @@ public:
             x = (x % kP + (t < 4 ? 1 : kP - 1)) % kP;
         }
         const Subtrees subtrees(roots_, inverse_roots_);
-        for (std::size_t t = 0; t < 4; ++t) subtrees.visit(av + t * q, bv + t * q, q, t);
-        ntt::kernels::inverse_identity(av, q, inverse_roots_);
-        for (std::size_t t = 4; t < 8; ++t) subtrees.visit(av + t * q, bv + t * q, q, t);
-        ntt::kernels::inverse(av + 4 * q, q, inverse_roots_ + slot(1), inverse_roots_ + slot(2));
+        for (std::size_t t = 0; t < 8; ++t) subtrees.visit(av + t * q, bv + t * q, q, t);
+        top_upper(av, q);
         output();
         return b_;
     }
 
 private:
-    // Words before b and after each buffer: E's padding terms reach 1023 words below b, the
-    // output pass reads up to 1023 words past a. 1040 words (a multiple of 64 bytes) also put a
-    // and b 64 bytes apart in cache-set terms.
+    // Words before b and after each buffer: E's padding terms reach 1023 words below b. 1040
+    // words (a multiple of 64 bytes) also put a and b 64 bytes apart in cache-set terms.
     static constexpr std::size_t kPadding = 1040;
 
     std::size_t length() const { return std::size_t(1) << lg_; }
     std::size_t start(int s) const { return s * chunk_; }
 
-    // factorial_[s] = start(s)!, inverse_start_[s] = 1 / start(s)!, s <= kLanes. Lane s computes
-    // start(s + 1)!: from y = start(s + 1) rounded down to a multiple of 1024, x = y! 2^32 (the
-    // table), multipliers (y + 1) 2^32, (y + 2) 2^32, ... for start(s + 1) - y < 1024 steps,
-    // then 2^32.
+    // factorial_[s] = start(s)!, inverse_[s] = 1 / start(s)!, s <= 8.
     void lane_factorials() {
-        using factorials::kStep;
-        const auto below = [this](int s) { return std::uint32_t(start(s + 1) / kStep * kStep); };
-        Vec x[kVectors], m[kVectors], count[kVectors];
-        fill(x, [&](int s) { return mont(factorials::kTable[below(s) / kStep]); });
-        fill(m, [&](int s) { return mont(below(s) + 1); });
-        fill(count, [&](int s) { return std::uint32_t(start(s + 1) - below(s)); });
-        const Vec unit = broadcast(kR);
-        for (std::uint32_t j = 0; j < kStep - 1; ++j) {
-            const Vec step = broadcast(j);
-#pragma GCC unroll 4
-            for (int v = 0; v < kVectors; ++v) {
-                const Vec factor = _mm256_blendv_epi8(unit, m[v], _mm256_cmpgt_epi32(count[v], step));
-                x[v] = montgomery(x[v], odd_lanes(x[v]), factor, odd_lanes(factor));
-                m[v] = reduce(add(m[v], unit), kP);
-            }
-        }
-        alignas(32) std::uint32_t lane_x[kLanes];
-        for (int v = 0; v < kVectors; ++v) store(lane_x + 8 * v, x[v]);
-        const std::uint32_t unit_inverse = inverse(kR);
-        factorial_[0] = 1;
-        for (int s = 0; s < kLanes; ++s) factorial_[s + 1] = multiply_mod(lane_x[s] % kP, unit_inverse);
-        std::uint32_t f = 1;  // batch inversion
-        for (int s = 0; s <= kLanes; ++s) inverse_start_[s] = f, f = multiply_mod(f, factorial_[s]);
-        f = inverse(f);
-        for (int s = kLanes; s >= 0; --s)
-            inverse_start_[s] = multiply_mod(inverse_start_[s], f), f = multiply_mod(f, factorial_[s]);
+        poly::Lanes points{};
+        for (int s = 0; s <= kLanes; ++s) points[s] = std::uint32_t(start(s));
+        const poly::Lanes f = poly::factorials(points);
+        std::copy_n(f.begin(), kLanes + 1, factorial_.begin());
+        inverse_ = factorial_;
+        poly::invert(inverse_);
     }
 
-    // A_i = a_i i! in place in a, i < 32 C (the input is zero from n on), and E_j = c^j / j! at
-    // L/2 - j in b for 0 < j <= 32 C. Lane s of the input chain starts at i = start(s): x = i! 2^32,
+    // A_i = a_i i! in place in a, i < 8 C (the input is zero from n on), and E_j = c^j / j! at
+    // L/2 - j in b for 0 < j <= 8 C. Lane s of the input chain starts at i = start(s): x = i! 2^32,
     // multipliers (i + 1) 2^32. Lane s of the E chain starts at j = start(s + 1) and runs down:
     // y = E_j, multipliers j c^-1 2^32. Terms E_j with j >= n are harmless: they meet A only in
     // coefficients below L/2.
     void weights(std::uint32_t c) {
-        const std::uint32_t c_chunk = power(c, std::uint32_t(chunk_)), c_step = mont(inverse(c));
-        std::array<std::uint32_t, kLanes> c_power;  // c^start(s + 1)
-        for (int s = 0; s < kLanes; ++s) c_power[s] = s ? multiply_mod(c_power[s - 1], c_chunk) : c_chunk;
-        Chain input([this](int s) { return mont(factorial_[s]); },
-                    [this](int s) { return mont(std::uint32_t(start(s) + 1)); }, kR);
-        Chain kernel([&](int s) { return multiply_mod(c_power[s], inverse_start_[s + 1]); },
-                     [&](int s) { return multiply_mod(std::uint32_t(start(s + 1)), c_step); }, kP - c_step);
-        const std::size_t stride = chunk_;
+        const std::size_t chunk = chunk_;
+        const std::uint32_t c_chunk = power(c, std::uint32_t(chunk)), c_step = mont(inverse(c));
+        Lanes x, up, y, down;
+        std::uint32_t c_power = 1;  // c^start(s + 1)
+        for (int s = 0; s < kLanes; ++s) {
+            c_power = multiply_mod(c_power, c_chunk);
+            x[s] = mont(factorial_[s]), up[s] = mont(std::uint32_t(start(s) + 1));
+            y[s] = multiply_mod(c_power, inverse_[s + 1]), down[s] = multiply_mod(std::uint32_t(start(s + 1)), c_step);
+        }
+        Chain input(x, up, kR), kernel(y, down, kP - c_step);
         Block forward[2], backward[2];
 #pragma GCC unroll 8
         for (int t = 0; t < 8; ++t) input.advance(forward[0], t), kernel.advance(backward[0], t);
-        for (std::size_t j = 0, cur = 0; j < stride; j += 8, cur ^= 1) {
-            std::uint32_t* const a = a_ + j;                         // lane s at a + s C
-            std::uint32_t* const e = b_ + length() / 2 - stride + j;  // lane s at e - s C
+        for (std::size_t j = 0, cur = 0; j < chunk; j += 8, cur ^= 1) {
+            std::uint32_t* const a = a_ + j;                        // lane s at a + s C
+            std::uint32_t* const e = b_ + length() / 2 - chunk + j;  // lane s at e - s C
 #pragma GCC unroll 8
             for (int t = 0; t < 8; ++t) {
                 input.advance(forward[cur ^ 1], t);
                 kernel.advance(backward[cur ^ 1], t);
-                const int v = kVectors * t / 8, first = kVectors * t % 8;
-                if (first == 0) transpose(forward[cur][v]), transpose(backward[cur][v]);
-#pragma GCC unroll 4
-                for (int l = first; l < first + kVectors; ++l) {
-                    const std::size_t at = (8 * v + l) * stride;
-                    const Vec f = load(a + at), x = forward[cur][v][l];
-                    store(a + at, reduce(montgomery(f, odd_lanes(f), x, odd_lanes(x)), kP));
-                    store(e - at, reduce(backward[cur][v][l], kP));
-                }
+                if (t == 0) transpose_steps(forward[cur]), transpose_steps(backward[cur]);
+                const std::size_t at = t * chunk;  // lane t
+                const Vec f = load(a + at), w = forward[cur][t];
+                store(a + at, reduce(montgomery(f, odd_lanes(f), w, odd_lanes(w)), kP));
+                store(e - at, reduce(backward[cur][t], kP));
             }
         }
     }
 
-    // b_k = (A E)[L/2 + k] / k! into b, from the halves u, w of a after their top inverse groups:
-    // (A E)[L/2 + k] = (u - w)[k] times the transform's scale. Lane s of the chain starts at
-    // k = start(s + 1) - 1 and runs down: z = (L / 8)^-1 2^64 / k!, multipliers k 2^32. The leaf
-    // products carry 2^-32 and the transform a factor L / 8; montgomery() with z undoes both.
-    // Outputs k >= n are padding.
+    // The top inverse levels for the upper half only: blocks a[t q, (t + 1) q) hold the identity
+    // group (t < 4) and group 1 (t >= 4) of the halves u and w, < 2P; block m < 4 gets quarter m
+    // of u - w, < 2P: kernels.hpp's inverse_identity and inverse, then the difference of the last
+    // radix-2 level.
+    void top_upper(Vec* a, std::size_t q) const {
+        const std::uint32_t* const ir = inverse_roots_;
+        const Factor x(ir[1], ir[9]), y(ir[2], ir[10]), z(ir[3], ir[11]);  // identity group: z = x
+        for (Vec* f = a; f != a + q; ++f) {
+            const Vec ab = low(add(f[0], f[q])), cd = low(add(f[2 * q], f[3 * q]));
+            const Vec amb = low_difference(f[0], f[q]), cmd = multiply(diff(f[2 * q], f[3 * q]), x);
+            const Vec gab = low(add(f[4 * q], f[5 * q])), gcd = low(add(f[6 * q], f[7 * q]));
+            const Vec gamb = multiply(diff(f[4 * q], f[5 * q]), y), gcmd = multiply(diff(f[6 * q], f[7 * q]), z);
+            f[0] = low_difference(low(add(ab, cd)), low(add(gab, gcd)));
+            f[q] = low_difference(low(add(amb, cmd)), low(add(gamb, gcmd)));
+            f[2 * q] = low(diff(low_difference(ab, cd), multiply(diff(gab, gcd), x)));
+            f[3 * q] = low(diff(low_difference(amb, cmd), multiply(diff(gamb, gcmd), x)));
+        }
+    }
+
+    // b_k = (A E)[L/2 + k] / k! into b, from u - w in a (top_upper): (A E)[L/2 + k] = (u - w)[k]
+    // times the transform's scale. Lane s of the chain starts at k = start(s + 1) - 1 and runs
+    // down: z = (L / 8)^-1 2^64 / k!, multipliers k 2^32. The leaf products carry 2^-32 and the
+    // transform a factor L / 8; montgomery() with z undoes both. Outputs k >= n are padding.
     void output() {
+        const std::size_t chunk = chunk_;
         const std::uint32_t scale = multiply_mod(mont(inverse(std::uint32_t(length() / 8))), kR);
-        Chain chain([&](int s) { return multiply_mod(multiply_mod(inverse_start_[s + 1], std::uint32_t(start(s + 1))), scale); },
-                    [this](int s) { return mont(std::uint32_t(start(s + 1) - 1)); }, kP - kR);
-        const std::size_t stride = chunk_, half = length() / 2;
+        Lanes z, down;
+        for (int s = 0; s < kLanes; ++s) {
+            z[s] = multiply_mod(multiply_mod(inverse_[s + 1], std::uint32_t(start(s + 1))), scale);
+            down[s] = mont(std::uint32_t(start(s + 1) - 1));
+        }
+        PairChain chain(z, down, kP - kR);
         Block block[2];
-#pragma GCC unroll 8
-        for (int t = 0; t < 8; ++t) chain.advance(block[0], 7 - t);
-        for (std::size_t j = 0, cur = 0; j < stride; j += 8, cur ^= 1) {
-            const std::uint32_t* const u = a_ + stride - 8 - j;  // lane s at u + s C
-            std::uint32_t* const out = b_ + stride - 8 - j;
+#pragma GCC unroll 4
+        for (int t = 0; t < 8; t += 2) chain.advance_reversed(block[0], t);
+        for (std::size_t j = 0, cur = 0; j < chunk; j += 8, cur ^= 1) {
+            const std::uint32_t* const u = a_ + chunk - 8 - j;  // lane s at u + s C
+            std::uint32_t* const out = b_ + chunk - 8 - j;
 #pragma GCC unroll 8
             for (int t = 0; t < 8; ++t) {
-                chain.advance(block[cur ^ 1], 7 - t);
-                const int v = kVectors * t / 8, first = kVectors * t % 8;
-                if (first == 0) transpose(block[cur][v]);
-#pragma GCC unroll 4
-                for (int l = first; l < first + kVectors; ++l) {
-                    const std::size_t at = (8 * v + l) * stride;
-                    const Vec g = low(diff(load(u + at), load(u + at + half))), z = block[cur][v][l];
-                    store(out + at, reduce(montgomery(g, odd_lanes(g), z, odd_lanes(z)), kP));
-                }
+                if (t % 2 == 0) chain.advance_reversed(block[cur ^ 1], t);
+                if (t == 0) transpose_steps(block[cur]);
+                const std::size_t at = t * chunk;  // lane t
+                const Vec g = load(u + at), w = block[cur][t];
+                store(out + at, reduce(montgomery(g, odd_lanes(g), w, odd_lanes(w)), kP));
             }
         }
     }
 
-    std::size_t n_, chunk_;
+    std::size_t chunk_;
     int lg_;
     std::uint32_t *a_, *b_, *roots_, *inverse_roots_;
     char* text_;
-    std::array<std::uint32_t, kLanes + 1> factorial_, inverse_start_;
+    std::array<std::uint32_t, kLanes + 1> factorial_, inverse_;
 };
 
 // f(x + c) by Horner's rule in O(n^2): g <- g (x + c) + a_i from the top.

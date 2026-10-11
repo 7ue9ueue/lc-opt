@@ -18,7 +18,7 @@ LIMIT = 1 << 19
 
 def size(rng: random.Random, r: int) -> int:
     if r % 10 == 9:
-        m = 512 * (2 * rng.randrange(8) + 1)  # 32 lanes of C = m / 32, C / 16 odd
+        m = 512 * (2 * rng.randrange(8) + 1)  # 8 lanes of C = m / 8, C / 64 odd
         return rng.choice([rng.randint(1, LIMIT), LIMIT, LIMIT - 1, (1 << rng.randint(10, 18)) + rng.randint(-2, 2),
                            m + rng.randint(-2, 2)])
     kind = rng.randrange(5)

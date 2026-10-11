@@ -307,8 +307,24 @@ negations: the inverse update and the root step both come out with the right sig
   `inverse.hpp` takes 10 T(2^19) and 4 LP(2^19).
 - Below 64 coefficients: 2 c g_i = f_i - sum_(0<j<i) g_j g_(i-j); h mod x^32 by `inverse_direct`
   of g, negated.
-- Scratch: G, T(h) and work (length m_last each), h (m_last / 2); in the last step h holds
-  r[m/2, rest) (H keeps h's transform). f and g must not overlap: every step reads f[0, 2m).
+- Buffers (round 2, issue #66): a, b, ht of m_last words. During the steps a holds g from 0 and
+  h from m_last / 2 (the last full step writes g[m_last/2, m_last) there once h is no longer
+  needed); b holds G and the work of e and the h update (b[m, 2m)), then g^2 in place of G and
+  the product for g[m, 2m) over all of b; ht holds H, then T_2m(h). The last step needs G, H
+  and one work buffer; r[m/2, rest) and g[m, n) go to the output span, which may be f[m, n).
+  `sqrt()` is `sqrt_steps`, an out-of-place forward of g mod x^m and `sqrt_last_step`
+  (scratch 3 m_last words); the problem calls the parts itself (its notes).
+- Passes between products (`inverse_columns`: the inverse top level by columns, the caller
+  consumes the outputs): e's inverse top level writes the h update's forward top level (as
+  inv's step.hpp); inverse top levels write h[m/2, m), g[m, 2m), d0, d1 to their places (no
+  copies); g^2's inverse top level computes r (and for m radix 2 T_2m(r)'s radix-4 top level);
+  in the last step d0 and r1 + (g d0)[m/2, rest) are written in place as the next product's
+  source (radix-8 top for radix 2, `forward_lower4` for radix 4).
+- Stream counts decide which passes to fuse: a pass touching 8 or more streams 2^k words apart
+  in one array is slower than two passes (see Log, issue #66 round 2). The last step's residual
+  stays a separate linear pass after the inverse top level; T_2m(h) stays a plain forward.
+- g^2 by `leaf_square`: the odd outputs of a leaf square pair a_i a_j (i even) with a_j a_i, so
+  12 products and a doubling instead of 16 products (0.991 of sqrt in process).
 - Alternatives considered, not done:
   - power(f, 1/2, c) (exp of log / 2): 2.25 times slower whole process (see Log).
   - h at full precision m (the update after g[m, 2m)): 17 transforms per step.
@@ -319,7 +335,9 @@ negations: the inverse update and the root step both come out with the right sig
     transforms of length 2^17 and 10 leaf products, against the split's 8 of length 2^18
     (~16 of 2^17) and 4 (8 of 2^17). Newton to 2^17, then blocks of 2^16: 23 transforms of
     2^17 and 33 leaf products against 27 and 13; a leaf product at 2^17 costs ~0.87 of a
-    transform (0.12 vs 0.138 ms, `lc-amd`).
+    transform (0.12 vs 0.138 ms, `lc-amd`). Recounted in round 2 with measured costs (`lc-bench`:
+    forward of 2^17 141 us, leaf products ~78): the last stage in 4 blocks of 2^16 with stored
+    transforms of g's chunks, ~4.1 ms against 3.0 for the split.
   - The inverse square root f^(-1/2) is 1/g = -h already; its own Newton step, u + u (1 -
     f u^2) / 2, needs f u^2 mod x^2m, a longer product than g h.
   - Harvey's 4/3 M(n) square root (Harvey 2011 below; 8 T(n) with M(n) = 6 T(n)): blocked,
@@ -376,13 +394,24 @@ the same with e = 1/2. log is `Recurrence` on G = n g (taps (d, -f_d), r = n f_n
   block, 2.21 ms with it (`lc-amd`, in memory, reciprocals included): mostly throughput.
 - Reciprocals 2^32 / m: odd m by batch inversion (`BatchInverter`) in windows of 16384
   coefficients; even m from a table of the first half, 2^32 / m = (2^32 / (m / 2)) / 2, with the
-  1/2 folded into the even lanes of V, Q (`columns(..., true)`; not V', added after y). The table
-  (2 MiB at N = 10^6) is in transparent huge pages. The kernel loop runs the next window's batch
-  inversion, a half step (two chains of 8 lanes) per block: independent work for the cycles the
-  chain from block to block leaves free. The 32 lane totals by a product tree (as `Divider`).
-  The block kernel runs the half step before the triangle (1-3% faster than after it, w <= 4).
-  Without the inversion (a probe, outputs wrong) the kernels take 0.18 (w = 2) to 0.31 ms
-  (chained) less: 9-14% of the solve.
+  1/2 folded into the even lanes of V, Q (`columns(..., true)`; not V', added after y). The kernel
+  loop runs the next window's batch inversion, a half step (two chains of 8 lanes) per block:
+  independent work for the cycles the chain from block to block leaves free. The 32 lane totals
+  by a product tree (as `Divider`). The block kernel runs the half step before the triangle (1-3%
+  faster than after it, w <= 4). Without the inversion (a probe, outputs wrong) the kernels take
+  0.18 (w = 2) to 0.31 ms (chained) less: 9-14% of the solve.
+- Batch inversion lazy (#73 round 2): prefix products and q stay below 2P (a < 2P, x < P gives
+  a x / 2^32 + P < 1.47 P), only y is reduced; the half step's two chains unrolled. 47 -> 43
+  vector ops per 8 odd values; in process (`lc-bench`) w = 3, 4, 5 (block kernel, slopes):
+  2.03, 2.15, 2.26 -> 1.97, 2.09, 2.17 ms; chained 2.23 -> 2.17; exp w = 3, 7: -0.02, -0.04.
+- Memory (#73 round 2): the table is a ring of R = (end + kWindow) / 2 words (end = N / 2 + 8;
+  258208 words, 1 MB, at N = 10^6): entry m is last read in window 2m / kWindow, and the write of
+  m + R comes in a later window since R >= m + kWindow for every m that has one. Reads wrap once
+  (at n = 2R, where a kernel call is cut), writes once (R is a multiple of 16). After the table:
+  the two windows of odd reciprocals (66 KB, were `std::vector`s: 16 4 KiB page faults) and the
+  caller's spare words (`spare()`, the constructor's last argument). One 2 MiB page holds all of
+  it: sqrt sparse keeps its coefficient ring and text there (one page fault less, 55-70 us on
+  `lc-bench`; 90 fresh 4 KiB pages take 135-155 us).
 - Chained kernel (w <= 8; used from w = 5 without slopes and from w = 6 with them, where it
   wins): blocks of 8. A block's state is the previous block's top w values, T H_prev (T: those
   rows of F mod x^8), so W = M(n) H_prev with M(n) = V(n) T = M0 + n M1 (8 x 8). The chain
@@ -404,6 +433,29 @@ the same with e = 1/2. log is `Recurrence` on G = n g (taps (d, -f_d), r = n f_n
   time without it). Zen 3 at 3.43 GHz (`lc-bench`): the chained kernel with slopes takes 123
   cycles per 16 coefficients for about 310 vector ops; its chain is about 36 cycles per 8.
   `-DHOLONOMIC_CHAINED=0` or `1` forces it off, or on for every w <= 8 (tests).
+- Where the time goes (#73 round 2, `lc-bench`, probes on the block kernel with slopes, w = 3, 4,
+  5, outputs wrong): without the triangle 0.61, 0.67, 0.69 ms less (of 1.97, 2.09, 2.17);
+  without the V(n) advance 0.10, 0.16, 0.17; without the batch inversion 0.15, 0.18, 0.17
+  (chained 0.25). Loop bodies (GCC 15): chained with slopes 428 instructions per 16 coefficients
+  (96 `vpmuludq`, 68 `vpaddq`, 58 `vpaddd`, 68 `vmovdqa`; M on the stack, 4 constants rebuilt by
+  `mov`/`vmovd`/`vpbroadcastd` per iteration), plus 50-80 for the inverter's half step; block
+  kernel w = 3 about 285 (88 `vpmuludq`). The first variant below adds about 20 ops per 16
+  coefficients and 9 cycles: ops, not the chain, set the time.
+- Not kept (#73 round 2, `lc-bench`, in process):
+  - One Montgomery step for H = y W: W_lo (y / 2^32) + W_hi y, y / 2^32 by a REDC of y: chained
+    2.24 -> 2.40. 12 ops per vector instead of 11 (an extra shift, and below 2.5P two
+    subtractions), plus the REDC; the chain is 4 cycles shorter per block, which does not pay.
+  - The inversion in begin_window only (not interleaved): +0.06 (chained) to +0.3 ms (w = 3).
+  - M H and F H interleaved column by column (fewer live broadcasts): chained 2.17 -> 2.19,
+    without slopes 1.96 -> 2.12.
+  - M(n) in the object instead of a local: 2.17 -> 2.20.
+  - Constants read from a non-const table (memory operands instead of rebuilt broadcasts): +0.04
+    to +0.07 ms in every kernel. `-fno-lra-remat`, `-fira-region=one`, `-fsched-pressure` and
+    others leave the rebuilt constants as they are.
+  - The inverter's state in locals with one pointer (no reloads after the stores, no index
+    arithmetic): equal within 0.01 ms.
+  - The chained kernel at w = 5 with slopes: 2.175-2.188 against 2.173-2.204: equal, the
+    threshold stays at w = 6.
 
 `Divider` (`divider.hpp`): g[n] = G[n] / n, called on consecutive ranges (multiples of 64 but
 the last), in place or not. For log: G from `Recurrence` in chunks, divided after the chunk's
@@ -807,14 +859,23 @@ Lagrange interpolation on 0, 1, ..., N - 1.
   by value.
 - polynomial_taylor_shift on this header (scan, or its loops written out with `Chain`): equal
   passes in process and `judge.py bench` 1.0000-1.0008 (`lc-bench`), 0.9969 (`lc-intel`), but
-  CI 1.0008, 1.0050, 1.0038, 1.0046 over four versions. Not switched in #264; it keeps its own
-  copy (`problems/polynomial/polynomial_taylor_shift/factorials.hpp`) for now.
+  CI 1.0008, 1.0050, 1.0038, 1.0046 over four versions. Not switched in #264. Switched in issue
+  #79 round 2 with its 8-lane scans: `factorials`, `invert`, `montgomery`, `odd_lanes`,
+  `transpose_steps`; its own copy and `factorials.py` are gone.
+- Lane count (polynomial_taylor_shift round 2, `lc-bench`, warm, 2^19 positions): 32 lanes lose
+  ~0.08 ms per pass to their 32 load streams (a pass with the loads replaced by register values:
+  0.33 -> 0.25 ms in the weights pass, 0.26 -> 0.17 in the output pass; software prefetch and
+  copying the next block's loads ahead did not help). Two chains (load, product, two stores) in
+  8 lanes: 0.33 ms against 0.40 for 32 lanes and 0.44 for 16 (spills). A single chain in 8 lanes
+  is latency-bound; taking two steps per product (x_(j+2) = x_j m_j m_(j+1), the pair multiplier
+  kept by second differences) gives 0.227 against 0.28 (one chain, product, store).
 - Lane length (`lc-bench`, one chain with a store, or a load, a product and a store, per 2^20
   positions, warm): C = 32784 (32 long lanes): 0.289 / 0.472 ms; blocks of 32 lanes of 1040:
   0.243 / 0.427; of 264: 0.247 / 0.537; of 64: 0.302 / 0.466. Powers of two alias: C = 32768
   took 1.41 / 1.45 ms, C = 4096 0.42 / 0.55.
 - Users: shift_of_sampling_points_of_polynomial (1 / i!, the prefix products of d + t and their
-  inverses).
+  inverses), polynomial_taylor_shift (lane starts and the vector helpers; its 8-lane chains are
+  its own).
 - Tests: `factorial` and `factorials` against running products (table boundaries, the limit,
   random), `invert` (sizes 0..1000, values 1 and P - 1), chains through `scan` against scalar
   products (forward and reversed, steps 8..512, bases and steps near 0 and P), `scan_chunk`'s
@@ -1777,6 +1838,31 @@ product-tree lanes):
   w_p, odd w_p not negated, one constant for both halves, no e, the last step's product with the
   given T_m(q mod x^m) in the lower half only, block 3 from lo instead of the given T_m(q_2))
   fail them.
+- Merged as #348. CI: pow 0.9839, compositional_inverse 0.9917, _large 0.9942, exp 0.9980, log
+  1.0066 (identical code); all 5 0.9948. Judged: pow [409718](https://judge.yosupo.jp/submission/409718)
+  AC 23 ms (was 26; three earlier runs had launch spikes, clean 24).
+
+2026-10-10, claude (issue #66, sqrt round 2; owner lane):
+- `sqrt.hpp` only (no other header changed; only the sqrt bundle includes it): new public
+  `sqrt_steps` and `sqrt_last_step` (Sqrt above), `sqrt()` on top of them with the same
+  signature; `sqrt_scratch` 3.5 -> 3 buffers of m_last words. Passes shared between products,
+  direct writes instead of copies, sources in place (radix-8 tops), `leaf_square` and
+  `InverseSquareBottom` for g^2.
+- In-process A/B against main (`lc-bench`, 41 alternating calls, outputs equal): `sqrt` at
+  N = 500000 0.985, 262144 0.971, 200000 0.987; in the problem's layout 0.976.
+- Fusing has a limit (`lc-bench`, in process, per pass): T_2m(h)'s radix-2 top level written by
+  the h update's last pass at m = 2^17 (4 loads of the product, 2 of h, 2 stores of h and 8 of
+  T_2m(h), each group 128 KB apart): 253 us, against 18 for the pass without it plus the
+  forward's own top level (~25, guess); with it the whole sqrt was 1.049 against main. The residual in the last step's inverse top level (8 streams of f 2^k words apart and
+  2 stores into f): radix 4 at 2^17 227 us against ~85 in separate passes; radix 2 at 2^18 98
+  against 97. In a full step at radix 4 (8 streams of f, the product in place, no stores into
+  f) the fused residual is neutral (60 against 62 us), so it stays there.
+- Tests: the two parts in place (g[m, n) over f[m, n)) at offsets 0-3 words, both radices, one
+  and two products in the last step. -O2 and ASan/UBSan, `lc-amd` native and `lc-intel`
+  x86-64-v3. Mutations fail them (8): leaf_square without the doubling, the radix-2 middle pass
+  without the negation, h stored at j only for radix 4, a radix-4 residual quarter at the wrong
+  column, d1's count one short, d1's source without r1, d0 stored at j for both radix-4
+  vectors, the last step's radix-4 source taken as a written top level.
 
 ## Sources
 

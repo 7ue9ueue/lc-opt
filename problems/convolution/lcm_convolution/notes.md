@@ -4,7 +4,8 @@ N <= 10^6, a_i, b_i < 998244353; print c_k = sum over lcm(i, j) = k of a_i b_j f
 Large tests: N = 10^6 (max_random), near primes and near prime squares; ~20 MB input, 10 MB output.
 
 Record when opened: 37 ms. Best judged: ours, [409551](https://judge.yosupo.jp/submission/409551),
-14 ms. Earlier: 16 ms, [409237](https://judge.yosupo.jp/submission/409237).
+14 ms; round 4's [409729](https://judge.yosupo.jp/submission/409729) also 14 ms (half the large
+cases at 13). Earlier: 16 ms, [409237](https://judge.yosupo.jp/submission/409237).
 
 ## Design
 
@@ -12,30 +13,37 @@ Record when opened: 37 ms. Best judged: ours, [409551](https://judge.yosupo.jp/s
   ascending), Moebius x_ip -= x_i (i descending). The passes commute.
 - Same skeleton as `../gcd_convolution` (read for ideas, code written here): pairs [a | b R] so one
   load fetches both, b pre-scaled by R = 2^32 for one Montgomery reduction per product; one
-  mapping in 2 MiB pages: the pairs (later c as dwords), then 1 MB of scratch (chunks of b, later
-  the sweeps' prefix copies, later the output text). 5 huge pages.
-- a is parsed into the second half of the pair array, so the interleave runs upwards (pair k
-  overwrites only a values below k). b is parsed in chunks of 262080 values into the scratch,
-  each interleaved right away. Zeta 3 is fused with the interleave, target-contiguous: 24 targets
-  per step take 8 sources k / 3 from below (permute + blend).
+  mapping in 2 MiB pages: the pairs (later c as dwords), then scratch (chunks of b, later the
+  sweeps' prefix copies, later the output text), then the parser's workspace. 5 huge pages.
+- Input: `chunk_read.hpp`, lib/io's `BulkParser32` with 256 KiB chunks and its scratch in the
+  region (no static arrays), calling back per chunk. a is parsed into the second half of the pair
+  array, so the interleave runs upwards (pair k overwrites only a values below k). b is parsed in
+  one call, chunk by chunk into the scratch (~26k values), each chunk interleaved while in L2.
+- Zeta 3, 5, 7 with the interleave, final sources: y_k = x_k - sum of mu(d) y_k/d over squarefree
+  d > 1 made of 3, 5, 7. d = 3 by vectors (24 targets per step take 8 sources k / 3 from below,
+  permute + blend); the other six terms (0.50 N) by strided runs over each range of 2016 targets
+  just written (in L1). A range [s, e) has e <= 3 s, so its sources are final.
 - Zeta 2 + product + Moebius 2 in one ascending sweep: A_k += A_k/2, c_k = A_k B_k - A_k/2 B_k/2
   (the second product recomputed), 16 targets per step.
-- Moebius 3..13: scalar passes on c.
-- All other zeta primes in one sweep, three stages. Stage 0: m > 1 made of 5, 7, 11, 13 (222 m,
-  0.74 N contributions; the old-source form needs every such m). Stage 1: m > 1 with all prime
-  factors in 17..97; stage 2: m > 1 with all prime factors >= 101. Rough m with factors on both
-  sides come from composing 1 and 2: 1.77 N contributions per transform instead of 2.14 N. The
-  lists are built at compile time (constexpr sieve over the 30030 wheel's indices; stage 2 has
-  120759 m <= 10^6, 487 KB).
-  - Zeta = 0, then 1, then 2. Stage 1's sources are below n / 17, stage 2's below n / 101:
-    prefix copies with the earlier stages applied serve them (prefix 1 by per-prime passes,
-    prefix 2 by source). Target segments of 2^15 pairs descend: stage 0 sources (below the
-    segment) are still old. Segment 0 by source, stage 0 first.
-  - Moebius = stage 1 after stage 2, each c_im -= final c_i. A prefix copy gets stage 2 first;
-    segments of 2^15 dwords ascend, stage 1 reads final values below.
+- Moebius 3 and 5: scalar passes on c. Moebius 7, 11, 13: one pass, old sources, c_k += sum of
+  mu(d) c_k/d over squarefree d made of them (0.34 N), target ranges of 4096 descending, each
+  above its sources.
+- All other zeta primes in one sweep, four stages. Stage 0: m > 1 made of 11 and 13 (20 m, 0.19 N;
+  the old-source form needs every such m). Stage 1: m > 1 with all prime factors in 17..47;
+  stage 2: in 53..293; stage 3: >= 307. Rough m with factors in several stages come from
+  composing them: 1.67 N contributions per transform (two stages cut at 100: 1.77 N; all rough
+  m: 2.14 N). The lists are built at compile time (constexpr sieve over the 30030 wheel's
+  indices; stage 3 has 94793 m <= 10^6, 383 KB).
+  - Zeta = 0, then 1, 2, 3. Stage s > 0 reads its sources (below n / 17, n / 53, n / 307) from a
+    prefix copy with the earlier stages applied (prefix 1 by per-prime passes, 2 and 3 by
+    source). Target segments of 2^15 pairs descend: stage 0 sources (below the segment) are still
+    old. Segment 0 by source, stage 0 first.
+  - Moebius = stage 1 after 2 after 3, each c_im -= final c_i. Prefix 3 gets stage 3, prefix 2
+    stages 3 and 2; segments of 2^15 dwords ascend, stage 1 reads final values below.
   - In a segment, m <= 4096 go by m over a run of sources; larger m by source i <= n / 4097 over
-    a run of m (carried index; sentinels 0 and 2^20 frame the list). m <= 256 of all stages take
-    the segment together in 32 KiB pieces (zeta: ascending pieces, stateless bounds).
+    a run of m (carried index; sentinels 0 and 2^20 frame the list). m <= 256 of stages 0..2
+    (stage 3 has none) take the segment together in 32 KiB pieces (zeta: ascending pieces,
+    stateless bounds).
   - Each update is 2 loads, 3 vector ops, 1 store: runs of one m go by pointers, 4 per step, the
     modulus held in a register (GCC reloaded it per update).
 - The input mapping is advised `MADV_SEQUENTIAL` (`io::advise_sequential`).
@@ -166,12 +174,75 @@ Record when opened: 37 ms. Best judged: ours, [409551](https://judge.yosupo.jp/s
 - 2026-10-10, claude (lib, issue #156 round 3): `advise_sequential` comes from
   `lib/io/sequential.hpp` (`io::advise_sequential`) instead of a local copy. Same stripped
   executable as before (judge flags, `lc-amd`).
+- 2026-10-11, claude, round 4 (`agent/lcm_convolution-r4`). Builds on `lc-amd`, timing on
+  `lc-bench` (EPYC 7B13) and `lc-k68` (Linux 6.8), judge image and flags, max_random_00 on tmpfs.
+  "Wall": fork to exit, variants interleaved, median of paired ratios (21-31 runs); phases:
+  in-process rdtsc. Sources, scripts, raw results: `lc-opt-explore/lcm_convolution/r4/`.
+  - Base phases (ms): parse a 1.75, parse b + interleave 2.02, zeta sweep 2.09, product 0.56,
+    Moebius 3..13 0.48, Moebius sweep 1.30, output 4.07; in process 12.30, wall 14.19.
+  - Base, finer: zeta stage 0 (5..13) 0.52 tiny + 0.06; stage 2 (primes >= 101) by m 0.35, by
+    source 0.53, Moebius 0.31 and 0.48; Moebius passes 3: 0.145, 5: 0.098, 7: 0.088, 11: 0.088,
+    13: 0.082 (11 and 13 stream all of c for 0.08 N updates each).
+  - Product fused into the Moebius sweep (each segment's products just before its updates,
+    Moebius 3..13 after): product + sweep 1.850 → 1.875 ms, wall 1.002. Dropped: the product
+    pass is not bound by its L3 traffic.
+  - Zeta 5..13 with the interleave, final sources (all 30 squarefree terms, 0.82 N, per range of
+    4032 targets just written), no stage 0: zeta 2.10 → 1.64, parse b + interleave 2.07 → 2.53,
+    wall 1.000. Zeta 5 only (stage 0 of 7, 11, 13): wall 0.995. Zeta 5 and 7 (stage 0 of 11, 13):
+    zeta 2.06 → 1.71, parse b 1.98 → 2.25, wall 0.994. Kept 5 and 7; ranges of 2016: parse b
+    -0.045 more (8064: +0.06).
+  - Moebius primes in one pass with old sources (squarefree terms, descending ranges of 4096):
+    3..13 phase 0.504 → 0.451 ({11, 13}), 0.412 ({7, 11, 13}), 0.443 ({5, 7, 11, 13}), 0.510
+    (all). Kept {7, 11, 13}. Ranges of 2048 or 8192: within 0.02 ms. {3, 5} joint as well: wall
+    1.008.
+  - b in one parse call, a callback per 256 KiB chunk (as `../bitwise_xor_convolution`'s
+    `progress_read.hpp`) into a reused buffer: parse b -0.06 ms, but its static arrays added 30
+    page faults. With the parser's scratch in the region and a read by the same parser: minflt
+    462 → 446; wall (with the two items above) 0.978 for 128 KiB chunks, 0.968 for 256 KiB.
+  - Three rough stages. Counted (`count.py`, contributions per transform, N = 10^6): cuts
+    [100] 1.767 N; [100, 1009] 1.716; [100, 500] 1.693; [50, 300] 1.666; [60, 400] 1.671; four
+    stages [60, 101, 1009] 1.670. Built [50, 300]: zeta -0.05 ms, Moebius -0.04, wall 0.991;
+    first cut 40 or 60: within 0.002. Fewer by-m multipliers than two stages (~565 against ~660)
+    and a smaller stage-3 list (383 KB against 487 KB for stage 2).
+  - Input by read(2) in 256 KiB chunks into the region instead of the mapping: parse +0.5 ms per
+    array in process, exit -0.8 ms (no unmap), wall 1.013. Dropped. A probe that only touches
+    the input favoured read() (0.87 of the mapping), since its loop has no work to hide the
+    mapping's DRAM latency.
+  - Tuning, final code: zeta segments 2^14 / 2^16 pairs 1.013 / 1.013; Moebius 2^14 / 2^16
+    dwords 1.013 / 1.006; tiny bound 128: 1.000 (512 puts stage-3 m among the tiny ones). By-m
+    bound per stage (stages 1 and 2 by m up to 8192 / 16384 / 32768, as gcd's 16384): sweep
+    phases within 0.01 ms, wall 0.994 / 1.000 / 1.002.
+  - Final phases: parse a 1.71, parse b + interleave 2.13, zeta 1.63, product 0.54, Moebius
+    3..13 0.41 (3: 0.14, 5: 0.09, joint 0.16), Moebius sweep 1.25, output 3.87; in process
+    11.55, wall 13.35. Zeta: tiny 0.54 (stages 0, 1, 2: 0.18, 0.16, 0.20), stage 3 by m 0.32,
+    by source 0.42; Moebius: tiny 0.32, stage 3 by m 0.29, by source 0.40.
+  - `judge.py bench`, `lc-bench`, 31 rounds, slowest 3 cases: 14.50 → 13.95 ms (0.964). Wall
+    ratios, 31 runs: `lc-bench` 0.964, `lc-k68` 0.967 (14.95 → 14.51 ms).
+  - Checks: 29/29 official tests (`judge.py test`, `lc-amd`, which was loaded by other rounds);
+    `stress.py` 300 rounds, now with range and segment edges (2015 .. 131071) against the
+    reference (gcc:15.2.0 image); ASan/UBSan (-O1, x86-64-v3) on all 29 tests, file and pipe
+    input, tokens equal to the expected output.
+  - Stage 3's large list as uint8 gaps (383 → 101 KB of `.rodata`), decoded with an AVX2
+    prefix sum into the parser's dead workspace: minflt 444 → 440, zeta -0.055 ms, parse b +0.04
+    (the decode); wall 1.002 (probes 0.988, noisy). Not kept.
+  - PR #356 merged. CI: geomean 0.9605 (EPYC 7763 0.9731 and 0.9563, EPYC 9V74 0.9522).
+- 2026-10-11, claude: submitted the #356 `main.cpp` three times (1/5 to 3/5 of this version).
+  Large cases (max_random 00/01, near_prime 00-02, near_prime_squared 00-02), ms:
+  - [409727](https://judge.yosupo.jp/submission/409727): AC 22 ms, spike on
+    near_prime_squared_01 (`tools/spikes.py`), clean 14; 14 14 14 13 13 13 . 14.
+  - [409729](https://judge.yosupo.jp/submission/409729): AC 14 ms, no spike; 13 14 14 14 13 13 13
+    14 (409551: one of 8 at 13).
+  - [409730](https://judge.yosupo.jp/submission/409730): AC 23 ms, spike on near_prime_02, clean
+    14; 14 14 14 14 . 13 14 13.
+  - The gain (~0.5 ms) is below the judge's 1 ms step; best judged stays 14 ms.
 
 ## Next
 
-- Compute is ~4.9 ms of ~14 ms: zeta sweep 2.06, Moebius sweep 1.32 (~0.8 ns per update; L1
-  updates ~0.5 ns plus ~3 ns per run). Three or four stages: -0.05 to -0.11 N per transform.
-- I/O (parse 3.2 ms, output 4.1 ms in process) belongs to `lib/io` and the formatter.
+- Compute is ~4.2 ms of ~13.3: stage 3 (primes >= 307) takes 1.43 ms of the two sweeps, ~0.82 ns
+  per update (one L1 miss each); tiny multipliers 0.86 ms at ~0.5 ns.
+- Large cases judge at 13-14 ms; 13 everywhere needs ~0.3-0.5 ms more.
+- I/O (parse 3.4 ms with 1.3 ms of input faults, output 3.9 ms) belongs to `lib/io` and the
+  formatter.
 
 ## Sources
 
@@ -180,3 +251,7 @@ Record when opened: 37 ms. Best judged: ours, [409551](https://judge.yosupo.jp/s
 - `.preinit_array` start: `../convolution_mod/solution.cpp`.
 - L1 pieces for tiny multipliers: `../gcd_convolution/notes.md` (v7).
 - `MADV_SEQUENTIAL` on the input: `../bitwise_and_convolution/solution.cpp`.
+- Parse in one call with a callback per chunk: `../bitwise_xor_convolution/progress_read.hpp`
+  (round 4 of #24); `chunk_read.hpp` copies lib/io's `BulkParser32` the same way.
+- Final-source zeta and old-source Moebius over squarefree d (inclusion-exclusion over the
+  per-prime operators 1/(1 - s_p) and 1 - s_p): worked out here.

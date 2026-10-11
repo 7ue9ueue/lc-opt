@@ -6,9 +6,9 @@ Slowest tests: max_random_01, _02 and random_01, _02 (N = 500000, f[0] a square,
 has 500000 coefficients; transforms up to 2^18). The others: -1 (odd leading zero count or a
 non-square leading coefficient), all zeros, or u = f / x^k of N - k coefficients.
 
-Best judged: ours, 16 ms: [409316](https://judge.yosupo.jp/submission/409316) (`main.cpp` of #148),
-with a +9 ms launch spike on near_262144_01 (16 ms, its peers 7; `tools/spikes.py`): clean
-score 12 ms.
+Best judged: ours, 12 ms: [409728](https://judge.yosupo.jp/submission/409728) (`main.cpp` of #357),
+no launch spike (`tools/spikes.py`: clean 12); max_random_01, _02 and random_01, _02 at 11 ms,
+monomial_02 at 12. Before: 16 ms (409316, a spike; clean 12).
 Record when opened (issue #66): 25 ms.
 
 ## Design
@@ -87,6 +87,13 @@ sqrt 7.72 ms warm (median of 14), 7.9 ms on first use; tables 0.06-0.1 ms.
   - Checks: 35/35 official tests (`lc-amd`, slowest 11.8 ms); `stress.py` 400 rounds; ASan/UBSan
     on all 35 cases, file and pipe input; lib/poly tests at -O2 and ASan/UBSan (`lc-amd` native,
     `lc-intel` x86-64-v3), with a new test of the two parts in place at offsets 0-3 words.
+  - Merged as #357. CI: 0.9749 (EPYC 7763 0.9704, 0.9693; EPYC 9V74 0.9851). Submitted its
+    `main.cpp`: [409728](https://judge.yosupo.jp/submission/409728) AC 12 ms, 11.3 MiB (was
+    13.6); the four N = 500000 random cases 11 ms (11-12 in 409361), monomial_02 12 ms
+    (`tools/spikes.py`: no spike, P(clean run) 0.56). monomial_02 (k = 106670, u a constant of
+    393330 coefficients) has the same transforms as N = 500000 (m = 2^18, two products in the
+    last step); in process on `lc-bench` it is faster than max_random_01 (9.91 against 10.37
+    ms, medians of 21), so its 12 ms is likely rounding near 11.5 (guess).
 - Next: the products dominate (a product of 2^18 takes ~735 us: three in the last step, one per
   step); the passes left between them take ~150 us in the last step. A blocked last stage, h
   at full precision and an inverse square root were counted again and stay slower.

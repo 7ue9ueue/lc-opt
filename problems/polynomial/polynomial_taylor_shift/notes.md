@@ -5,7 +5,8 @@ Slowest tests: the 12 at N = 2^19 (fft_killer_00..09, max_random_00/01), all abo
 random_00/01 have N > 2^18 (same transform length, 2^20). c = 0 in medium_c_zero; small N <= 16.
 
 Best judged: ours, 10 ms: [409534](https://judge.yosupo.jp/submission/409534) (`main.cpp` of #251),
-clean (`tools/spikes.py`).
+clean (`tools/spikes.py`). #358's `main.cpp`: clean 10 in three runs, all judged 18 by launch
+spikes (409731, 409733, 409734).
 Record when opened (issue #79): 33 ms.
 
 ## Design
@@ -127,6 +128,15 @@ N values with `fields.hpp`, nothing else (scratch `floor_main.cpp`): 4.31 ms med
   - Checks: 38/38 official tests (`judge.py test`, `lc-amd`); `stress.py` 400 rounds (`lc-amd`;
     its no-partial-lane sizes 512 (2m + 1) are 8 lanes of C = 64 (2m + 1)); ASan/UBSan on all 38
     official cases, file and pipe input (`lc-amd`).
+  - Merged as #358. CI, 21 rounds, slowest 3 cases: EPYC 9V45 8.44 -> 8.31 ms (0.9832), EPYC
+    7763 9.94 -> 9.74 (0.9785) and 10.05 -> 9.88 (0.9825); geomean 0.9814.
+  - Submitted the merged `main.cpp` three times (3 of 5 this session), each AC 18 ms from a
+    +8-9 ms case: [409731](https://judge.yosupo.jp/submission/409731) (fft_killer_00 and _02
+    18, peers 8-10; `spikes.py`: clean 10), [409733](https://judge.yosupo.jp/submission/409733)
+    (fft_killer_06 18; clean 10), [409734](https://judge.yosupo.jp/submission/409734)
+    (fft_killer_02 18; `spikes.py` does not flag it, as two of the three runs spiked there, so it
+    reports 18; peers 8-10, so clean 10). The 12 large cases now take 8-10 ms (4-6 of them 8),
+    against 9-10 in 409534; at least 3 per run stay at 10, so the clean score is still 10.
 - Next:
   - The transform (`ntt::Product`'s, lib/ntt) is 4.2 of the 4.8 ms above the floor.
   - Passes against their port bounds (warm): weights 0.33 vs ~0.26, top 0.145 vs ~0.11, output

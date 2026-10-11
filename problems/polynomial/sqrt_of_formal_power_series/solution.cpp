@@ -1,15 +1,14 @@
 // sqrt(f) mod x^N, N <= 500000. With f = x^k u, u[0] != 0: no root if k is odd or u[0] is not a
 // square mod P. Else g = x^(k/2) s with s = sqrt(u) mod x^(N-k) (lib/poly/sqrt.hpp): g^2 mod x^N
 // depends on s mod x^(N-k) only, so g's other coefficients are zero. Output in fixed-width
-// fields (problems/convolution/convolution_mod/fields.hpp). One arena holds every array.
-#include <unistd.h>
-
+// fields (problems/convolution/convolution_mod/fields.hpp).
 #include <algorithm>
 #include <optional>
 #include <string_view>
 
-#include "lib/io/io.hpp"
+#include "lib/io/bulk32.hpp"
 #include "lib/poly/sqrt.hpp"
+#include "lib/run/early.hpp"
 #include "problems/convolution/convolution_mod/fields.hpp"
 
 namespace {
@@ -34,37 +33,45 @@ std::optional<std::uint32_t> square_root(std::uint32_t a) {
     return x;
 }
 
+// One arena: the tables, f, three buffers of m = 2^sqrt_log(N) words, the text and k/2 zeros;
+// 3 huge pages at N = 500000. s mod x^m is written out from buffer a before the last step, which
+// then works in a and writes s[m, N - k) over u[m, N - k).
 void solve() {
     io::Reader in;
     const std::size_t n = in.read<std::uint32_t>();
+    const int lg = poly::sqrt_log(n);
+    const std::size_t len = std::size_t(1) << lg;
     constexpr std::size_t kTextWords = fields::kTextBytes / sizeof(std::uint32_t);
-    poly::Arena arena(2 * poly::Arena::footprint(n) + poly::Arena::footprint(kTextWords) +
-                      poly::Transform::words(poly::sqrt_log(n)) + poly::sqrt_scratch(n));
-    const std::span<std::uint32_t> f = arena.take(n), g = arena.take(n);  // g zero-filled
-    in.read(f.data(), n);
+    using poly::Arena;
+    Arena arena(poly::Transform::words(lg) + Arena::footprint(n) + 3 * Arena::footprint(len) +
+                Arena::footprint(kTextWords) + Arena::footprint(n / 2));
+    const poly::Transform transform(arena, lg);
+    const std::span<std::uint32_t> f = arena.take(n);
+    io::read_bulk(in, f.data(), n);
+    const std::span<std::uint32_t> a = arena.take(len), b = arena.take(len), ht = arena.take(len);
+    char* const text = reinterpret_cast<char*>(arena.take(kTextWords).data());
     io::Writer out;
     const std::size_t k = std::size_t(std::find_if(f.begin(), f.end(), [](std::uint32_t x) { return x != 0; }) - f.begin());
-    if (k < n) {  // else f = 0 = g^2
-        const std::optional<std::uint32_t> c = k % 2 ? std::nullopt : square_root(f[k]);
-        if (!c) return out.write(std::string_view("-1\n"));
-        const std::size_t size = n - k;
-        const poly::Transform transform(arena, poly::sqrt_log(size));
-        poly::sqrt(transform, f.subspan(k), *c, g.subspan(k / 2, size), arena.take(poly::sqrt_scratch(size)));
+    if (k == n) return fields::write(out, f.data(), n, text);  // f = 0 = g^2
+    const std::optional<std::uint32_t> c = k % 2 ? std::nullopt : square_root(f[k]);
+    if (!c) return out.write(std::string_view("-1\n"));
+    const std::size_t size = n - k;
+    const std::span<std::uint32_t> u = f.subspan(k, size), zeros = arena.take(k / 2);
+    if (k) fields::write(out, zeros.data(), k / 2, text);
+    if (size <= poly::detail::kSqrtBase) {
+        poly::sqrt(transform, u, *c, a.first(size), {});
+        fields::write(out, a.data(), size, text);
+    } else {
+        const std::size_t m = std::size_t(1) << poly::sqrt_log(size);
+        poly::sqrt_steps(transform, u, *c, a.first(m), b.first(m), ht.first(m));
+        fields::write(out, a.data(), m, text);
+        transform.forward(a.first(m));
+        poly::sqrt_last_step(transform, u, a.first(m), ht.first(m), b.first(m), u.subspan(m));
+        fields::write(out, u.data() + m, size - m, text);
     }
-    fields::write(out, g.data(), n, reinterpret_cast<char*>(arena.take(kTextWords).data()));
+    if (k) fields::write(out, zeros.data(), k / 2, text);
 }
-
-#ifdef __ELF__
-// The program runs from the executable's pre-initializers, before the C++ runtime initializes
-// iostreams and locales (unused here). _exit skips their teardown too.
-void run_early(int, char**, char**) {
-    solve();
-    ::_exit(0);
-}
-
-[[gnu::used, gnu::section(".preinit_array")]] void (*const preinit)(int, char**, char**) = run_early;
-#endif
 
 }  // namespace
 
-int main() { solve(); }  // reached only without .preinit_array support
+RUN_EARLY(solve)

@@ -376,13 +376,24 @@ the same with e = 1/2. log is `Recurrence` on G = n g (taps (d, -f_d), r = n f_n
   block, 2.21 ms with it (`lc-amd`, in memory, reciprocals included): mostly throughput.
 - Reciprocals 2^32 / m: odd m by batch inversion (`BatchInverter`) in windows of 16384
   coefficients; even m from a table of the first half, 2^32 / m = (2^32 / (m / 2)) / 2, with the
-  1/2 folded into the even lanes of V, Q (`columns(..., true)`; not V', added after y). The table
-  (2 MiB at N = 10^6) is in transparent huge pages. The kernel loop runs the next window's batch
-  inversion, a half step (two chains of 8 lanes) per block: independent work for the cycles the
-  chain from block to block leaves free. The 32 lane totals by a product tree (as `Divider`).
-  The block kernel runs the half step before the triangle (1-3% faster than after it, w <= 4).
-  Without the inversion (a probe, outputs wrong) the kernels take 0.18 (w = 2) to 0.31 ms
-  (chained) less: 9-14% of the solve.
+  1/2 folded into the even lanes of V, Q (`columns(..., true)`; not V', added after y). The kernel
+  loop runs the next window's batch inversion, a half step (two chains of 8 lanes) per block:
+  independent work for the cycles the chain from block to block leaves free. The 32 lane totals
+  by a product tree (as `Divider`). The block kernel runs the half step before the triangle (1-3%
+  faster than after it, w <= 4). Without the inversion (a probe, outputs wrong) the kernels take
+  0.18 (w = 2) to 0.31 ms (chained) less: 9-14% of the solve.
+- Batch inversion lazy (#73 round 2): prefix products and q stay below 2P (a < 2P, x < P gives
+  a x / 2^32 + P < 1.47 P), only y is reduced; the half step's two chains unrolled. 47 -> 43
+  vector ops per 8 odd values; in process (`lc-bench`) w = 3, 4, 5 (block kernel, slopes):
+  2.03, 2.15, 2.26 -> 1.97, 2.09, 2.17 ms; chained 2.23 -> 2.17; exp w = 3, 7: -0.02, -0.04.
+- Memory (#73 round 2): the table is a ring of R = (end + kWindow) / 2 words (end = N / 2 + 8;
+  258208 words, 1 MB, at N = 10^6): entry m is last read in window 2m / kWindow, and the write of
+  m + R comes in a later window since R >= m + kWindow for every m that has one. Reads wrap once
+  (at n = 2R, where a kernel call is cut), writes once (R is a multiple of 16). After the table:
+  the two windows of odd reciprocals (66 KB, were `std::vector`s: 16 4 KiB page faults) and the
+  caller's spare words (`spare()`, the constructor's last argument). One 2 MiB page holds all of
+  it: sqrt sparse keeps its coefficient ring and text there (one page fault less, 55-70 us on
+  `lc-bench`; 90 fresh 4 KiB pages take 135-155 us).
 - Chained kernel (w <= 8; used from w = 5 without slopes and from w = 6 with them, where it
   wins): blocks of 8. A block's state is the previous block's top w values, T H_prev (T: those
   rows of F mod x^8), so W = M(n) H_prev with M(n) = V(n) T = M0 + n M1 (8 x 8). The chain
@@ -404,6 +415,29 @@ the same with e = 1/2. log is `Recurrence` on G = n g (taps (d, -f_d), r = n f_n
   time without it). Zen 3 at 3.43 GHz (`lc-bench`): the chained kernel with slopes takes 123
   cycles per 16 coefficients for about 310 vector ops; its chain is about 36 cycles per 8.
   `-DHOLONOMIC_CHAINED=0` or `1` forces it off, or on for every w <= 8 (tests).
+- Where the time goes (#73 round 2, `lc-bench`, probes on the block kernel with slopes, w = 3, 4,
+  5, outputs wrong): without the triangle 0.61, 0.67, 0.69 ms less (of 1.97, 2.09, 2.17);
+  without the V(n) advance 0.10, 0.16, 0.17; without the batch inversion 0.15, 0.18, 0.17
+  (chained 0.25). Loop bodies (GCC 15): chained with slopes 428 instructions per 16 coefficients
+  (96 `vpmuludq`, 68 `vpaddq`, 58 `vpaddd`, 68 `vmovdqa`; M on the stack, 4 constants rebuilt by
+  `mov`/`vmovd`/`vpbroadcastd` per iteration), plus 50-80 for the inverter's half step; block
+  kernel w = 3 about 285 (88 `vpmuludq`). The first variant below adds about 20 ops per 16
+  coefficients and 9 cycles: ops, not the chain, set the time.
+- Not kept (#73 round 2, `lc-bench`, in process):
+  - One Montgomery step for H = y W: W_lo (y / 2^32) + W_hi y, y / 2^32 by a REDC of y: chained
+    2.24 -> 2.40. 12 ops per vector instead of 11 (an extra shift, and below 2.5P two
+    subtractions), plus the REDC; the chain is 4 cycles shorter per block, which does not pay.
+  - The inversion in begin_window only (not interleaved): +0.06 (chained) to +0.3 ms (w = 3).
+  - M H and F H interleaved column by column (fewer live broadcasts): chained 2.17 -> 2.19,
+    without slopes 1.96 -> 2.12.
+  - M(n) in the object instead of a local: 2.17 -> 2.20.
+  - Constants read from a non-const table (memory operands instead of rebuilt broadcasts): +0.04
+    to +0.07 ms in every kernel. `-fno-lra-remat`, `-fira-region=one`, `-fsched-pressure` and
+    others leave the rebuilt constants as they are.
+  - The inverter's state in locals with one pointer (no reloads after the stores, no index
+    arithmetic): equal within 0.01 ms.
+  - The chained kernel at w = 5 with slopes: 2.175-2.188 against 2.173-2.204: equal, the
+    threshold stays at w = 6.
 
 `Divider` (`divider.hpp`): g[n] = G[n] / n, called on consecutive ranges (multiples of 64 but
 the last), in place or not. For log: G from `Recurrence` in chunks, divided after the chunk's

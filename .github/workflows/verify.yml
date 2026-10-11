@@ -77,7 +77,7 @@ jobs:
         run: python3 tools/bundle.py --check
       - name: Generated files match their generators
         run: |
-          for g in lib/*/gen_*.py problems/*/*/gen_*.py problems/polynomial/polynomial_taylor_shift/factorials.py; do
+          for g in lib/*/gen_*.py problems/*/*/gen_*.py; do
             echo "== $g"
             python3 "$g" --check
           done

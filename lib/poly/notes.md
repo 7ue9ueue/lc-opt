@@ -825,14 +825,23 @@ Lagrange interpolation on 0, 1, ..., N - 1.
   by value.
 - polynomial_taylor_shift on this header (scan, or its loops written out with `Chain`): equal
   passes in process and `judge.py bench` 1.0000-1.0008 (`lc-bench`), 0.9969 (`lc-intel`), but
-  CI 1.0008, 1.0050, 1.0038, 1.0046 over four versions. Not switched in #264; it keeps its own
-  copy (`problems/polynomial/polynomial_taylor_shift/factorials.hpp`) for now.
+  CI 1.0008, 1.0050, 1.0038, 1.0046 over four versions. Not switched in #264. Switched in issue
+  #79 round 2 with its 8-lane scans: `factorials`, `invert`, `montgomery`, `odd_lanes`,
+  `transpose_steps`; its own copy and `factorials.py` are gone.
+- Lane count (polynomial_taylor_shift round 2, `lc-bench`, warm, 2^19 positions): 32 lanes lose
+  ~0.08 ms per pass to their 32 load streams (a pass with the loads replaced by register values:
+  0.33 -> 0.25 ms in the weights pass, 0.26 -> 0.17 in the output pass; software prefetch and
+  copying the next block's loads ahead did not help). Two chains (load, product, two stores) in
+  8 lanes: 0.33 ms against 0.40 for 32 lanes and 0.44 for 16 (spills). A single chain in 8 lanes
+  is latency-bound; taking two steps per product (x_(j+2) = x_j m_j m_(j+1), the pair multiplier
+  kept by second differences) gives 0.227 against 0.28 (one chain, product, store).
 - Lane length (`lc-bench`, one chain with a store, or a load, a product and a store, per 2^20
   positions, warm): C = 32784 (32 long lanes): 0.289 / 0.472 ms; blocks of 32 lanes of 1040:
   0.243 / 0.427; of 264: 0.247 / 0.537; of 64: 0.302 / 0.466. Powers of two alias: C = 32768
   took 1.41 / 1.45 ms, C = 4096 0.42 / 0.55.
 - Users: shift_of_sampling_points_of_polynomial (1 / i!, the prefix products of d + t and their
-  inverses).
+  inverses), polynomial_taylor_shift (lane starts and the vector helpers; its 8-lane chains are
+  its own).
 - Tests: `factorial` and `factorials` against running products (table boundaries, the limit,
   random), `invert` (sizes 0..1000, values 1 and P - 1), chains through `scan` against scalar
   products (forward and reversed, steps 8..512, bases and steps near 0 and P), `scan_chunk`'s

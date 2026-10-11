@@ -75,8 +75,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Bundled main.cpp files match their solution.cpp
         run: python3 tools/bundle.py --check
-      - name: Generated kernels match their generators
-        run: for g in lib/*/gen_*.py; do python3 "$g" --check; done
+      - name: Generated files match their generators
+        run: |
+          for g in lib/*/gen_*.py problems/*/*/gen_*.py problems/polynomial/polynomial_taylor_shift/factorials.py; do
+            echo "== $g"
+            python3 "$g" --check
+          done
       - name: Tool tests
         run: python3 tools/spikes_test.py
       - name: Library tests, judge flags and ASan/UBSan

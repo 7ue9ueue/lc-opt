@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "lib/easy/io.hpp"
-#include "lib/easy/poly.hpp"
+#include "lib/easy/multiply.hpp"
 
 // reachable[x] != 0 iff x is a sum of allowed numbers, for x <= m.
 easy::Poly reachable_sums(const std::vector<std::uint32_t>& allowed, std::uint32_t m) {

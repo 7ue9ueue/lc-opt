@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "lib/easy/io.hpp"
-#include "lib/easy/poly.hpp"
+#include "lib/easy/multiply.hpp"
 
 namespace {
 

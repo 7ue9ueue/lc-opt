@@ -70,10 +70,13 @@ public:
     }
 
 private:
-    using Buffer = std::unique_ptr<multimod::Vec[]>;
+    struct alignas(32) Block {  // the transform's arrays are 32-byte aligned
+        u32 word[8];
+    };
+    using Buffer = std::unique_ptr<Block[]>;
 
-    static Buffer vectors(std::size_t words) { return std::make_unique<multimod::Vec[]>((words + 7) / 8); }
-    static u32* words(const Buffer& b) { return reinterpret_cast<u32*>(b.get()); }
+    static Buffer vectors(std::size_t words) { return std::make_unique<Block[]>((words + 7) / 8); }
+    static u32* words(const Buffer& b) { return b.get()->word; }
 
     void reserve(int lg) {
         if (lg <= lg_) return;

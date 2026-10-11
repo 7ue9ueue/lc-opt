@@ -153,4 +153,25 @@ def compact(text: str) -> str:
         first, last_use = uses[0], uses[-1]
         lines = lines[:first] + asm.definitions() + lines[first:last_use + 1] + \
             [f'#undef {n}' for n in asm.names()] + lines[last_use + 1:]
-    return '\n'.join(lines) + '\n'
+    return shorten('\n'.join(lines) + '\n')
+
+
+def short_names(taken: set[str]):
+    """Identifiers of growing length that are not in taken."""
+    letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+    for c in letters:
+        if c not in taken:
+            yield c
+    for c in letters:
+        for d in letters + '0123456789':
+            if c + d not in taken:
+                yield c + d
+
+
+def shorten(text: str) -> str:
+    """Renames the QZ macros to the shortest identifiers the file does not use, most used first."""
+    names = re.findall(r'\b[A-Za-z_$][\w$]*', text)
+    counts = collections.Counter(n for n in names if n.startswith('QZ'))
+    fresh = short_names({n for n in names if not n.startswith('QZ')})
+    mapping = {name: next(fresh) for name, _ in counts.most_common()}
+    return re.sub(r'\bQZ\w*', lambda m: mapping[m.group()], text)

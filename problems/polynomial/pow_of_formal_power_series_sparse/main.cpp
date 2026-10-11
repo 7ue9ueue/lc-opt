@@ -1338,7 +1338,7 @@ public:
         : size_(round_up(size)),
           table_end_(round_up(size_ / 2 + 8)),
           ring_(std::min(table_end_, round_up((table_end_ + kWindow) / 2))),
-          reciprocals_(ring_ + spare) {
+          reciprocals_(ring_ + 2 * kOddWords + spare) {
         using detail::montgomery_form;
         std::array<Tap, kBlock> near{};  // near[d]: the short tap at distance d, or zeros
         for (const Tap& tap : taps) {
@@ -1412,15 +1412,13 @@ public:
         }
         for (std::size_t t = 0; t < kBlock; ++t) first_[t] = multiply(initial, f[t]);
         for (std::uint32_t m = 1; m < kBlock; ++m) *table(m) = montgomery_form(inverse(m));
-        if (size_ > kBlock)
-            for (auto& odd : odd_) odd.resize(kWindow / 2 + 32);
     }
 
     // Coefficients next() reads before out: kPadding, or the largest tap distance if larger.
     std::size_t history() const { return far_.empty() ? kPadding : std::max<std::size_t>(kPadding, far_.back().distance); }
 
     // The constructor's spare words, 64-byte aligned, zero until written.
-    std::uint32_t* spare() const { return reciprocals_.data() + ring_; }
+    std::uint32_t* spare() const { return reciprocals_.data() + ring_ + 2 * kOddWords; }
 
     void next(std::uint32_t* out, std::size_t count) {
         const std::size_t end = done_ + round_up(count);
@@ -1437,7 +1435,7 @@ public:
         while (done_ < end) {
             if (done_ >= window_end_) begin_window();
             const std::uint32_t* const even = table(done_ / 2);  // 2 / (n + t) for even t
-            const std::uint32_t* const odd = odd_[window_ % 2].data() + (done_ + kWindow - window_end_) / 2;  // odd t
+            const std::uint32_t* const odd = odd_reciprocals(window_) + (done_ + kWindow - window_end_) / 2;  // odd t
             std::size_t stop = std::min(end, window_end_);
             if (done_ < 2 * ring_) stop = std::min(stop, 2 * ring_);  // even wraps to the table's start there
             if (active_ == 0) {  // up to the first block a long tap reaches
@@ -1462,6 +1460,7 @@ private:
     using Series = std::array<std::uint32_t, kBlock>;  // a series mod x^16
 
     static constexpr std::size_t kHalf = kBlock / 2;                     // the chained kernel's block
+    static constexpr std::size_t kOddWords = kWindow / 2 + 32;           // a window's odd reciprocals, rounded up
     using Matrix = std::array<std::array<std::uint32_t, kHalf>, kHalf>;  // 8 x 8, by columns
 
     // An 8 x 8 matrix for products with H (8 values) broadcast within 128-bit halves: x[k] holds H[k]
@@ -1523,15 +1522,15 @@ private:
         return c;
     }
 
-    // The next window [w kWindow, (w + 1) kWindow): its odd reciprocals in odd_[w % 2] (computed
-    // during window w - 1, finished here), the table over it below table_end_, block by block
-    // (each block reads the table at half its indices). Starts the odd reciprocals of window w + 1,
-    // which the homogeneous kernels advance by a half step per block.
+    // The next window [w kWindow, (w + 1) kWindow): its odd reciprocals in odd_reciprocals(w)
+    // (computed during window w - 1, finished here), the table over it below table_end_, block by
+    // block (each block reads the table at half its indices). Starts the odd reciprocals of window
+    // w + 1, which the homogeneous kernels advance by a half step per block.
     void begin_window() {
         if (window_end_ == 0) start_inverter(0);
         inverter_.finish();
         window_ = window_end_ / kWindow;
-        const std::uint32_t* const odd = odd_[window_ % 2].data();
+        const std::uint32_t* const odd = odd_reciprocals(window_);
         for (std::size_t n = window_end_, k = 0; n < std::min(window_end_ + kWindow, table_end_); n += kBlock, k += kBlock / 2)
             reciprocals(table(n / 2), odd + k, table(n));
         window_end_ += kWindow;
@@ -1543,9 +1542,12 @@ private:
     // later window. ring_ is a multiple of 16, so no block's entries wrap.
     std::uint32_t* table(std::size_t m) const { return reciprocals_.data() + (m < ring_ ? m : m - ring_); }
 
+    // 2^32 / m for the odd m of window w, after the table: two windows' worth, alternating.
+    std::uint32_t* odd_reciprocals(std::size_t window) const { return reciprocals_.data() + ring_ + window % 2 * kOddWords; }
+
     void start_inverter(std::size_t window) {
         const std::size_t first = window * kWindow;
-        inverter_.start(std::uint32_t(first + 1), 2, std::min(kWindow, size_ - first) / 2, odd_[window % 2].data());
+        inverter_.start(std::uint32_t(first + 1), 2, std::min(kWindow, size_ - first) / 2, odd_reciprocals(window));
     }
 
     // y[t] = 1 / (n + t) for t < 16 (Montgomery forms): even t from even[t / 2] = 2 / (n + t),
@@ -1931,9 +1933,8 @@ private:
     std::size_t size_;                               // coefficients next() produces in all, or more
     std::size_t table_end_;                          // the table holds [1, table_end_) once next() reaches it
     std::size_t ring_;                               // its words (table())
-    detail::HugeWords reciprocals_;                  // 2^32 / m mod P at table(m), then the spare words
-    std::array<std::vector<std::uint32_t>, 2> odd_;  // 2^32 / m for the odd m of window w in odd_[w % 2]
-    detail::BatchInverter inverter_;                 // fills odd_ for the window after the current one
+    detail::HugeWords reciprocals_;                  // 2^32 / m mod P at table(m), the odd reciprocals, the spare words
+    detail::BatchInverter inverter_;                 // fills odd_reciprocals of the window after the current one
     std::size_t window_ = 0;                         // the current window
     std::size_t window_end_ = 0;                     // its end; 0 before the first
     std::size_t active_ = 0;                         // far_[0, active_) reach the current block

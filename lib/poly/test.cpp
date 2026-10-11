@@ -1265,12 +1265,15 @@ void test_holonomic() {
                          {2 * window + 5, u32(pick(P)), 0}}, 1, n);
     }
     // The table of reciprocals is a ring from n = 2 kWindow on: n across the point where its reads
-    // wrap (2 ring), with short and mixed taps.
+    // wrap (2 ring), with short and mixed taps. The random state is restored after them, so the
+    // later tests keep their inputs.
+    const std::mt19937_64 saved = rng;
     for (int round = 0; round < 6; ++round) {
         const std::size_t n = 2 * window + 1 + pick(6 * window);
         check_holonomic(random_holonomic_taps(range(1, 9), 1 + pick(8), round % 2, true), u32(pick(P)), n);
         check_holonomic(random_holonomic_taps(range(1, 3 * window), 1 + pick(10), false, round % 3 != 0), u32(pick(P)), n);
     }
+    rng = saved;
 }
 
 // a[k] = [x^(n-1)] g^k from the powers of g.

@@ -1,13 +1,5 @@
-// Codeforces 472G Design Tutorial: Increase the Constraints. Binary strings a, b of length
-// n, m <= 2*10^5 and q <= 4*10^5 queries (p1, p2, len): the Hamming distance of a[p1, p1 + len)
-// and b[p2, p2 + len). 7 s, 256 MB.
-//
-// The editorial's sqrt decomposition with FFT: cut a into blocks of B bits. Correlating a block
-// with b (bits as +1/-1, so a correlation is B - 2 * distance) gives its distance to every window
-// of b: one product per chunk of b (overlap-save). Prefix sums along each diagonal p2 - p1 then
-// give a query's whole blocks in two reads; its two ends (< B bits each) are counted by XOR and
-// popcount. O((n / B) m log B + q B / 64) time, O((n / B) m) memory. Accepted solutions are
-// mostly a bitset brute force, O(q len / 64); the FFT route is the heavy one here.
+// Baseline for solution.cpp: the same algorithm (blocks of a, overlap-save products, prefix sums
+// along diagonals, ends by XOR and popcount) with a textbook NTT in place of lib/easy.
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -18,10 +10,67 @@
 #include <string_view>
 #include <vector>
 
-#include "lib/easy/io.hpp"
-#include "lib/easy/multiply.hpp"
+#include <cstdio>
+#include <string>
+
+#pragma GCC target("avx2,bmi,bmi2,lzcnt,popcnt")
 
 namespace {
+
+constexpr std::uint32_t kMod = 998244353;
+using Poly = std::vector<std::uint32_t>;
+using Span = std::span<const std::uint32_t>;
+
+std::uint32_t power(std::uint64_t a, std::uint64_t e) {
+    std::uint64_t r = 1;
+    for (; e; e >>= 1, a = a * a % kMod)
+        if (e & 1) r = r * a % kMod;
+    return std::uint32_t(r);
+}
+
+// Textbook NTT: bit reversal, then radix-2 levels with a precomputed root table, products % P.
+void transform(Poly& f, bool inverse) {
+    const std::size_t n = f.size();
+    for (std::size_t i = 1, j = 0; i < n; ++i) {
+        std::size_t bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) std::swap(f[i], f[j]);
+    }
+    static Poly roots{0, 1};  // roots[h + j] = w_(2h)^j for j < h
+    while (roots.size() < n) {
+        const std::size_t h = roots.size();
+        roots.resize(2 * h);
+        const std::uint64_t w = power(3, (kMod - 1) / (2 * h));
+        for (std::size_t j = h; j < 2 * h; ++j) roots[j] = j % 2 ? std::uint32_t(roots[j / 2] * w % kMod) : roots[j / 2];
+    }
+    for (std::size_t h = 1; h < n; h *= 2)
+        for (std::size_t i = 0; i < n; i += 2 * h)
+            for (std::size_t j = 0; j < h; ++j) {
+                const std::uint32_t u = f[i + j], v = std::uint32_t(std::uint64_t(f[i + j + h]) * roots[h + j] % kMod);
+                f[i + j] = u + v >= kMod ? u + v - kMod : u + v;
+                f[i + j + h] = u >= v ? u - v : u + kMod - v;
+            }
+    if (inverse) {
+        std::reverse(f.begin() + 1, f.end());
+        const std::uint64_t scale = power(n, kMod - 2);
+        for (auto& x : f) x = std::uint32_t(x * scale % kMod);
+    }
+}
+
+Poly multiply(Span a, Span b) {
+    const std::size_t len = std::bit_ceil(a.size() + b.size() - 1);
+    Poly x(len), y(len);
+    std::copy(a.begin(), a.end(), x.begin());
+    std::copy(b.begin(), b.end(), y.begin());
+    transform(x, false);
+    transform(y, false);
+    for (std::size_t i = 0; i < len; ++i) x[i] = std::uint32_t(std::uint64_t(x[i]) * y[i] % kMod);
+    transform(x, true);
+    x.resize(a.size() + b.size() - 1);
+    return x;
+}
+
 
 // Hamming distances between bit ranges of a and b, 256 bits per step.
 class BitPairs {
@@ -80,7 +129,7 @@ private:
 // Block size: balances the products, about n m / B butterflies, against q B / 64 popcount words.
 // At least n m / 2^24 (prefix sums within 64 MiB), at most 2^17.
 std::size_t block_size(std::size_t n, std::size_t m, std::size_t q) {
-    constexpr double kCost = 4096;  // fastest of 256 .. 16384 on lc-amd (notes.md)
+    constexpr double kCost = 16384;  // fastest of 1024 .. 65536 on lc-amd (notes.md)
     const std::size_t balanced = std::size_t(std::sqrt(double(n) * double(m) / double(q + 1) * kCost));
     return std::clamp<std::size_t>(balanced, std::max<std::size_t>(1, n * m >> 24), std::size_t(1) << 17);
 }
@@ -88,7 +137,7 @@ std::size_t block_size(std::size_t n, std::size_t m, std::size_t q) {
 // out[i] = previous[i] + (B - c_i) / 2 for correlations c_i given mod P, |c_i| <= B < P / 2.
 void add_distances(std::span<const std::uint32_t> c, std::uint32_t block, const std::uint32_t* previous, std::uint32_t* out) {
     // B - c_i + P reduced mod P is B - c_i in [0, 2B]: min(v, v - P) unsigned.
-    const __m256i b_plus_p = _mm256_set1_epi32(int(block + easy::kMod)), p = _mm256_set1_epi32(int(easy::kMod));
+    const __m256i b_plus_p = _mm256_set1_epi32(int(block + kMod)), p = _mm256_set1_epi32(int(kMod));
     std::size_t i = 0;
     for (; i + 8 <= c.size(); i += 8) {
         const __m256i v = _mm256_sub_epi32(b_plus_p, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(c.data() + i)));
@@ -97,8 +146,8 @@ void add_distances(std::span<const std::uint32_t> c, std::uint32_t block, const 
         _mm256_storeu_si256(reinterpret_cast<__m256i*>(out + i), sum);
     }
     for (; i < c.size(); ++i) {
-        const std::uint32_t v = block + easy::kMod - c[i];
-        out[i] = previous[i] + std::min(v, v - easy::kMod) / 2;
+        const std::uint32_t v = block + kMod - c[i];
+        out[i] = previous[i] + std::min(v, v - kMod) / 2;
     }
 }
 
@@ -112,8 +161,8 @@ std::vector<std::uint32_t> diagonal_prefix(std::string_view a, std::string_view 
     constexpr std::size_t kChunk = 8;
     const std::size_t n = a.size(), m = b.size(), width = m - block + 1, stride = m + 1;
     const std::size_t step = kChunk * std::bit_ceil(block) - 2 * block + 2;
-    const auto sign = [](char c) { return c == '1' ? 1u : easy::kMod - 1; };
-    easy::Poly signs(m), reversed(block);
+    const auto sign = [](char c) { return c == '1' ? 1u : kMod - 1; };
+    Poly signs(m), reversed(block);
     std::transform(b.begin(), b.end(), signs.begin(), sign);
     std::vector<std::uint32_t> prefix((n / block + 1) * stride);
     for (std::size_t k = 0; k < n / block; ++k) {
@@ -121,10 +170,10 @@ std::vector<std::uint32_t> diagonal_prefix(std::string_view a, std::string_view 
         std::uint32_t* const row = prefix.data() + (k + 1) * stride + block;  // row[j]: j = kB + d
         for (std::size_t s = 0; s * step < width; ++s) {
             const std::size_t windows = std::min(step, width - s * step);
-            const easy::Poly product = easy::multiply(reversed, easy::Span(signs).subspan(s * step, windows + block - 1));
+            const Poly product = multiply(reversed, Span(signs).subspan(s * step, windows + block - 1));
             // product[B - 1 + i] = sum over l < B of a_(kB + l) b_(sS + i + l); (k - 1, j - B) precedes (k, j).
             std::uint32_t* const out = row + s * step;
-            add_distances(easy::Span(product).subspan(block - 1, windows), std::uint32_t(block), out - stride - block, out);
+            add_distances(Span(product).subspan(block - 1, windows), std::uint32_t(block), out - stride - block, out);
         }
     }
     return prefix;
@@ -132,27 +181,54 @@ std::vector<std::uint32_t> diagonal_prefix(std::string_view a, std::string_view 
 
 }  // namespace
 
+// Whole input in one buffer; tokens split at bytes <= ' '.
+class Input {
+public:
+    Input() {
+        char chunk[1 << 16];
+        for (std::size_t got; (got = std::fread(chunk, 1, sizeof chunk, stdin)) > 0;) data_.append(chunk, got);
+        data_.push_back('\0');
+    }
+    std::string_view token() {
+        while (data_[pos_] && data_[pos_] <= ' ') ++pos_;
+        const std::size_t start = pos_;
+        while (data_[pos_] > ' ') ++pos_;
+        return {data_.data() + start, pos_ - start};
+    }
+    std::size_t number() {
+        std::size_t x = 0;
+        for (const char c : token()) x = x * 10 + std::size_t(c - '0');
+        return x;
+    }
+
+private:
+    std::string data_;
+    std::size_t pos_ = 0;
+};
+
 int main() {
-    easy::Reader in;
+    Input in;
     const std::string_view a = in.token(), b = in.token();
-    const std::size_t n = a.size(), m = b.size(), q = in.read<std::uint32_t>();
+    const std::size_t n = a.size(), m = b.size(), q = in.number();
     const std::size_t block = block_size(n, m, q), diagonal_step = m + 1 + block;
     const std::vector<std::uint32_t> prefix =
         block <= std::min(n, m) ? diagonal_prefix(a, b, block) : std::vector<std::uint32_t>();
     const BitPairs bits(a, b);
-    easy::Writer out;
+    std::string out;
     for (std::size_t i = 0; i < q; ++i) {
-        const std::size_t p1 = in.read<std::uint32_t>(), p2 = in.read<std::uint32_t>(), len = in.read<std::uint32_t>();
+        const std::size_t p1 = in.number(), p2 = in.number(), len = in.number();
         const std::size_t first = (p1 + block - 1) / block, last = (p1 + len) / block;  // whole blocks [first, last)
+        std::uint32_t d;
         if (first >= last) {
-            out.write(bits.distance(p1, p2, len), '\n');
-            continue;
+            d = bits.distance(p1, p2, len);
+        } else {
+            const std::uint32_t* diagonal = prefix.data() + std::ptrdiff_t(p2) - std::ptrdiff_t(p1);
+            const std::size_t lo = first * block, hi = last * block;
+            d = diagonal[last * diagonal_step] - diagonal[first * diagonal_step] + bits.distance(p1, p2, lo - p1) +
+                bits.distance(hi, p2 + (hi - p1), p1 + len - hi);
         }
-        // Blocks k in [first, last) pair with b at kB + p2 - p1 >= -B.
-        const std::uint32_t* diagonal = prefix.data() + std::ptrdiff_t(p2) - std::ptrdiff_t(p1);
-        const std::size_t lo = first * block, hi = last * block;
-        out.write(diagonal[last * diagonal_step] - diagonal[first * diagonal_step] + bits.distance(p1, p2, lo - p1) +
-                      bits.distance(hi, p2 + (hi - p1), p1 + len - hi),
-                  '\n');
+        out += std::to_string(d);
+        out += '\n';
     }
+    std::fwrite(out.data(), 1, out.size(), stdout);
 }

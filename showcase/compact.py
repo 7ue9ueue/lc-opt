@@ -133,12 +133,14 @@ def compact(text: str) -> str:
             flush()
             directive = True
         at_line_start = False
-        if kind == 'str':
-            value = asm.rewrite(value) if not directive else value
+        if kind == 'str' and not directive:
+            value = asm.rewrite(value)
+            pending_space = pending_space or value[0] != '"'
         if pending_space and last and (
                 (WORD.match(last[-1]) and WORD.match(value[0]))
                 or (last[-1] in OPERATORS and value[0] in OPERATORS)
                 or (last[-1] in 'eEpP' and value[0] in '+-')  # 0xE + 1 is not the pp-number 0xE+1
+                or (last[-1] in '"\'' and WORD.match(value[0]))  # "s" X is not a literal with suffix X
                 or directive):
             line.append(' ')
         pending_space = False

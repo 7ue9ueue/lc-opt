@@ -4,7 +4,8 @@ N <= 10^6, a_i, b_i < 998244353; print c_k = sum over lcm(i, j) = k of a_i b_j f
 Large tests: N = 10^6 (max_random), near primes and near prime squares; ~20 MB input, 10 MB output.
 
 Record when opened: 37 ms. Best judged: ours, [409551](https://judge.yosupo.jp/submission/409551),
-14 ms. Earlier: 16 ms, [409237](https://judge.yosupo.jp/submission/409237).
+14 ms; round 4's [409729](https://judge.yosupo.jp/submission/409729) also 14 ms (half the large
+cases at 13). Earlier: 16 ms, [409237](https://judge.yosupo.jp/submission/409237).
 
 ## Design
 
@@ -221,13 +222,25 @@ Record when opened: 37 ms. Best judged: ours, [409551](https://judge.yosupo.jp/s
     `stress.py` 300 rounds, now with range and segment edges (2015 .. 131071) against the
     reference (gcc:15.2.0 image); ASan/UBSan (-O1, x86-64-v3) on all 29 tests, file and pipe
     input, tokens equal to the expected output.
+  - Stage 3's large list as uint8 gaps (383 → 101 KB of `.rodata`), decoded with an AVX2
+    prefix sum into the parser's dead workspace: minflt 444 → 440, zeta -0.055 ms, parse b +0.04
+    (the decode); wall 1.002 (probes 0.988, noisy). Not kept.
+  - PR #356 merged. CI: geomean 0.9605 (EPYC 7763 0.9731 and 0.9563, EPYC 9V74 0.9522).
+- 2026-10-11, claude: submitted the #356 `main.cpp` three times (1/5 to 3/5 of this version).
+  Large cases (max_random 00/01, near_prime 00-02, near_prime_squared 00-02), ms:
+  - [409727](https://judge.yosupo.jp/submission/409727): AC 22 ms, spike on
+    near_prime_squared_01 (`tools/spikes.py`), clean 14; 14 14 14 13 13 13 . 14.
+  - [409729](https://judge.yosupo.jp/submission/409729): AC 14 ms, no spike; 13 14 14 14 13 13 13
+    14 (409551: one of 8 at 13).
+  - [409730](https://judge.yosupo.jp/submission/409730): AC 23 ms, spike on near_prime_02, clean
+    14; 14 14 14 14 . 13 14 13.
+  - The gain (~0.5 ms) is below the judge's 1 ms step; best judged stays 14 ms.
 
 ## Next
 
 - Compute is ~4.2 ms of ~13.3: stage 3 (primes >= 307) takes 1.43 ms of the two sweeps, ~0.82 ns
   per update (one L1 miss each); tiny multipliers 0.86 ms at ~0.5 ns.
-- Stage 3's list as uint8 gaps (95 KB instead of 383 KB of `.rodata`), decoded into the region:
-  ~6 fewer file faults, estimated -0.03 to -0.05 ms.
+- Large cases judge at 13-14 ms; 13 everywhere needs ~0.3-0.5 ms more.
 - I/O (parse 3.4 ms with 1.3 ms of input faults, output 3.9 ms) belongs to `lib/io` and the
   formatter.
 

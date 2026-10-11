@@ -12,34 +12,13 @@
 //   easy::Poly c = easy::interpolate(points, values);  // distinct points
 //   easy::mul(a, b), easy::power(a, e)          // scalars mod P
 //
-// Coefficients are canonical (< 998244353) in and out. An empty f stands for 0. multiply,
-// inverse, exp, log and pow each keep their memory for the largest call so far (never freed), so
-// repeated calls fault in no new pages; evaluate and interpolate map their own and return it.
+// Coefficients are canonical (< 998244353) in and out. An empty f stands for 0. multiply comes
+// from lib/easy/multiply.hpp. inverse, exp, log and pow each keep their memory for the largest
+// call so far (never freed), so repeated calls fault in no new pages; evaluate and interpolate
+// map their own and return it.
 #pragma once
 
-// Every standard header lib/poly uses comes before the target pragma: GCC 13 and 14 fail to
-// inline std::allocator's members into code compiled under it otherwise.
-#include <algorithm>
-#include <array>
-#include <bit>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <limits>
-#include <memory>
-#include <optional>
-#include <span>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
-#pragma GCC target("avx2,bmi,bmi2,lzcnt,popcnt")
-#pragma GCC diagnostic ignored "-Wpsabi"  // AVX vector arguments without -mavx: all callers share the pragma
-
+#include "lib/easy/multiply.hpp"
 #include "lib/poly/evaluation.hpp"
 #include "lib/poly/exp.hpp"
 #include "lib/poly/interpolation.hpp"
@@ -50,35 +29,7 @@
 
 namespace easy {
 
-inline constexpr std::uint32_t kMod = poly::kModulus;
-
-using Poly = std::vector<std::uint32_t>;
-using Span = std::span<const std::uint32_t>;
-
-// a b mod P and a^e mod P, for canonical a, b.
-constexpr std::uint32_t mul(std::uint32_t a, std::uint32_t b) { return std::uint32_t(std::uint64_t(a) * b % kMod); }
-
-constexpr std::uint32_t power(std::uint32_t a, std::uint64_t e) {
-    std::uint32_t r = 1;
-    for (; e; e >>= 1, a = mul(a, a))
-        if (e & 1) r = mul(r, a);
-    return r;
-}
-
 namespace detail {
-
-// Schoolbook product, for a short factor. Sums of 16 products < 16 P^2 < 2^64.
-inline Poly multiply_naive(Span a, Span b) {
-    if (a.size() < b.size()) std::swap(a, b);
-    std::vector<std::uint64_t> sum(a.size() + b.size() - 1);
-    for (std::size_t j0 = 0; j0 < b.size(); j0 += 16) {
-        const std::size_t j1 = std::min(b.size(), j0 + 16);
-        for (std::size_t j = j0; j < j1; ++j)
-            for (std::size_t i = 0; i < a.size(); ++i) sum[i + j] += std::uint64_t(a[i]) * b[j];
-        for (auto& s : sum) s %= kMod;
-    }
-    return Poly(sum.begin(), sum.end());
-}
 
 // Transform tables and K spans kept between calls of one kind, grown to the largest request so
 // far and never shrunk, so repeated calls fault in no new memory. get() zeroes the first
@@ -126,27 +77,6 @@ private:
 };
 
 }  // namespace detail
-
-inline Poly multiply(Span a, Span b) {
-    if (a.empty() || b.empty()) return {};
-    const std::size_t n = a.size() + b.size() - 1;
-    if (std::min(a.size(), b.size()) <= 32 || n <= 64) return detail::multiply_naive(a, b);
-    const int lg = std::max(poly::Transform::kMinLog, int(std::bit_width(n - 1)));
-    const std::size_t len = std::size_t(1) << lg;
-    static detail::Cache<2> cache;
-    const auto [t, spans] = cache.get(lg, {len, len}, false);
-    const auto [x, y] = spans;
-    std::fill(std::copy(a.begin(), a.end(), x.begin()), x.end(), 0);
-    if (a.data() == b.data() && a.size() == b.size()) {  // square: one forward transform
-        t.forward(x);
-        t.inverse_product(x, x, x);
-    } else {
-        std::fill(std::copy(b.begin(), b.end(), y.begin()), y.end(), 0);
-        t.forward(y);
-        t.cyclic_product(x, y);
-    }
-    return Poly(x.begin(), x.begin() + std::ptrdiff_t(n));
-}
 
 inline Poly inverse(Span f, std::size_t n) {
     if (n == 0) return {};

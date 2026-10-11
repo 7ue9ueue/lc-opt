@@ -56,11 +56,15 @@ def main() -> int:
             subprocess.run(['g++', '-O2', '-std=c++23', '-march=native', '-o', work / name, HERE / f'{name}.cpp'],
                            check=True)
         rng = random.Random(1)
+        # Edges of the interleave ranges (2016), the joint Moebius ranges (4096) and the sweep
+        # segments (32768), against the reference.
+        edges = [2015, 2016, 2017, 4095, 4096, 4097, 6048, 32767, 32768, 32769, 65535, 65536, 131071]
         for r in range(rounds):
-            # Every N up to 64 (the scalar edges of each pass), random N up to 3000 against brute.cpp,
-            # and every tenth round N up to 300000 against the reference.
-            large = r % 10 == 9
-            n = r + 1 if r < 64 else rng.randint(30000, 300000) if large else rng.randint(1, 3000)
+            # Every N up to 64 (the scalar edges of each pass), then the edges above, random N up to
+            # 3000 against brute.cpp, and every tenth round N up to 300000 against the reference.
+            large = r % 10 == 9 or 64 <= r < 64 + len(edges)
+            n = (r + 1 if r < 64 else edges[r - 64] if r < 64 + len(edges) else
+                 rng.randint(30000, 300000) if large else rng.randint(1, 3000))
             a, b = values(rng, n), values(rng, n)
             text = f'{n}\n{" ".join(map(str, a))}\n{" ".join(map(str, b))}\n'
             got = subprocess.run([work / 'main'], input=text, capture_output=True, text=True, check=True).stdout
